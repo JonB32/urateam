@@ -1,7 +1,7 @@
 import type { AnyDb } from "../../db/client.js";
 import { pipelineRuns } from "../../db/schema.js";
 import { inArray } from "drizzle-orm";
-import { sql } from "drizzle-orm";
+import { getActiveAndRecentIssueIds } from "./db-queries.js";
 import { resolveWorkflowStates } from "../linear-helpers.js";
 import { createLogger } from "../../logger.js";
 
@@ -76,25 +76,8 @@ export async function recoverStuckInProgressIssues(
     return [];
   }
 
-  // 2. Fetch all active (running or queued) pipeline run issueIds in one DB query
-  const activeRows = await db
-    .select({ issueId: pipelineRuns.issueId })
-    .from(pipelineRuns)
-    .where(sql`${pipelineRuns.status} in ('running', 'queued')`);
-  const activeIssueIds = new Set<string>((activeRows as any[]).map((r) => r.issueId));
-
-  // 2b. Also fetch issues with recently completed/failed runs (within last 30 min)
-  // to avoid recovering issues whose pipeline just finished but Linear state hasn't
-  // propagated yet
-  const recentCutoff = new Date(Date.now() - 30 * 60 * 1000);
-  const recentRows = await db
-    .select({ issueId: pipelineRuns.issueId })
-    .from(pipelineRuns)
-    .where(
-      sql`${pipelineRuns.status} in ('completed', 'failed')
-        AND ${pipelineRuns.completedAt} >= ${recentCutoff}`,
-    );
-  const recentlyProcessed = new Set<string>((recentRows as any[]).map((r) => r.issueId));
+  // 2. Fetch active and recently-processed issue IDs in one shared helper
+  const { activeIssueIds, recentlyProcessed } = await getActiveAndRecentIssueIds(db);
 
   // 3. Identify stuck issues: In Progress in Linear but no active DB run
   // NOTE: DB stores issue.identifier (e.g. "BEC-120"), not issue.id (Linear UUID)
