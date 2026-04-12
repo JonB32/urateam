@@ -1,0 +1,28 @@
+{
+  "name": "@urateam/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "ura": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.0",
+    "@urateam/core": "workspace:*",
+    "@urateam/dashboard": "workspace:*",
+    "@linear/sdk": "^29.0.0",
+    "better-sqlite3": "^11.8.0",
+    "commander": "^13.1.0",
+    "postgres": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^22.0.0",
+    "vitest": "^3.0.0",
+    "typescript": "^5.7.0"
+  }
+}
