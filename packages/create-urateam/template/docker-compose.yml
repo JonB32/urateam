@@ -1,0 +1,28 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: urateam
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: urateam
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  agent:
+    build: .
+    env_file: .env
+    depends_on:
+      - postgres
+    ports:
+      - "3000:3000"
+      - "3001:3001"
+    volumes:
+      - agent-runs:/var/agent-runs
+      - agent-repos:/var/agent-repos
+
+volumes:
+  pgdata:
+  agent-runs:
+  agent-repos:
