@@ -1,0 +1,222 @@
+import { describe, it, expect, vi } from "vitest";
+import { triageNewIssues } from "../pm/actions/triage.js";
+
+function mockLinearClient(issues: any[]) {
+  return {
+    issues: vi.fn().mockResolvedValue({ nodes: issues }),
+    updateIssue: vi.fn().mockResolvedValue({}),
+    createComment: vi.fn().mockResolvedValue({}),
+    issueLabels: vi.fn().mockResolvedValue({
+      nodes: [
+        { id: "lbl-bug", name: "bug" },
+        { id: "lbl-feature", name: "feature" },
+        { id: "lbl-backend", name: "backend" },
+      ],
+    }),
+  };
+}
+
+const defaultStateMap = new Map([["team-1:Backlog", "state-backlog"]]);
+
+function mockClaude(response: string) {
+  return vi.fn().mockResolvedValue(response);
+}
+
+describe("triageNewIssues", () => {
+  it("classifies issue and moves to Backlog", async () => {
+    const client = mockLinearClient([
+      {
+        id: "issue-1",
+        identifier: "BEC-99",
+        title: "Fix login bug",
+        description: "Users can't log in",
+        labels: { nodes: [] },
+        team: { id: "team-1" },
+      },
+    ]);
+    const claudeResponse = JSON.stringify({
+      priority: 2,
+      labels: ["bug", "backend"],
+      complexity: "small",
+      rationale: "Login validation is missing null check",
+      acceptanceCriteria: ["Login form validates null inputs", "Error message shown for empty fields"],
+    });
+    const callClaude = mockClaude(claudeResponse);
+
+    const results = await triageNewIssues({
+      linearClient: client as any,
+      teamIds: ["team-1"],
+      callClaude,
+      sanitize: (s: string) => s,
+      stateMap: defaultStateMap,
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0].issueId).toBe("BEC-99");
+    expect(results[0].priority).toBe(2);
+    expect(results[0].labels).toEqual(["bug", "backend"]); // "bug" maps to "bug" pipeline (no dup)
+    expect(results[0].acceptanceCriteria).toEqual(["Login form validates null inputs", "Error message shown for empty fields"]);
+    expect(client.updateIssue).toHaveBeenCalledWith("issue-1", expect.objectContaining({
+      priority: 2,
+      description: expect.stringContaining("**Acceptance Criteria:**"),
+    }));
+    expect(client.createComment).toHaveBeenCalled();
+  });
+
+  it("skips issue on invalid Claude JSON", async () => {
+    const client = mockLinearClient([
+      {
+        id: "issue-2",
+        identifier: "BEC-100",
+        title: "Add feature",
+        description: "Some desc",
+        labels: { nodes: [] },
+        team: { id: "team-1" },
+      },
+    ]);
+    const callClaude = mockClaude("not valid json at all");
+
+    const results = await triageNewIssues({
+      linearClient: client as any,
+      teamIds: ["team-1"],
+      callClaude,
+      sanitize: (s: string) => s,
+      stateMap: defaultStateMap,
+    });
+
+    expect(results).toHaveLength(0);
+    expect(client.updateIssue).not.toHaveBeenCalled();
+  });
+
+  it("caps at 10 issues per tick", async () => {
+    const issues = Array.from({ length: 15 }, (_, i) => ({
+      id: `issue-${i}`,
+      identifier: `BEC-${i}`,
+      title: `Issue ${i}`,
+      description: `Desc ${i}`,
+      labels: { nodes: [] },
+      team: { id: "team-1" },
+    }));
+    const client = mockLinearClient(issues);
+    const claudeResponse = JSON.stringify({
+      priority: 3, labels: ["feature"], complexity: "small", rationale: "test", acceptanceCriteria: ["test criterion"],
+    });
+    const callClaude = mockClaude(claudeResponse);
+
+    const results = await triageNewIssues({
+      linearClient: client as any,
+      teamIds: ["team-1"],
+      callClaude,
+      sanitize: (s: string) => s,
+      stateMap: defaultStateMap,
+    });
+
+    expect(results.length).toBeLessThanOrEqual(10);
+    expect(callClaude).toHaveBeenCalledTimes(10);
+  });
+
+  it("processes issues in batches of batchSize", async () => {
+    const callOrder: number[] = [];
+    const resolvers: Array<() => void> = [];
+
+    // 6 issues, batchSize=2 → 3 batches
+    const issues = Array.from({ length: 6 }, (_, i) => ({
+      id: `issue-${i}`,
+      identifier: `BEC-${200 + i}`,
+      title: `Issue ${i}`,
+      description: `Desc ${i}`,
+      labels: { nodes: [] },
+      team: { id: "team-1" },
+    }));
+    const client = mockLinearClient(issues);
+
+    const claudeResponse = JSON.stringify({
+      priority: 3, labels: ["feature"], complexity: "small", rationale: "test", acceptanceCriteria: ["criterion"],
+    });
+
+    // Track call order to verify batching
+    let callCount = 0;
+    const callClaude = vi.fn().mockImplementation(async () => {
+      callOrder.push(callCount++);
+      return claudeResponse;
+    });
+
+    const results = await triageNewIssues({
+      linearClient: client as any,
+      teamIds: ["team-1"],
+      callClaude,
+      sanitize: (s: string) => s,
+      batchSize: 2,
+      stateMap: defaultStateMap,
+    });
+
+    expect(results).toHaveLength(6);
+    expect(callClaude).toHaveBeenCalledTimes(6);
+  });
+
+  it("uses default batch size of 3 when not specified", async () => {
+    const issues = Array.from({ length: 6 }, (_, i) => ({
+      id: `issue-${i}`,
+      identifier: `BEC-${300 + i}`,
+      title: `Issue ${i}`,
+      description: `Desc ${i}`,
+      labels: { nodes: [] },
+      team: { id: "team-1" },
+    }));
+    const client = mockLinearClient(issues);
+    const claudeResponse = JSON.stringify({
+      priority: 3, labels: ["feature"], complexity: "small", rationale: "test", acceptanceCriteria: ["criterion"],
+    });
+    const callClaude = mockClaude(claudeResponse);
+
+    // No batchSize specified — defaults to 3
+    const results = await triageNewIssues({
+      linearClient: client as any,
+      teamIds: ["team-1"],
+      callClaude,
+      sanitize: (s: string) => s,
+      stateMap: defaultStateMap,
+    });
+
+    expect(results).toHaveLength(6);
+    expect(callClaude).toHaveBeenCalledTimes(6);
+  });
+
+  it("skips rate-limited issues and continues with remaining batches", async () => {
+    const issues = Array.from({ length: 4 }, (_, i) => ({
+      id: `issue-${i}`,
+      identifier: `BEC-${400 + i}`,
+      title: `Issue ${i}`,
+      description: `Desc ${i}`,
+      labels: { nodes: [] },
+      team: { id: "team-1" },
+    }));
+    const client = mockLinearClient(issues);
+    const claudeResponse = JSON.stringify({
+      priority: 2, labels: ["bug"], complexity: "small", rationale: "rate limit test", acceptanceCriteria: ["criterion"],
+    });
+
+    let callCount = 0;
+    const callClaude = vi.fn().mockImplementation(async () => {
+      callCount++;
+      // Simulate rate limit error on the 2nd call
+      if (callCount === 2) {
+        throw new Error("429 Too Many Requests: Claude API rate limit exceeded");
+      }
+      return claudeResponse;
+    });
+
+    const results = await triageNewIssues({
+      linearClient: client as any,
+      teamIds: ["team-1"],
+      callClaude,
+      sanitize: (s: string) => s,
+      batchSize: 2,
+      stateMap: defaultStateMap,
+    });
+
+    // Issue 2 (index 1) is skipped due to rate limit error; others succeed
+    expect(results).toHaveLength(3);
+    expect(callClaude).toHaveBeenCalledTimes(4);
+  });
+});

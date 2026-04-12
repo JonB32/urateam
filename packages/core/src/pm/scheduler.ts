@@ -1,0 +1,399 @@
+import type { PmAgentConfig, TickResult, BudgetGuardResult } from "./types.js";
+import { checkBudgetGuards, type BudgetGuardInput } from "./budget.js";
+import { triageNewIssues, type TriageInput } from "./actions/triage.js";
+import { promoteReadyIssues, type PromoteInput } from "./actions/promote.js";
+import { deprioritizeStaleIssues, type DeprioritizeInput } from "./actions/deprioritize.js";
+import { cancelAbandonedIssues, type CancelInput } from "./actions/cancel.js";
+import { resolveApprovals, type ResolveApprovalsInput, type ResolveApprovalsResult } from "./actions/resolve-approvals.js";
+import { recoverRetriableRuns, type RecoverResult } from "./actions/recover.js";
+import { recoverStuckInProgressIssues, type StuckIssueResult } from "./actions/recover-stuck.js";
+import { startTodoIssues, type StartTodoInput, type StartTodoResult } from "./actions/start-todo.js";
+import { getActiveFileMaps, predictConflict, type ActiveRun } from "./conflict.js";
+import { PmSlackNotifier } from "./slack.js";
+import { isPmPaused } from "./slack-interface.js";
+import type { Db, AnyDb } from "../db/client.js";
+import { isPostgres } from "../db/client.js";
+import { pipelineRuns } from "../db/schema.js";
+import { makeCallClaude } from "./call-claude.js";
+import { sanitize } from "../executor/prompt/sanitizer.js";
+import { resolveWorkflowStates } from "./linear-helpers.js";
+import { sql } from "drizzle-orm";
+import { createLogger } from "../logger.js";
+
+const log = createLogger({ component: "PmAgent:scheduler" });
+
+export interface PmSchedulerDeps {
+  config: PmAgentConfig;
+  db: Db;
+  linearApiKey: string;
+  slackBotToken: string;
+  repoCloneDir?: string;
+  defaultBranch?: string;
+  runner?: {
+    resume: (issueId: string) => Promise<void>;
+    start: (issue: any, pipelineKey: string, pipelineConfig: any, repoConfig: any, sanitizedIssue: any) => Promise<void>;
+  };
+  pipelineConfigs?: Record<string, any>;
+  repoConfigs?: Record<string, any>;
+  actions?: Partial<PmSchedulerActions>;
+}
+
+interface PmSchedulerActions {
+  checkBudgetGuards: (input: BudgetGuardInput) => Promise<BudgetGuardResult>;
+  recoverRetriableRuns: (input: any) => Promise<RecoverResult>;
+  recoverStuckInProgressIssues?: (input: any) => Promise<StuckIssueResult[]>;
+  startTodoIssues?: (input: StartTodoInput) => Promise<StartTodoResult[]>;
+  triageNewIssues: (input: TriageInput) => Promise<any[]>;
+  resolveApprovals: (input: ResolveApprovalsInput) => Promise<ResolveApprovalsResult>;
+  promoteReadyIssues: (input: PromoteInput) => Promise<any[]>;
+  deprioritizeStaleIssues: (input: DeprioritizeInput) => Promise<string[]>;
+  cancelAbandonedIssues: (input: CancelInput) => Promise<string[]>;
+  postDigest: (tick: TickResult, maxInFlight: number) => Promise<void>;
+  getActiveFileMaps: typeof getActiveFileMaps;
+  predictConflict: typeof predictConflict;
+}
+
+export interface PmScheduler {
+  tick(): Promise<void>;
+}
+
+export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
+  const actions = deps.actions as PmSchedulerActions | undefined;
+
+  let linearClient: any = null;
+  let slackNotifier: PmSlackNotifier | null = null;
+  const callClaudeFn = makeCallClaude();
+
+  async function getLinearClient() {
+    if (!linearClient && deps.linearApiKey) {
+      const { LinearClient } = await import("@linear/sdk");
+      linearClient = new LinearClient({ apiKey: deps.linearApiKey });
+    }
+    return linearClient;
+  }
+
+  function getSlackNotifier(): PmSlackNotifier {
+    if (!slackNotifier) {
+      slackNotifier = new PmSlackNotifier({
+        botToken: deps.slackBotToken,
+        channelId: deps.config.slackChannelId,
+      });
+    }
+    return slackNotifier;
+  }
+
+  async function tryAcquireLock(): Promise<boolean> {
+    if (!isPostgres(deps.db)) return true;
+    try {
+      const result = await (deps.db as any).execute(
+        sql`SELECT pg_try_advisory_lock(hashtext('pm-agent-tick')) as acquired`,
+      );
+      return result?.[0]?.acquired === true;
+    } catch (err) {
+      log.warn({ err }, "advisory lock check failed, proceeding anyway");
+      return true;
+    }
+  }
+
+  async function releaseLock(): Promise<void> {
+    if (!isPostgres(deps.db)) return;
+    try {
+      await (deps.db as any).execute(
+        sql`SELECT pg_advisory_unlock(hashtext('pm-agent-tick'))`,
+      );
+    } catch {
+      // Best effort
+    }
+  }
+
+  return {
+    async tick() {
+      const acquired = await tryAcquireLock();
+      if (!acquired) {
+        log.info("another tick is running, skipping");
+        return;
+      }
+
+      try {
+        const tick: TickResult = {
+          triaged: [],
+          promoted: [],
+          approvalsResolved: 0,
+          approvalsPending: 0,
+          deprioritizeRequested: [],
+          cancelRequested: [],
+          errors: [],
+          budgetGuard: { promoteBlocked: false, activeCount: 0, tokenSpendPercent: 0, dailyTokensUsed: 0 },
+        };
+
+        const db = deps.db as AnyDb;
+        const config = deps.config;
+
+        try {
+          tick.budgetGuard = actions
+            ? await actions.checkBudgetGuards({ db, maxInFlight: config.maxInFlight, dailyTokenBudget: config.dailyTokenBudget })
+            : await checkBudgetGuards({ db, maxInFlight: config.maxInFlight, dailyTokenBudget: config.dailyTokenBudget });
+        } catch (err) {
+          log.error({ err }, "budget check failed");
+          tick.errors.push(`budget: ${(err as Error).message}`);
+        }
+
+        // --- Recovery sweep: requeue retriable (transient-failure) runs ---
+        try {
+          const recoveryResult = actions
+            ? await actions.recoverRetriableRuns({} as any)
+            : await recoverRetriableRuns({
+                db: deps.db as any,
+                runner: deps.runner ?? { resume: async () => { log.warn("no runner configured for recovery"); } },
+                maxRetries: 3,
+              });
+          if (recoveryResult.recovered.length > 0) {
+            log.info({ recovered: recoveryResult.recovered }, "recovered retriable runs");
+          }
+          if (recoveryResult.exhausted.length > 0) {
+            log.warn({ exhausted: recoveryResult.exhausted }, "retriable runs exhausted max retries");
+          }
+        } catch (err) {
+          log.error({ err }, "recovery sweep failed");
+          tick.errors.push(`recover: ${(err as Error).message}`);
+        }
+
+        // --- Stuck In Progress issue recovery sweep ---
+        if (config.stuckIssueRecovery !== false) {
+          try {
+            const stuckResult = actions?.recoverStuckInProgressIssues
+              ? await actions.recoverStuckInProgressIssues({} as any)
+              : await recoverStuckInProgressIssues({
+                  linearClient: await getLinearClient(),
+                  db,
+                  teamIds: config.teamIds,
+                  targetState: config.stuckIssueTargetState ?? "Backlog",
+                  maxPerTick: config.stuckIssueMaxPerTick ?? 5,
+                  postSlackNotification: (issues) =>
+                    getSlackNotifier().postStuckIssueRecovered(issues),
+                  // stateMap is not yet resolved here; recoverStuckInProgressIssues will
+                  // fetch it internally if not provided
+                });
+            if (stuckResult.length > 0) {
+              tick.recoveredStuckIssues = stuckResult.map((r) => r.identifier);
+              log.info(
+                { recovered: tick.recoveredStuckIssues },
+                "auto-recovered stuck In Progress issues",
+              );
+            }
+          } catch (err) {
+            log.error({ err }, "stuck issue recovery sweep failed");
+            tick.errors.push(`recoverStuck: ${(err as Error).message}`);
+          }
+        }
+
+        // --- Start pipelines for orphaned Todo issues ---
+        if (deps.runner?.start && deps.pipelineConfigs && deps.repoConfigs) {
+          try {
+            const slotsAvailable = config.maxInFlight - (tick.budgetGuard.activeCount ?? 0);
+            if (slotsAvailable > 0 && !tick.budgetGuard.promoteBlocked) {
+              const todoResults = actions?.startTodoIssues
+                ? await actions.startTodoIssues({} as any)
+                : await startTodoIssues({
+                    linearClient: await getLinearClient(),
+                    db: deps.db as AnyDb,
+                    teamIds: config.teamIds,
+                    runner: deps.runner as any,
+                    pipelineConfigs: deps.pipelineConfigs,
+                    repoConfigs: deps.repoConfigs,
+                    maxPerTick: slotsAvailable,
+                  });
+              const started = todoResults.filter((r) => r.started);
+              if (started.length > 0) {
+                tick.startedTodoIssues = todoResults;
+                log.info({ startedCount: started.length }, "started pipelines for orphaned Todo issues");
+              }
+            }
+          } catch (err) {
+            log.error({ err }, "startTodoIssues failed");
+            tick.errors.push(`startTodo: ${(err as Error).message}`);
+          }
+        }
+
+        // Fetch workflow states once per tick to avoid redundant Linear API round-trips
+        let stateMap = new Map<string, string>();
+        if (!actions) {
+          try {
+            stateMap = await resolveWorkflowStates(await getLinearClient(), config.teamIds);
+          } catch (err) {
+            log.error({ err }, "resolveWorkflowStates failed");
+            tick.errors.push(`resolveWorkflowStates: ${(err as Error).message}`);
+          }
+        }
+
+        try {
+          tick.triaged = actions
+            ? await actions.triageNewIssues({} as any)
+            : await triageNewIssues({
+                linearClient: await getLinearClient(),
+                teamIds: config.teamIds,
+                callClaude: callClaudeFn,
+                sanitize,
+                batchSize: config.triageBatchSize,
+                stateMap,
+              });
+        } catch (err) {
+          log.error({ err }, "triage failed");
+          tick.errors.push(`triage: ${(err as Error).message}`);
+        }
+
+        try {
+          const approvalResult = actions
+            ? await actions.resolveApprovals({} as any)
+            : await resolveApprovals({
+                linearClient: await getLinearClient(),
+                slackNotifier: getSlackNotifier(),
+                db,
+                teamIds: config.teamIds,
+                stateMap,
+              });
+          tick.approvalsResolved = approvalResult.resolved;
+          tick.approvalsPending = approvalResult.stillPending;
+        } catch (err) {
+          log.error({ err }, "resolve approvals failed");
+          tick.errors.push(`resolveApprovals: ${(err as Error).message}`);
+        }
+
+        if (isPmPaused()) {
+          tick.paused = true;
+          log.info("PM Agent is paused — skipping promote, deprioritize, and cancel");
+        }
+
+        if (!tick.budgetGuard.promoteBlocked && !isPmPaused()) {
+          try {
+            const slotsAvailable = config.maxInFlight - tick.budgetGuard.activeCount;
+
+            if (actions) {
+              tick.promoted = await actions.promoteReadyIssues({} as any);
+            } else {
+              const activeRuns = await getActiveRunsFromDb(db);
+              const baseDir = deps.repoCloneDir ?? "/var/agent-repos";
+              const defaultBranch = deps.defaultBranch ?? "main";
+
+              // Find the first cloned repo directory (runner clones to <repoCloneDir>/<slug>/)
+              let repoDir = baseDir;
+              try {
+                const { readdirSync, statSync } = await import("node:fs");
+                const entries = readdirSync(baseDir);
+                for (const entry of entries) {
+                  const candidate = `${baseDir}/${entry}`;
+                  try {
+                    if (statSync(`${candidate}/.git`).isDirectory()) {
+                      repoDir = candidate;
+                      break;
+                    }
+                  } catch { /* not a git repo */ }
+                }
+              } catch {
+                log.warn("could not scan repoCloneDir for git repos");
+              }
+
+              const fileMaps = await getActiveFileMaps({
+                activeRuns,
+                defaultBranch,
+                repoDir,
+                execGit: (await import("../repo/git.js")).gitExec,
+              });
+
+              tick.promoted = await promoteReadyIssues({
+                linearClient: await getLinearClient(),
+                teamIds: config.teamIds,
+                slotsAvailable,
+                checkConflict: (description: string) =>
+                  predictConflict({ candidateDescription: description, activeFileMaps: fileMaps, callClaude: callClaudeFn, sanitize }),
+                stateMap,
+              });
+            }
+          } catch (err) {
+            log.error({ err }, "promote failed");
+            tick.errors.push(`promote: ${(err as Error).message}`);
+          }
+        }
+
+        if (!isPmPaused()) {
+          const linearClient = await getLinearClient();
+          const slackNotifier = getSlackNotifier();
+
+          const [depResult, cancelResult] = await Promise.allSettled([
+            actions
+              ? actions.deprioritizeStaleIssues({} as any)
+              : deprioritizeStaleIssues({
+                  linearClient,
+                  teamIds: config.teamIds,
+                  slackNotifier,
+                  db,
+                  staleDays: 14,
+                  minPriority: 3,
+                }),
+            actions
+              ? actions.cancelAbandonedIssues({} as any)
+              : cancelAbandonedIssues({
+                  linearClient,
+                  teamIds: config.teamIds,
+                  slackNotifier,
+                  db,
+                  abandonedDays: 30,
+                }),
+          ]);
+
+          if (depResult.status === "fulfilled") {
+            tick.deprioritizeRequested = depResult.value;
+          } else {
+            log.error({ err: depResult.reason }, "deprioritize failed");
+            tick.errors.push(`deprioritize: ${(depResult.reason as Error).message}`);
+          }
+
+          if (cancelResult.status === "fulfilled") {
+            tick.cancelRequested = cancelResult.value;
+          } else {
+            log.error({ err: cancelResult.reason }, "cancel failed");
+            tick.errors.push(`cancel: ${(cancelResult.reason as Error).message}`);
+          }
+        }
+
+        try {
+          if (actions) {
+            await actions.postDigest(tick, config.maxInFlight);
+          } else {
+            await getSlackNotifier().postDigest(tick, config.maxInFlight);
+          }
+        } catch (err) {
+          log.error({ err }, "digest failed");
+        }
+
+      log.info({
+        triaged: tick.triaged.length,
+        promoted: tick.promoted.filter((p) => p.promoted).length,
+        errors: tick.errors.length,
+      }, "tick complete");
+      } finally {
+        await releaseLock();
+      }
+    },
+  };
+}
+
+async function getActiveRunsFromDb(db: AnyDb): Promise<ActiveRun[]> {
+  try {
+    const rows = await db
+      .select({
+        issueId: pipelineRuns.issueId,
+        branch: pipelineRuns.branch,
+      })
+      .from(pipelineRuns)
+      .where(
+        sql`${pipelineRuns.status} in ('queued', 'running')`,
+      );
+
+    return rows
+      .filter((r: any) => r.branch)
+      .map((r: any) => ({ issueId: r.issueId, branch: r.branch }));
+  } catch {
+    return [];
+  }
+}
