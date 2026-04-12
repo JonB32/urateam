@@ -1,6 +1,10 @@
 {
   "name": "urateam",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JonB32/urateam.git"
+  },
   "scripts": {
     "build": "turbo build",
     "test": "turbo test",

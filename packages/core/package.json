@@ -4,6 +4,12 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JonB32/urateam.git",
+    "directory": "packages/core"
+  },
   "scripts": {
     "build": "tsc && node --input-type=module -e \"import{cpSync}from'node:fs';cpSync('src/db/migrations','dist/db/migrations',{recursive:true})\"",
     "test": "vitest run",

@@ -2,8 +2,16 @@
   "name": "@urateam/cli",
   "version": "0.1.0",
   "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
     "ura": "dist/index.js"
+  },
+  "files": ["dist"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JonB32/urateam.git",
+    "directory": "packages/cli"
   },
   "scripts": {
     "build": "tsc",
