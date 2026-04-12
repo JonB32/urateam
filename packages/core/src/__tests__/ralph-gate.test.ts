@@ -33,6 +33,7 @@ import type {
   ReviewFinding,
 } from "../types.js";
 import type { DeepReviewFinding } from "../executor/deep-review.js";
+import { _resetLicenseCache } from "../license.js";
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -370,6 +371,10 @@ describe("RALPH gate and draft PR behavior", () => {
   }>;
 
   beforeEach(async () => {
+    // Enable commercial features for tests that exercise them
+    process.env.URATEAM_LICENSE_KEY = "test-license-key";
+    _resetLicenseCache();
+
     // Reset all mocks to known state
     mockCheckRequirements
       .mockReset()

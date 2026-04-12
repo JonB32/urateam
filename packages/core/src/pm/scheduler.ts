@@ -11,6 +11,7 @@ import { startTodoIssues, type StartTodoInput, type StartTodoResult } from "./ac
 import { getActiveFileMaps, predictConflict, type ActiveRun } from "./conflict.js";
 import { PmSlackNotifier } from "./slack.js";
 import { isPmPaused } from "./slack-interface.js";
+import { isFeatureLicensed } from "../license.js";
 import type { Db, AnyDb } from "../db/client.js";
 import { isPostgres } from "../db/client.js";
 import { pipelineRuns } from "../db/schema.js";
@@ -300,12 +301,17 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                 execGit: (await import("../repo/git.js")).gitExec,
               });
 
+              const checkConflict = isFeatureLicensed("conflict-detection")
+                ? (description: string) =>
+                    predictConflict({ candidateDescription: description, activeFileMaps: fileMaps, callClaude: callClaudeFn, sanitize })
+                : async (_description: string) =>
+                    ({ overlapRisk: "none" as const, likelyFiles: [] as string[], reasoning: "conflict detection requires license" });
+
               tick.promoted = await promoteReadyIssues({
                 linearClient: await getLinearClient(),
                 teamIds: config.teamIds,
                 slotsAvailable,
-                checkConflict: (description: string) =>
-                  predictConflict({ candidateDescription: description, activeFileMaps: fileMaps, callClaude: callClaudeFn, sanitize }),
+                checkConflict,
                 stateMap,
               });
             }
@@ -315,7 +321,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           }
         }
 
-        if (!isPmPaused()) {
+        if (!isPmPaused() && isFeatureLicensed("approval-workflows")) {
           const linearClient = await getLinearClient();
           const slackNotifier = getSlackNotifier();
 

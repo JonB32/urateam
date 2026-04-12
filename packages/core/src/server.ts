@@ -10,6 +10,10 @@ import { DiscordNotifier } from "./notifier/discord.js";
 import type { PipelineConfig, RepoConfig, TriggerMap } from "./types.js";
 import type { GitHubConfig } from "./repo/github.js";
 import type { GitLabConfig } from "./repo/gitlab.js";
+import { isFeatureLicensed, checkLicense } from "./license.js";
+import { createLogger } from "./logger.js";
+
+const log = createLogger({ component: "server" });
 
 export interface PmSlackInterfaceConfig {
   /** Slack signing secret for verifying inbound requests */
@@ -49,6 +53,18 @@ export interface ServerConfig {
 
 export async function createApp(config: ServerConfig) {
   const app = new Hono();
+
+  const license = checkLicense();
+  log.info({ tier: license.tier, licensed: license.licensed }, "license status");
+
+  if (Object.keys(config.repoConfigs).length > 1 && !isFeatureLicensed("multi-repo")) {
+    log.warn(
+      { configuredRepos: Object.keys(config.repoConfigs).length },
+      "multi-repo requires a license — only the first repo config will be used",
+    );
+    const firstKey = Object.keys(config.repoConfigs)[0];
+    config.repoConfigs = { [firstKey]: config.repoConfigs[firstKey] };
+  }
 
   // Database — auto-detects driver from URL
   const db = await createDb({

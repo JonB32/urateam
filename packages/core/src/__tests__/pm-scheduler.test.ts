@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createPmScheduler } from "../pm/scheduler.js";
+import { _resetLicenseCache } from "../license.js";
 
 describe("PmScheduler.tick", () => {
   const mockActions = {
@@ -43,6 +44,8 @@ describe("PmScheduler.tick", () => {
   }
 
   beforeEach(() => {
+    process.env.URATEAM_LICENSE_KEY = "test-license-key";
+    _resetLicenseCache();
     vi.clearAllMocks();
   });
 

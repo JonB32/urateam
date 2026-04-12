@@ -13,6 +13,7 @@ import type { Db, AnyDb } from "../db/client.js";
 import { pipelineRuns } from "../db/schema.js";
 import { executeStage } from "../executor/executor.js";
 import { validateHandoff } from "../executor/validate.js";
+import { isFeatureLicensed } from "../license.js";
 import { checkRequirements, buildRalphContext } from "../executor/ralph.js";
 import { checkTestQuality } from "../executor/test-quality.js";
 import {
@@ -759,7 +760,10 @@ export class PipelineRunner {
       let ralphSatisfied = true;
       let ralphGaps: string[] = [];
       let ralphSuggestions: string[] = [];
-      const ralphIterations = config.ralphIterations ?? 2;
+      const effectiveRalphIterations = isFeatureLicensed("deep-review")
+        ? config.ralphIterations ?? 2
+        : Math.min(config.ralphIterations ?? 1, 1);
+      const ralphIterations = effectiveRalphIterations;
 
       // Execute each stage
       runLog.info({ stages: stagesToRun }, "starting pipeline stages");
@@ -1316,7 +1320,10 @@ export class PipelineRunner {
       // run 3 parallel sub-agents (reuse, quality, efficiency) to harden code
       // quality. Configurable via deepReviewPasses (default 0/disabled) and
       // maxDeepReviewPasses (hard cap, default 3).
-      const deepReviewPasses = config.deepReviewPasses ?? 0;
+      const effectiveDeepReviewPasses = isFeatureLicensed("deep-review")
+        ? config.deepReviewPasses ?? 0
+        : 0;
+      const deepReviewPasses = effectiveDeepReviewPasses;
       const maxDeepReviewPasses = config.maxDeepReviewPasses ?? 3;
       const hasReview = config.stages.includes("review");
       const hasImplement = config.stages.includes("implement");
