@@ -1,4 +1,5 @@
 export * from "./types.js";
+export { checkLicense, isFeatureLicensed, type LicenseStatus } from "./license.js";
 export { rootLogger, createLogger, addLogStream } from "./logger.js";
 export { createDb, isPostgres, sqlDateGroup, sqlDaysAgoFilter, type Db } from "./db/index.js";
 export { pipelineRuns, stageRuns, agentLogs, activeWork, pmApprovals } from "./db/index.js";
