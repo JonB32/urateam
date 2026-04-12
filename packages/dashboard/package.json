@@ -1,0 +1,21 @@
+{
+  "name": "@urateam/dashboard",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "dev": "tsx watch src/server.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.0",
+    "@urateam/core": "workspace:*",
+    "drizzle-orm": "^0.38.0",
+    "hono": "^4.7.0"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0",
+    "typescript": "^5.7.0"
+  }
+}
