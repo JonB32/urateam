@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { mkdirSync, writeFileSync, copyFileSync, readFileSync, readdirSync, statSync } from "fs";
+import { mkdirSync, writeFileSync, cpSync, readFileSync, statSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { randomBytes } from "crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -13,19 +14,6 @@ export interface ScaffoldOptions {
   linearTeamId: string;
   repoUrl: string;
   defaultBranch: string;
-}
-
-function copyDirRecursive(src: string, dest: string): void {
-  mkdirSync(dest, { recursive: true });
-  for (const entry of readdirSync(src)) {
-    const srcPath = join(src, entry);
-    const destPath = join(dest, entry);
-    if (statSync(srcPath).isDirectory()) {
-      copyDirRecursive(srcPath, destPath);
-    } else {
-      copyFileSync(srcPath, destPath);
-    }
-  }
 }
 
 /**
@@ -42,7 +30,7 @@ export function scaffold(options: ScaffoldOptions): void {
   if (!statSync(templateDir, { throwIfNoEntry: false })?.isDirectory()) {
     templateDir = join(__dirname, "..", "..", "template");
   }
-  copyDirRecursive(templateDir, projectDir);
+  cpSync(templateDir, projectDir, { recursive: true });
 
   // Write package.json
   const pkg = {
@@ -69,7 +57,7 @@ export function scaffold(options: ScaffoldOptions): void {
     `REPO_TEAM_ID=${linearTeamId}`,
     `DATABASE_URL=postgres://urateam:password@postgres:5432/urateam`,
     `DASHBOARD_USER=admin`,
-    `DASHBOARD_PASSWORD=changeme`,
+    `DASHBOARD_PASSWORD=${randomBytes(16).toString("hex")}`,
   ].join("\n") + "\n";
   writeFileSync(join(projectDir, ".env"), envContent);
 

@@ -159,6 +159,17 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           tick.errors.push(`recover: ${(err as Error).message}`);
         }
 
+        // Fetch workflow states once per tick to avoid redundant Linear API round-trips
+        let stateMap = new Map<string, string>();
+        if (!actions) {
+          try {
+            stateMap = await resolveWorkflowStates(await getLinearClient(), config.teamIds);
+          } catch (err) {
+            log.error({ err }, "resolveWorkflowStates failed");
+            tick.errors.push(`resolveWorkflowStates: ${(err as Error).message}`);
+          }
+        }
+
         // --- Stuck In Progress issue recovery sweep ---
         if (config.stuckIssueRecovery !== false) {
           try {
@@ -170,10 +181,9 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                   teamIds: config.teamIds,
                   targetState: config.stuckIssueTargetState ?? "Backlog",
                   maxPerTick: config.stuckIssueMaxPerTick ?? 5,
+                  stateMap,
                   postSlackNotification: (issues) =>
                     getSlackNotifier().postStuckIssueRecovered(issues),
-                  // stateMap is not yet resolved here; recoverStuckInProgressIssues will
-                  // fetch it internally if not provided
                 });
             if (stuckResult.length > 0) {
               tick.recoveredStuckIssues = stuckResult.map((r) => r.identifier);
@@ -188,10 +198,12 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           }
         }
 
+        // Compute available slots once for both startTodo and promote
+        const slotsAvailable = config.maxInFlight - (tick.budgetGuard.activeCount ?? 0);
+
         // --- Start pipelines for orphaned Todo issues ---
         if (deps.runner?.start && deps.pipelineConfigs && deps.repoConfigs) {
           try {
-            const slotsAvailable = config.maxInFlight - (tick.budgetGuard.activeCount ?? 0);
             if (slotsAvailable > 0 && !tick.budgetGuard.promoteBlocked) {
               const todoResults = actions?.startTodoIssues
                 ? await actions.startTodoIssues({} as any)
@@ -213,17 +225,6 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           } catch (err) {
             log.error({ err }, "startTodoIssues failed");
             tick.errors.push(`startTodo: ${(err as Error).message}`);
-          }
-        }
-
-        // Fetch workflow states once per tick to avoid redundant Linear API round-trips
-        let stateMap = new Map<string, string>();
-        if (!actions) {
-          try {
-            stateMap = await resolveWorkflowStates(await getLinearClient(), config.teamIds);
-          } catch (err) {
-            log.error({ err }, "resolveWorkflowStates failed");
-            tick.errors.push(`resolveWorkflowStates: ${(err as Error).message}`);
           }
         }
 
@@ -267,8 +268,6 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
 
         if (!tick.budgetGuard.promoteBlocked && !isPmPaused()) {
           try {
-            const slotsAvailable = config.maxInFlight - tick.budgetGuard.activeCount;
-
             if (actions) {
               tick.promoted = await actions.promoteReadyIssues({} as any);
             } else {

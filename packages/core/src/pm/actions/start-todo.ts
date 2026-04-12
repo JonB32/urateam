@@ -1,6 +1,5 @@
 import type { AnyDb } from "../../db/client.js";
-import { pipelineRuns } from "../../db/schema.js";
-import { sql } from "drizzle-orm";
+import { getActiveAndRecentIssueIds } from "./db-queries.js";
 import { resolvePipeline } from "../../pipeline/router.js";
 import { mapIssueToSchema } from "../../executor/prompt/schema-mapper.js";
 import type { PipelineConfig, RepoConfig } from "../../types.js";
@@ -54,12 +53,8 @@ export async function startTodoIssues(
     return [];
   }
 
-  // 2. Fetch all active (running or queued) pipeline run issueIds
-  const activeRows = await db
-    .select({ issueId: pipelineRuns.issueId })
-    .from(pipelineRuns)
-    .where(sql`${pipelineRuns.status} in ('running', 'queued')`);
-  const activeIssueIds = new Set<string>((activeRows as any[]).map((r) => r.issueId));
+  // 2. Fetch active and recently-processed issue IDs in one shared helper
+  const { activeIssueIds, recentlyProcessed } = await getActiveAndRecentIssueIds(db);
 
   // 3. Filter to orphaned issues (in Todo but no active pipeline run)
   // NOTE: DB stores issue.identifier (e.g. "BEC-120"), not issue.id (Linear UUID)
@@ -71,17 +66,6 @@ export async function startTodoIssues(
   }
 
   // 3b. Skip issues with recently completed/failed runs (within last 30 min)
-  const orphanedIdentifiers = orphaned.map((i: any) => i.identifier);
-  const recentCutoff = new Date(Date.now() - 30 * 60 * 1000);
-  const recentRuns = await db
-    .select({ issueId: pipelineRuns.issueId })
-    .from(pipelineRuns)
-    .where(
-      sql`${pipelineRuns.issueId} in (${sql.join(orphanedIdentifiers.map((id: string) => sql`${id}`), sql`, `)})
-        AND ${pipelineRuns.status} in ('completed', 'failed')
-        AND ${pipelineRuns.completedAt} >= ${recentCutoff}`,
-    );
-  const recentlyProcessed = new Set<string>((recentRuns as any[]).map((r) => r.issueId));
   const filteredOrphaned = orphaned.filter((issue: any) => {
     if (recentlyProcessed.has(issue.identifier)) {
       log.info(
