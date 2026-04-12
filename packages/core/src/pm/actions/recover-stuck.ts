@@ -83,9 +83,25 @@ export async function recoverStuckInProgressIssues(
     .where(sql`${pipelineRuns.status} in ('running', 'queued')`);
   const activeIssueIds = new Set<string>((activeRows as any[]).map((r) => r.issueId));
 
+  // 2b. Also fetch issues with recently completed/failed runs (within last 30 min)
+  // to avoid recovering issues whose pipeline just finished but Linear state hasn't
+  // propagated yet
+  const recentCutoff = new Date(Date.now() - 30 * 60 * 1000);
+  const recentRows = await db
+    .select({ issueId: pipelineRuns.issueId })
+    .from(pipelineRuns)
+    .where(
+      sql`${pipelineRuns.status} in ('completed', 'failed')
+        AND ${pipelineRuns.completedAt} >= ${recentCutoff}`,
+    );
+  const recentlyProcessed = new Set<string>((recentRows as any[]).map((r) => r.issueId));
+
   // 3. Identify stuck issues: In Progress in Linear but no active DB run
+  // NOTE: DB stores issue.identifier (e.g. "BEC-120"), not issue.id (Linear UUID)
   const stuckIssues = inProgressIssues.filter(
-    (issue: any) => !activeIssueIds.has(issue.id),
+    (issue: any) =>
+      !activeIssueIds.has(issue.identifier) &&
+      !recentlyProcessed.has(issue.identifier),
   );
 
   if (stuckIssues.length === 0) {
@@ -104,11 +120,11 @@ export async function recoverStuckInProgressIssues(
 
   // 4. Apply rate limit — only process up to maxPerTick per tick
   const toProcess = stuckIssues.slice(0, maxPerTick);
-  const stuckIssueIds = toProcess.map((i: any) => i.id);
+  const stuckIdentifiers = toProcess.map((i: any) => i.identifier);
 
   // 5. Batch-fetch most recent pipeline run status for each stuck issue
   const lastRunStatusMap = new Map<string, string>();
-  if (stuckIssueIds.length > 0) {
+  if (stuckIdentifiers.length > 0) {
     const runs = await db
       .select({
         issueId: pipelineRuns.issueId,
@@ -116,7 +132,7 @@ export async function recoverStuckInProgressIssues(
         startedAt: pipelineRuns.startedAt,
       })
       .from(pipelineRuns)
-      .where(inArray(pipelineRuns.issueId, stuckIssueIds));
+      .where(inArray(pipelineRuns.issueId, stuckIdentifiers));
 
     // Sort descending by startedAt to get the most recent run per issue
     const sorted = [...(runs as any[])].sort((a, b) => {
@@ -153,7 +169,7 @@ export async function recoverStuckInProgressIssues(
 
     const state = await issue.state;
     const previousStateName: string = state?.name ?? "In Progress";
-    const lastRunStatus = lastRunStatusMap.get(issue.id) ?? null;
+    const lastRunStatus = lastRunStatusMap.get(issue.identifier) ?? null;
 
     try {
       // Move the issue to the configured target state

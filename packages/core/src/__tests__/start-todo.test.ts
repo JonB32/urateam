@@ -7,12 +7,14 @@ function mockLinearClient(todoIssues: any[]) {
   };
 }
 
-function mockDb(activeIssueIds: string[]) {
+function mockDb(activeIssueIds: string[], recentIds: string[] = []) {
+  const whereFn = vi.fn()
+    .mockResolvedValueOnce(activeIssueIds.map((id) => ({ issueId: id })))
+    .mockResolvedValueOnce(recentIds.map((id) => ({ issueId: id })));
   return {
-    select: () => ({
-      from: () => ({
-        where: () =>
-          Promise.resolve(activeIssueIds.map((id) => ({ issueId: id }))),
+    select: vi.fn().mockReturnValue({
+      from: vi.fn().mockReturnValue({
+        where: whereFn,
       }),
     }),
   } as any;
@@ -78,11 +80,31 @@ describe("startTodoIssues", () => {
   });
 
   it("skips Todo issue that already has an active run", async () => {
-    const issue = makeIssue({ id: "uuid-1" });
+    const issue = makeIssue({ id: "uuid-1", identifier: "BEC-200" });
     const runner = { start: vi.fn() };
     const input: StartTodoInput = {
       linearClient: mockLinearClient([issue]),
-      db: mockDb(["uuid-1"]),
+      db: mockDb(["BEC-200"]),
+      teamIds: ["team-1"],
+      runner: runner as any,
+      pipelineConfigs,
+      repoConfigs,
+      maxPerTick: 5,
+    };
+
+    const results = await startTodoIssues(input);
+
+    expect(results).toHaveLength(0);
+    expect(runner.start).not.toHaveBeenCalled();
+  });
+
+  it("skips Todo issue with a recently completed pipeline run", async () => {
+    const issue = makeIssue({ id: "uuid-1", identifier: "BEC-200" });
+    const runner = { start: vi.fn() };
+    const input: StartTodoInput = {
+      linearClient: mockLinearClient([issue]),
+      // No active runs, but BEC-200 has a recent completed run
+      db: mockDb([], ["BEC-200"]),
       teamIds: ["team-1"],
       runner: runner as any,
       pipelineConfigs,

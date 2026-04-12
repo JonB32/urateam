@@ -1809,7 +1809,7 @@ export class PipelineRunner {
       if ((run.status as string) !== "failed" && (run.status as string) !== "retriable") {
         const errorMsg = error instanceof Error ? error.message : String(error);
         runLog.error({ err: error }, "pipeline failed with unexpected error");
-        await this.failPipeline(db, runId, run, "unknown", errorMsg, false, {
+        await this.failPipeline(db, runId, run, "unknown", errorMsg, true, {
           worktreePath,
           currentStageIndex: lastStageIndex,
           handoff,
@@ -2434,7 +2434,7 @@ export class PipelineRunner {
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       runLog.error({ err: error }, "feedback pipeline failed with unexpected error");
-      await this.failPipeline(db, runId, run, "unknown", errorMsg, false);
+      await this.failPipeline(db, runId, run, "unknown", errorMsg, true);
     } finally {
       this.budgetAlertedRuns.delete(runId);
       await removeActiveWork(db, runId);

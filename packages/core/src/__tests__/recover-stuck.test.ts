@@ -34,22 +34,24 @@ function makeLinearClient(inProgressIssues: any[] = []) {
   };
 }
 
-function makeDb(activeRows: { issueId: string }[] = [], runs: any[] = []) {
+function makeDb(
+  activeRows: { issueId: string }[] = [],
+  runs: any[] = [],
+  recentRows: { issueId: string }[] = [],
+) {
   // The real Drizzle select chain: db.select().from().where()
-  // We need to mock both calls (for active run check and for recent run fetch)
-  let callCount = 0;
+  // We need to mock three calls:
+  //   1. active runs query
+  //   2. recently completed/failed runs query
+  //   3. batch run status query
+  const whereFn = vi.fn()
+    .mockResolvedValueOnce(activeRows)
+    .mockResolvedValueOnce(recentRows)
+    .mockResolvedValueOnce(runs);
   return {
     select: vi.fn().mockReturnValue({
       from: vi.fn().mockReturnValue({
-        where: vi.fn().mockImplementation(() => {
-          callCount++;
-          if (callCount === 1) {
-            // First call: active runs query
-            return Promise.resolve(activeRows);
-          }
-          // Second call: batch run status query
-          return Promise.resolve(runs);
-        }),
+        where: whereFn,
       }),
     }),
   };
@@ -91,8 +93,8 @@ describe("recoverStuckInProgressIssues", () => {
       state: Promise.resolve({ name: "In Progress" }),
     };
     const linearClient = makeLinearClient([issue]);
-    // This issue has an active (running) pipeline run
-    const db = makeDb([{ issueId: "issue-uuid-1" }]);
+    // This issue has an active (running) pipeline run — DB stores identifier, not UUID
+    const db = makeDb([{ issueId: "BEC-10" }]);
     const stateMap = new Map([["team-1:Backlog", "state-backlog-1"]]);
 
     const result = await recoverStuckInProgressIssues({
@@ -117,10 +119,10 @@ describe("recoverStuckInProgressIssues", () => {
       state: Promise.resolve({ name: "In Progress" }),
     };
     const linearClient = makeLinearClient([issue]);
-    // No active runs
+    // No active runs — DB stores identifier, not UUID
     const db = makeDb([], [
       {
-        issueId: "issue-uuid-stuck",
+        issueId: "BEC-99",
         status: "failed",
         startedAt: new Date("2026-04-01"),
       },
@@ -165,7 +167,7 @@ describe("recoverStuckInProgressIssues", () => {
     const linearClient = makeLinearClient([issue]);
     const db = makeDb([], [
       {
-        issueId: "issue-uuid-done",
+        issueId: "BEC-88",
         status: "completed",
         startedAt: new Date("2026-04-02"),
       },
@@ -325,15 +327,15 @@ describe("recoverStuckInProgressIssues", () => {
       state: Promise.resolve({ name: "In Progress" }),
     };
     const linearClient = makeLinearClient([issue]);
-    // Two runs: older completed, newer failed
+    // Two runs: older completed, newer failed — DB stores identifier
     const db = makeDb([], [
       {
-        issueId: "issue-multi-run",
+        issueId: "BEC-33",
         status: "completed",
         startedAt: new Date("2026-03-01"),
       },
       {
-        issueId: "issue-multi-run",
+        issueId: "BEC-33",
         status: "failed",
         startedAt: new Date("2026-04-01"), // more recent
       },

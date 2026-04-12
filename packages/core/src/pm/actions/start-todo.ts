@@ -62,20 +62,49 @@ export async function startTodoIssues(
   const activeIssueIds = new Set<string>((activeRows as any[]).map((r) => r.issueId));
 
   // 3. Filter to orphaned issues (in Todo but no active pipeline run)
-  const orphaned = todoIssues.filter((issue: any) => !activeIssueIds.has(issue.id));
+  // NOTE: DB stores issue.identifier (e.g. "BEC-120"), not issue.id (Linear UUID)
+  const orphaned = todoIssues.filter((issue: any) => !activeIssueIds.has(issue.identifier));
 
   if (orphaned.length === 0) {
     log.debug({ totalTodo: todoIssues.length }, "all Todo issues have active pipeline runs");
     return [];
   }
 
+  // 3b. Skip issues with recently completed/failed runs (within last 30 min)
+  const orphanedIdentifiers = orphaned.map((i: any) => i.identifier);
+  const recentCutoff = new Date(Date.now() - 30 * 60 * 1000);
+  const recentRuns = await db
+    .select({ issueId: pipelineRuns.issueId })
+    .from(pipelineRuns)
+    .where(
+      sql`${pipelineRuns.issueId} in (${sql.join(orphanedIdentifiers.map((id: string) => sql`${id}`), sql`, `)})
+        AND ${pipelineRuns.status} in ('completed', 'failed')
+        AND ${pipelineRuns.completedAt} >= ${recentCutoff}`,
+    );
+  const recentlyProcessed = new Set<string>((recentRuns as any[]).map((r) => r.issueId));
+  const filteredOrphaned = orphaned.filter((issue: any) => {
+    if (recentlyProcessed.has(issue.identifier)) {
+      log.info(
+        { identifier: issue.identifier },
+        "skipping — recent completed/failed pipeline run exists",
+      );
+      return false;
+    }
+    return true;
+  });
+
+  if (filteredOrphaned.length === 0) {
+    log.debug("all orphaned Todo issues have recent pipeline runs — skipping");
+    return [];
+  }
+
   log.info(
-    { totalTodo: todoIssues.length, orphanedCount: orphaned.length, maxPerTick },
+    { totalTodo: todoIssues.length, orphanedCount: filteredOrphaned.length, maxPerTick },
     "found Todo issues with no active pipeline run",
   );
 
   // 4. Rate-limit and process
-  const toProcess = orphaned.slice(0, maxPerTick);
+  const toProcess = filteredOrphaned.slice(0, maxPerTick);
   const results: StartTodoResult[] = [];
 
   for (const issue of toProcess) {
