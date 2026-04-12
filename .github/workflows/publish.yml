@@ -31,21 +31,13 @@ jobs:
         run: pnpm test
 
       - name: Publish @urateam/core
-        run: pnpm --filter @urateam/core publish --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm --filter @urateam/core publish --access public --no-git-checks --provenance
 
       - name: Publish @urateam/dashboard
-        run: pnpm --filter @urateam/dashboard publish --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm --filter @urateam/dashboard publish --access public --no-git-checks --provenance
 
       - name: Publish @urateam/cli
-        run: pnpm --filter @urateam/cli publish --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm --filter @urateam/cli publish --access public --no-git-checks --provenance
 
       - name: Publish create-urateam
-        run: pnpm --filter create-urateam publish --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm --filter create-urateam publish --access public --no-git-checks --provenance
