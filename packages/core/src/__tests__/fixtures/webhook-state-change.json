@@ -1,0 +1,15 @@
+{
+  "action": "update",
+  "type": "Issue",
+  "data": {
+    "id": "issue-uuid-123",
+    "identifier": "LIN-42",
+    "title": "Add user search",
+    "description": "Implement search functionality",
+    "priority": 2,
+    "state": { "id": "state-uuid", "name": "Todo" },
+    "teamId": "team-frontend",
+    "labels": [{ "name": "auto-implement" }]
+  },
+  "updatedFrom": { "stateId": "old-state-uuid" }
+}

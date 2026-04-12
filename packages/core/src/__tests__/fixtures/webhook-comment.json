@@ -1,0 +1,5 @@
+{
+  "action": "create",
+  "type": "Comment",
+  "data": { "id": "comment-123", "body": "Added a comment" }
+}
