@@ -1,6 +1,6 @@
 import type { AnyDb } from "../../db/client.js";
 import { pipelineRuns } from "../../db/schema.js";
-import { sql } from "drizzle-orm";
+import { and, gte, inArray } from "drizzle-orm";
 
 /** Statuses considered "active" (pipeline currently running). */
 export const ACTIVE_STATUSES = ["queued", "running"] as const;
@@ -23,7 +23,7 @@ export async function getActiveAndRecentIssueIds(
   const activeRows = await db
     .select({ issueId: pipelineRuns.issueId })
     .from(pipelineRuns)
-    .where(sql`${pipelineRuns.status} in ('running', 'queued')`);
+    .where(inArray(pipelineRuns.status, [...ACTIVE_STATUSES]));
   const activeIssueIds = new Set<string>((activeRows as any[]).map((r) => r.issueId));
 
   const recentCutoff = new Date(Date.now() - recentWindowMs);
@@ -31,8 +31,10 @@ export async function getActiveAndRecentIssueIds(
     .select({ issueId: pipelineRuns.issueId })
     .from(pipelineRuns)
     .where(
-      sql`${pipelineRuns.status} in ('completed', 'failed')
-        AND ${pipelineRuns.completedAt} >= ${recentCutoff}`,
+      and(
+        inArray(pipelineRuns.status, ["completed", "failed"]),
+        gte(pipelineRuns.completedAt, recentCutoff),
+      ),
     );
   const recentlyProcessed = new Set<string>((recentRows as any[]).map((r) => r.issueId));
 
