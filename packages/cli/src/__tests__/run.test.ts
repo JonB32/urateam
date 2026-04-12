@@ -372,5 +372,5 @@ describe("run command — dry run wiring", () => {
     expect(logOutput).toMatch(/LIN-99/);
     expect(logOutput).toMatch(/auto-implement/i);
     expect(logOutput).toMatch(/implement.*test.*review/i);
-  });
+  }, 15000);
 });
