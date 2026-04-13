@@ -1,7 +1,5 @@
-node_modules/
-dist/
-.env
-.env.*
-!.env.example
-*.sqlite
-.turbo/
+# urateam sidecar
+.urateam/.env
+.urateam/node_modules/
+.urateam/dist/
+.urateam/pnpm-lock.yaml
