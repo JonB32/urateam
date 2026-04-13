@@ -70,7 +70,7 @@ export function scaffold(options: ScaffoldOptions): void {
       start: "ura start",
     },
     dependencies: {
-      "@urateam/cli": "^0.1.2",
+      "@urateam/cli": "^0.1.3",
     },
   };
   writeFileSync(join(urateamDir, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
