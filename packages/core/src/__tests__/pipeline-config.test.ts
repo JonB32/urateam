@@ -82,6 +82,24 @@ describe("validatePipelineConfigs", () => {
     expect(result.custom.name).toBe("Custom");
   });
 
+  it("parses stageModels record (Record<string, string>) correctly", () => {
+    // Regression test for zod v4 migration: z.record() now requires a key schema
+    // argument. This test verifies stageModels round-trips with correct typing.
+    const configs = {
+      custom: {
+        ...baseCustomConfig,
+        stageModels: {
+          implement: "claude-opus-4-6",
+          test: "claude-haiku-4-5",
+        },
+      },
+    };
+    const result = validatePipelineConfigs(configs);
+    expect(result.custom.stageModels).toBeDefined();
+    expect(result.custom.stageModels?.implement).toBe("claude-opus-4-6");
+    expect(result.custom.stageModels?.test).toBe("claude-haiku-4-5");
+  });
+
   it("throws for invalid stage names", () => {
     const configs = {
       bad: {

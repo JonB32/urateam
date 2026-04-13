@@ -1,11 +1,20 @@
 #!/usr/bin/env node
 // Auto-load .env file from the current working directory before any command
 // imports read process.env. Uses Node 22's built-in loadEnvFile (no deps).
-// Silently skips if .env doesn't exist. Existing env vars always win.
+// Silently skips if .env is absent (ENOENT). Warns on other errors
+// (e.g., malformed content) so the user knows why their vars aren't loading.
+// Existing env vars always win — loadEnvFile doesn't override them.
 try {
   process.loadEnvFile();
-} catch {
-  // .env missing or unreadable — continue without it
+} catch (err: unknown) {
+  const code = (err as NodeJS.ErrnoException)?.code;
+  if (code !== "ENOENT") {
+    console.warn(
+      `warning: failed to load .env from ${process.cwd()}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
 }
 
 import { Command } from "commander";
