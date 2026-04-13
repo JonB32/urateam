@@ -30,7 +30,7 @@ const program = new Command();
 program
   .name("ura")
   .description("urateam CLI")
-  .version("0.1.0");
+  .version("0.1.3");
 
 program.addCommand(runCommand);
 program.addCommand(devCommand);
