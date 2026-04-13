@@ -35,27 +35,33 @@ jobs:
       # instead of a global self-upgrade (`npm install -g npm@latest` leaves
       # the bundled install in a broken state where it can't find its own
       # transitive deps like promise-retry).
+      #
       # pnpm pack resolves workspace:* to real versions in the tarball.
+      #
+      # The `publish-package` helper script skips "version already exists"
+      # errors so per-package version bumps are supported (the workflow
+      # publishes all 4 packages on each tag, but some may already be at
+      # the same version).
       - name: Pack and publish @urateam/core
         run: |
           cd packages/core
           pnpm pack
-          npx -y npm@latest publish *.tgz --access public --provenance
+          ../../.github/scripts/publish-package.sh *.tgz
 
       - name: Pack and publish @urateam/dashboard
         run: |
           cd packages/dashboard
           pnpm pack
-          npx -y npm@latest publish *.tgz --access public --provenance
+          ../../.github/scripts/publish-package.sh *.tgz
 
       - name: Pack and publish @urateam/cli
         run: |
           cd packages/cli
           pnpm pack
-          npx -y npm@latest publish *.tgz --access public --provenance
+          ../../.github/scripts/publish-package.sh *.tgz
 
       - name: Pack and publish create-urateam
         run: |
           cd packages/create-urateam
           pnpm pack
-          npx -y npm@latest publish *.tgz --access public --provenance
+          ../../.github/scripts/publish-package.sh *.tgz
