@@ -241,4 +241,92 @@ describe("scaffold — sidecar pattern", () => {
       expect(existsSync(join(projectDir, ".urateam", ".env"))).toBe(true);
     });
   });
+
+  describe("re-run safety (running create-urateam twice)", () => {
+    it("preserves existing .urateam/.env with real credentials", () => {
+      const projectDir = join(tempDir, "rerun-project");
+      scaffold(baseOptions(projectDir, "rerun-project"));
+
+      // Simulate user editing .env with real credentials
+      const customEnv =
+        "LINEAR_API_KEY=lin_api_REAL_KEY\n" +
+        "LINEAR_WEBHOOK_SECRET=whsec_REAL\n" +
+        "DASHBOARD_PASSWORD=my_chosen_password\n";
+      writeFileSync(join(projectDir, ".urateam", ".env"), customEnv);
+
+      // Re-run scaffold with different options
+      scaffold({
+        projectDir,
+        projectName: "rerun-project",
+        linearApiKey: "lin_api_DIFFERENT",
+        linearTeamId: "different-team",
+        repoUrl: "https://github.com/other/repo",
+        defaultBranch: "main",
+      });
+
+      const envAfter = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+      expect(envAfter).toBe(customEnv);
+      expect(envAfter).toContain("lin_api_REAL_KEY");
+      expect(envAfter).not.toContain("lin_api_DIFFERENT");
+      expect(envAfter).toContain("my_chosen_password");
+    });
+
+    it("preserves existing .urateam/package.json with custom deps", () => {
+      const projectDir = join(tempDir, "rerun-project");
+      scaffold(baseOptions(projectDir, "rerun-project"));
+
+      // Simulate user adding a custom dep to .urateam/package.json
+      const customPkg = {
+        name: "rerun-project-urateam",
+        private: true,
+        type: "module",
+        scripts: { dev: "ura dev", start: "ura start" },
+        dependencies: {
+          "@urateam/cli": "^0.1.4",
+          "some-custom-plugin": "^1.0.0",
+        },
+      };
+      writeFileSync(
+        join(projectDir, ".urateam", "package.json"),
+        JSON.stringify(customPkg, null, 2) + "\n",
+      );
+
+      // Re-run scaffold
+      scaffold(baseOptions(projectDir, "rerun-project"));
+
+      const pkgAfter = JSON.parse(
+        readFileSync(join(projectDir, ".urateam", "package.json"), "utf-8"),
+      );
+      expect(pkgAfter.dependencies["some-custom-plugin"]).toBe("^1.0.0");
+    });
+
+    it("refreshes template files like Dockerfile and docker-compose.yml", () => {
+      const projectDir = join(tempDir, "rerun-project");
+      scaffold(baseOptions(projectDir, "rerun-project"));
+
+      // Simulate stale/corrupted Dockerfile
+      writeFileSync(join(projectDir, ".urateam", "Dockerfile"), "# stale content");
+
+      // Re-run scaffold
+      scaffold(baseOptions(projectDir, "rerun-project"));
+
+      const dockerfileAfter = readFileSync(
+        join(projectDir, ".urateam", "Dockerfile"),
+        "utf-8",
+      );
+      expect(dockerfileAfter).not.toContain("# stale content");
+      expect(dockerfileAfter).toContain("FROM node");
+    });
+
+    it(".gitignore append is idempotent across multiple runs", () => {
+      const projectDir = join(tempDir, "rerun-project");
+      scaffold(baseOptions(projectDir, "rerun-project"));
+      scaffold(baseOptions(projectDir, "rerun-project"));
+      scaffold(baseOptions(projectDir, "rerun-project"));
+
+      const content = readFileSync(join(projectDir, ".gitignore"), "utf-8");
+      const matches = content.match(/^\.urateam\/\.env$/gm);
+      expect(matches?.length).toBe(1);
+    });
+  });
 });
