@@ -1,4 +1,13 @@
 #!/usr/bin/env node
+// Auto-load .env file from the current working directory before any command
+// imports read process.env. Uses Node 22's built-in loadEnvFile (no deps).
+// Silently skips if .env doesn't exist. Existing env vars always win.
+try {
+  process.loadEnvFile();
+} catch {
+  // .env missing or unreadable — continue without it
+}
+
 import { Command } from "commander";
 import { runCommand } from "./commands/run.js";
 import { devCommand } from "./commands/dev.js";
