@@ -101,13 +101,13 @@ export function scaffold(options: ScaffoldOptions): void {
     writeFileSync(dest, content.replace(/\{\{PROJECT_NAME\}\}/g, projectName));
   }
 
-  // Ensure .gitignore at project root has the urateam entries
+  // Ensure .gitignore at project root has the urateam entries.
+  // Content is inlined here (not loaded from template/) because npm publish
+  // excludes files named `.gitignore` from published packages automatically,
+  // which would cause an ENOENT at runtime in installed create-urateam.
   const gitignorePath = join(projectDir, ".gitignore");
-  const gitignoreTemplateSrc = join(templateDir, ".gitignore");
-  const templateGitignore = readFileSync(gitignoreTemplateSrc, "utf-8");
-
   if (!existsSync(gitignorePath)) {
-    writeFileSync(gitignorePath, templateGitignore);
+    writeFileSync(gitignorePath, URATEAM_GITIGNORE);
   } else {
     const existing = readFileSync(gitignorePath, "utf-8");
     // Check for the bare `.urateam/.env` entry as a standalone line.
@@ -117,10 +117,28 @@ export function scaffold(options: ScaffoldOptions): void {
       .some((line) => line.trim() === ".urateam/.env");
     if (!hasBareEntry) {
       const separator = existing.endsWith("\n") ? "\n" : "\n\n";
-      appendFileSync(gitignorePath, separator + templateGitignore);
+      appendFileSync(gitignorePath, separator + URATEAM_GITIGNORE);
     }
   }
 }
+
+/**
+ * Inlined .gitignore content for the urateam sidecar.
+ *
+ * IMPORTANT: This is intentionally NOT loaded from `template/.gitignore`.
+ * When this package is published to npm, files named `.gitignore` are
+ * automatically excluded from the tarball by npm's default rules, so the
+ * file wouldn't exist at runtime in an installed copy. Inlining avoids
+ * the packaging pitfall entirely.
+ */
+const URATEAM_GITIGNORE = `# urateam sidecar
+.urateam/.env
+.urateam/.env.*
+!.urateam/.env.example
+.urateam/node_modules/
+.urateam/dist/
+.urateam/pnpm-lock.yaml
+`;
 
 // CLI entrypoint — only runs when executed directly (not when imported for testing)
 async function main() {
