@@ -21,6 +21,11 @@ jobs:
           cache: pnpm
           registry-url: "https://registry.npmjs.org"
 
+      # npm trusted publishing (OIDC) requires npm >= 11.5.1.
+      # Node 22 ships with npm 10.x, so we upgrade explicitly.
+      - name: Upgrade npm to latest
+        run: npm install -g npm@latest
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -30,30 +35,28 @@ jobs:
       - name: Test
         run: pnpm test
 
-      # npm trusted publishing (OIDC) requires npm >= 11.5.1.
-      # Node 22 ships with npm 10.x. Use npx to fetch a modern npm on demand
-      # instead of a global self-upgrade (which corrupts the bundled install).
       # pnpm pack resolves workspace:* to real versions in the tarball.
+      # npm publish the tarball with --provenance for OIDC-based auth.
       - name: Pack and publish @urateam/core
         run: |
           cd packages/core
           pnpm pack
-          npx -y npm@latest publish *.tgz --access public --provenance
+          npm publish *.tgz --access public --provenance
 
       - name: Pack and publish @urateam/dashboard
         run: |
           cd packages/dashboard
           pnpm pack
-          npx -y npm@latest publish *.tgz --access public --provenance
+          npm publish *.tgz --access public --provenance
 
       - name: Pack and publish @urateam/cli
         run: |
           cd packages/cli
           pnpm pack
-          npx -y npm@latest publish *.tgz --access public --provenance
+          npm publish *.tgz --access public --provenance
 
       - name: Pack and publish create-urateam
         run: |
           cd packages/create-urateam
           pnpm pack
-          npx -y npm@latest publish *.tgz --access public --provenance
+          npm publish *.tgz --access public --provenance
