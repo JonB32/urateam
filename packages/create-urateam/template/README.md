@@ -4,11 +4,47 @@
 
 ## Getting Started
 
-<!-- How to install dependencies, build, run tests, and start the project locally. -->
+### Prerequisites
 
-## Development
+<!-- Node version, pnpm, any system dependencies -->
 
-<!-- Link to your contributing guide, architecture docs, etc. -->
+### Installation
+
+```bash
+pnpm install
+```
+
+### Development
+
+```bash
+pnpm dev
+```
+
+### Build
+
+```bash
+pnpm build
+```
+
+### Test
+
+```bash
+pnpm test
+```
+
+## Project Structure
+
+<!-- Describe your monorepo layout, key packages, or directory organization -->
+
+## Contributing
+
+Contributions are welcome. Please open an issue or pull request.
+
+<!-- Link to CONTRIBUTING.md, code of conduct, etc. when you have them -->
+
+## License
+
+<!-- e.g., MIT, Apache-2.0, proprietary — update to match your license -->
 
 ---
 
