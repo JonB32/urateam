@@ -8,7 +8,7 @@ import {
   existsSync,
   appendFileSync,
 } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, basename } from "path";
 import { fileURLToPath } from "url";
 import { randomBytes } from "crypto";
 
@@ -38,6 +38,7 @@ export interface ScaffoldOptions {
  *     - docker-compose.yml
  *     - README.md                       — how to run the sidecar
  *   - <projectDir>/CLAUDE.md            — project conventions (only if absent)
+ *   - <projectDir>/README.md            — project readme (only if absent)
  *   - <projectDir>/.gitignore           — ensures .urateam/.env is ignored
  *
  * The project root `package.json` is NOT touched — urateam is a sidecar tool,
@@ -89,11 +90,15 @@ export function scaffold(options: ScaffoldOptions): void {
   writeFileSync(join(urateamDir, ".env"), envContent);
 
   // --- Project root files: copy only if absent (don't clobber user files) ---
-  const claudeMdDest = join(projectDir, "CLAUDE.md");
-  if (!existsSync(claudeMdDest)) {
-    const claudeMdSrc = join(templateDir, "CLAUDE.md");
-    const content = readFileSync(claudeMdSrc, "utf-8");
-    writeFileSync(claudeMdDest, content.replace(/\{\{PROJECT_NAME\}\}/g, projectName));
+  // Files with {{PROJECT_NAME}} placeholder get the substitution applied.
+  const rootFilesWithPlaceholder = ["CLAUDE.md", "README.md"];
+  for (const file of rootFilesWithPlaceholder) {
+    const dest = join(projectDir, file);
+    if (existsSync(dest)) continue;
+    const src = join(templateDir, file);
+    if (!existsSync(src)) continue;
+    const content = readFileSync(src, "utf-8");
+    writeFileSync(dest, content.replace(/\{\{PROJECT_NAME\}\}/g, projectName));
   }
 
   // Ensure .gitignore at project root has the urateam entries
@@ -105,7 +110,12 @@ export function scaffold(options: ScaffoldOptions): void {
     writeFileSync(gitignorePath, templateGitignore);
   } else {
     const existing = readFileSync(gitignorePath, "utf-8");
-    if (!existing.includes(".urateam/.env")) {
+    // Check for the bare `.urateam/.env` entry as a standalone line.
+    // Loose substring match would false-positive on `!.urateam/.env.example`.
+    const hasBareEntry = existing
+      .split(/\r?\n/)
+      .some((line) => line.trim() === ".urateam/.env");
+    if (!hasBareEntry) {
       const separator = existing.endsWith("\n") ? "\n" : "\n\n";
       appendFileSync(gitignorePath, separator + templateGitignore);
     }
@@ -136,7 +146,7 @@ async function main() {
   }
 
   const projectDir = arg === "." ? process.cwd() : join(process.cwd(), arg);
-  const projectName = arg === "." ? projectDir.split("/").pop() || "my-project" : arg;
+  const projectName = arg === "." ? basename(projectDir) || "my-project" : arg;
 
   scaffold({
     projectDir,

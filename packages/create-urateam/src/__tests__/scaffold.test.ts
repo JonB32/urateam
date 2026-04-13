@@ -109,6 +109,27 @@ describe("scaffold — sidecar pattern", () => {
       expect(match).not.toBeNull();
       expect(match![1].length).toBeGreaterThanOrEqual(32);
     });
+
+    it("creates README.md at project root with project name", () => {
+      const projectDir = join(tempDir, "my-project");
+      scaffold(baseOptions(projectDir, "my-project"));
+
+      const readmePath = join(projectDir, "README.md");
+      expect(existsSync(readmePath)).toBe(true);
+
+      const content = readFileSync(readmePath, "utf-8");
+      expect(content).toContain("# my-project");
+      expect(content).not.toContain("{{PROJECT_NAME}}");
+    });
+
+    it(".gitignore template has .env.* wildcard with example exception", () => {
+      const projectDir = join(tempDir, "my-project");
+      scaffold(baseOptions(projectDir, "my-project"));
+
+      const content = readFileSync(join(projectDir, ".gitignore"), "utf-8");
+      expect(content).toContain(".urateam/.env.*");
+      expect(content).toContain("!.urateam/.env.example");
+    });
   });
 
   describe("existing project (directory with files already)", () => {
@@ -122,6 +143,36 @@ describe("scaffold — sidecar pattern", () => {
 
       const finalContent = readFileSync(join(projectDir, "CLAUDE.md"), "utf-8");
       expect(finalContent).toBe(existingContent);
+    });
+
+    it("preserves existing README.md at project root", () => {
+      const projectDir = join(tempDir, "existing-project");
+      mkdirSync(projectDir, { recursive: true });
+      const existingContent = "# My App\n\nProduction-ready.\n";
+      writeFileSync(join(projectDir, "README.md"), existingContent);
+
+      scaffold(baseOptions(projectDir, "existing-project"));
+
+      const finalContent = readFileSync(join(projectDir, "README.md"), "utf-8");
+      expect(finalContent).toBe(existingContent);
+    });
+
+    it("treats !.urateam/.env.example as not-yet-ignored (bare entry check)", () => {
+      // Regression test: loose substring matching of ".urateam/.env" would
+      // false-positive on "!.urateam/.env.example" and skip the append.
+      const projectDir = join(tempDir, "existing-project");
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(
+        join(projectDir, ".gitignore"),
+        "node_modules/\n!.urateam/.env.example\n",
+      );
+
+      scaffold(baseOptions(projectDir, "existing-project"));
+
+      const content = readFileSync(join(projectDir, ".gitignore"), "utf-8");
+      // Should still append the bare .urateam/.env entry
+      const lines = content.split("\n").map((l) => l.trim());
+      expect(lines).toContain(".urateam/.env");
     });
 
     it("preserves existing package.json at project root", () => {
