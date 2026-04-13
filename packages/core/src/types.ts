@@ -78,7 +78,7 @@ export const PipelineConfigSchema = z.object({
   /** Per-stage model overrides. Keys are stage names; values are model strings passed to the Agent SDK.
    *  Invalid model strings are passed through as-is (let the SDK error, no local validation).
    *  Example: { implement: "claude-opus-4-6", test: "claude-haiku-4-5" } */
-  stageModels: z.record(z.string()).optional(),
+  stageModels: z.record(z.string(), z.string()).optional(),
   /** Fail the pipeline run if the agent did not commit its work and auto-commit was triggered.
    *  When false (default), auto-commit is a silent safety net and the run continues normally.
    *  When true, triggering auto-commit is treated as a pipeline error so the issue surfaces immediately. */
@@ -111,7 +111,7 @@ export type SetupCommand = z.infer<typeof SetupCommandSchema>;
 export const McpServerEntrySchema = z.object({
   command: z.string(),
   args: z.array(z.string()).optional(),
-  env: z.record(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
 });
 
 export const PluginEntrySchema = z.object({
@@ -121,7 +121,7 @@ export const PluginEntrySchema = z.object({
 
 export const PluginConfigSchema = z.object({
   /** Explicit MCP servers to always include */
-  mcpServers: z.record(McpServerEntrySchema).optional(),
+  mcpServers: z.record(z.string(), McpServerEntrySchema).optional(),
   /** MCP server names to never include */
   excludeMcpServers: z.array(z.string()).optional(),
   /** Explicit plugins to always include */
@@ -139,7 +139,7 @@ export const DevcontainerConfigSchema = z.object({
   /** Override path to devcontainer config */
   configPath: z.string().optional(),
   /** Extra environment variables for the container */
-  env: z.record(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
 });
 export type DevcontainerConfig = z.infer<typeof DevcontainerConfigSchema>;
 
