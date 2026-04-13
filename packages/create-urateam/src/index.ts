@@ -1,5 +1,13 @@
 #!/usr/bin/env node
-import { mkdirSync, writeFileSync, cpSync, readFileSync, statSync } from "fs";
+import {
+  mkdirSync,
+  writeFileSync,
+  cpSync,
+  readFileSync,
+  statSync,
+  existsSync,
+  appendFileSync,
+} from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomBytes } from "crypto";
@@ -8,7 +16,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 export interface ScaffoldOptions {
+  /** The project root directory. `.urateam/` will be created inside it. */
   projectDir: string;
+  /** Project name — used in CLAUDE.md header and .urateam/package.json. */
   projectName: string;
   linearApiKey: string;
   linearTeamId: string;
@@ -17,24 +27,41 @@ export interface ScaffoldOptions {
 }
 
 /**
- * Scaffold a new urateam project from the template.
- * Copies template files, generates .env and package.json, replaces placeholders.
+ * Scaffold a urateam sidecar into a project directory.
+ *
+ * Creates:
+ *   - <projectDir>/.urateam/            — isolated urateam config + deps
+ *     - package.json                    — depends on @urateam/cli
+ *     - .env                            — Linear keys, webhook secret, etc.
+ *     - .env.example
+ *     - Dockerfile
+ *     - docker-compose.yml
+ *     - README.md                       — how to run the sidecar
+ *   - <projectDir>/CLAUDE.md            — project conventions (only if absent)
+ *   - <projectDir>/.gitignore           — ensures .urateam/.env is ignored
+ *
+ * The project root `package.json` is NOT touched — urateam is a sidecar tool,
+ * not a project dependency. Existing `CLAUDE.md` at the project root is
+ * preserved (not overwritten).
  */
 export function scaffold(options: ScaffoldOptions): void {
   const { projectDir, projectName, linearApiKey, linearTeamId, repoUrl, defaultBranch } = options;
 
-  // Copy template directory
-  // When running from dist/, template is at ../template/
-  // When running from src/ (tests), template is at ../../template/
+  mkdirSync(projectDir, { recursive: true });
+
+  // Locate template directory (supports running from dist/ or src/ during tests)
   let templateDir = join(__dirname, "..", "template");
   if (!statSync(templateDir, { throwIfNoEntry: false })?.isDirectory()) {
     templateDir = join(__dirname, "..", "..", "template");
   }
-  cpSync(templateDir, projectDir, { recursive: true });
 
-  // Write package.json
+  // --- Sidecar files: copy template/.urateam/ → projectDir/.urateam/ (force overwrite) ---
+  const urateamDir = join(projectDir, ".urateam");
+  cpSync(join(templateDir, ".urateam"), urateamDir, { recursive: true, force: true });
+
+  // Write .urateam/package.json — the sidecar's own package.json
   const pkg = {
-    name: projectName,
+    name: `${projectName}-urateam`,
     private: true,
     type: "module",
     scripts: {
@@ -42,12 +69,12 @@ export function scaffold(options: ScaffoldOptions): void {
       start: "ura start",
     },
     dependencies: {
-      "@urateam/cli": "^0.1.0",
+      "@urateam/cli": "^0.1.2",
     },
   };
-  writeFileSync(join(projectDir, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
+  writeFileSync(join(urateamDir, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
 
-  // Write .env from provided values
+  // Write .urateam/.env from user-provided values
   const envContent = [
     `LINEAR_API_KEY=${linearApiKey}`,
     `LINEAR_WEBHOOK_SECRET=`,
@@ -59,19 +86,39 @@ export function scaffold(options: ScaffoldOptions): void {
     `DASHBOARD_USER=admin`,
     `DASHBOARD_PASSWORD=${randomBytes(16).toString("hex")}`,
   ].join("\n") + "\n";
-  writeFileSync(join(projectDir, ".env"), envContent);
+  writeFileSync(join(urateamDir, ".env"), envContent);
 
-  // Replace {{PROJECT_NAME}} in README.md
-  const readmePath = join(projectDir, "README.md");
-  const readme = readFileSync(readmePath, "utf-8");
-  writeFileSync(readmePath, readme.replace(/\{\{PROJECT_NAME\}\}/g, projectName));
+  // --- Project root files: copy only if absent (don't clobber user files) ---
+  const claudeMdDest = join(projectDir, "CLAUDE.md");
+  if (!existsSync(claudeMdDest)) {
+    const claudeMdSrc = join(templateDir, "CLAUDE.md");
+    const content = readFileSync(claudeMdSrc, "utf-8");
+    writeFileSync(claudeMdDest, content.replace(/\{\{PROJECT_NAME\}\}/g, projectName));
+  }
+
+  // Ensure .gitignore at project root has the urateam entries
+  const gitignorePath = join(projectDir, ".gitignore");
+  const gitignoreTemplateSrc = join(templateDir, ".gitignore");
+  const templateGitignore = readFileSync(gitignoreTemplateSrc, "utf-8");
+
+  if (!existsSync(gitignorePath)) {
+    writeFileSync(gitignorePath, templateGitignore);
+  } else {
+    const existing = readFileSync(gitignorePath, "utf-8");
+    if (!existing.includes(".urateam/.env")) {
+      const separator = existing.endsWith("\n") ? "\n" : "\n\n";
+      appendFileSync(gitignorePath, separator + templateGitignore);
+    }
+  }
 }
 
 // CLI entrypoint — only runs when executed directly (not when imported for testing)
 async function main() {
-  const projectName = process.argv[2];
-  if (!projectName) {
-    console.error("Usage: create-urateam <project-name>");
+  const arg = process.argv[2];
+  if (!arg) {
+    console.error("Usage: create-urateam <project-name-or-dot>");
+    console.error("  create-urateam my-project   # creates new directory");
+    console.error("  create-urateam .            # adds .urateam/ to current directory");
     process.exit(1);
   }
 
@@ -88,7 +135,9 @@ async function main() {
     process.exit(1);
   }
 
-  const projectDir = join(process.cwd(), projectName);
+  const projectDir = arg === "." ? process.cwd() : join(process.cwd(), arg);
+  const projectName = arg === "." ? projectDir.split("/").pop() || "my-project" : arg;
+
   scaffold({
     projectDir,
     projectName,
@@ -98,11 +147,13 @@ async function main() {
     defaultBranch: response.defaultBranch || "main",
   });
 
-  console.log(`\n  Created ${projectName} in ${projectDir}\n`);
+  console.log(`\n  urateam sidecar installed in ${projectDir}/.urateam\n`);
   console.log(`  Next steps:`);
-  console.log(`    cd ${projectName}`);
+  if (arg !== ".") console.log(`    cd ${arg}`);
+  console.log(`    cd .urateam`);
   console.log(`    pnpm install`);
-  console.log(`    ura dev\n`);
+  console.log(`    ura dev`);
+  console.log(`\n  See CLAUDE.md in the project root for agent context.\n`);
 }
 
 const isEntrypoint = process.argv[1]?.endsWith("create-urateam") ||

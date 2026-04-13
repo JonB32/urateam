@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { scaffold } from "../index.js";
 
-describe("scaffold", () => {
+describe("scaffold — sidecar pattern", () => {
   let tempDir: string;
 
   beforeEach(() => {
@@ -15,88 +15,164 @@ describe("scaffold", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("creates project directory with all template files", () => {
-    const projectDir = join(tempDir, "my-project");
-    scaffold({
-      projectDir,
-      projectName: "my-project",
-      linearApiKey: "lin_api_test",
-      linearTeamId: "team-123",
-      repoUrl: "https://github.com/user/repo",
-      defaultBranch: "main",
-    });
-
-    expect(existsSync(join(projectDir, "package.json"))).toBe(true);
-    expect(existsSync(join(projectDir, ".env"))).toBe(true);
-    expect(existsSync(join(projectDir, ".env.example"))).toBe(true);
-    expect(existsSync(join(projectDir, "docker-compose.yml"))).toBe(true);
-    expect(existsSync(join(projectDir, "Dockerfile"))).toBe(true);
-    expect(existsSync(join(projectDir, ".gitignore"))).toBe(true);
-    expect(existsSync(join(projectDir, "README.md"))).toBe(true);
+  const baseOptions = (projectDir: string, projectName: string) => ({
+    projectDir,
+    projectName,
+    linearApiKey: "lin_api_test",
+    linearTeamId: "team-123",
+    repoUrl: "https://github.com/user/repo",
+    defaultBranch: "main",
   });
 
-  it("writes .env with provided values", () => {
-    const projectDir = join(tempDir, "my-project");
-    scaffold({
-      projectDir,
-      projectName: "my-project",
-      linearApiKey: "lin_api_test123",
-      linearTeamId: "team-abc",
-      repoUrl: "https://github.com/org/mobile-app",
-      defaultBranch: "develop",
+  describe("new project (empty target directory)", () => {
+    it("creates .urateam/ with all sidecar template files", () => {
+      const projectDir = join(tempDir, "my-project");
+      scaffold(baseOptions(projectDir, "my-project"));
+
+      expect(existsSync(join(projectDir, ".urateam"))).toBe(true);
+      expect(existsSync(join(projectDir, ".urateam", "package.json"))).toBe(true);
+      expect(existsSync(join(projectDir, ".urateam", ".env"))).toBe(true);
+      expect(existsSync(join(projectDir, ".urateam", ".env.example"))).toBe(true);
+      expect(existsSync(join(projectDir, ".urateam", "docker-compose.yml"))).toBe(true);
+      expect(existsSync(join(projectDir, ".urateam", "Dockerfile"))).toBe(true);
+      expect(existsSync(join(projectDir, ".urateam", "README.md"))).toBe(true);
     });
 
-    const env = readFileSync(join(projectDir, ".env"), "utf-8");
-    expect(env).toContain("LINEAR_API_KEY=lin_api_test123");
-    expect(env).toContain("LINEAR_TEAM_ID=team-abc");
-    expect(env).toContain("REPO_URL=https://github.com/org/mobile-app");
-    expect(env).toContain("REPO_DEFAULT_BRANCH=develop");
-    expect(env).toContain("REPO_TEAM_ID=team-abc");
+    it("does NOT create a package.json at the project root", () => {
+      const projectDir = join(tempDir, "my-project");
+      scaffold(baseOptions(projectDir, "my-project"));
+
+      expect(existsSync(join(projectDir, "package.json"))).toBe(false);
+    });
+
+    it("creates CLAUDE.md at the project root with project name", () => {
+      const projectDir = join(tempDir, "cool-agent");
+      scaffold(baseOptions(projectDir, "cool-agent"));
+
+      const claudeMdPath = join(projectDir, "CLAUDE.md");
+      expect(existsSync(claudeMdPath)).toBe(true);
+
+      const content = readFileSync(claudeMdPath, "utf-8");
+      expect(content).toContain("# cool-agent");
+      expect(content).not.toContain("{{PROJECT_NAME}}");
+      expect(content).toContain("urateam sidecar");
+    });
+
+    it("creates .gitignore with .urateam/.env entry", () => {
+      const projectDir = join(tempDir, "my-project");
+      scaffold(baseOptions(projectDir, "my-project"));
+
+      const gitignorePath = join(projectDir, ".gitignore");
+      expect(existsSync(gitignorePath)).toBe(true);
+
+      const content = readFileSync(gitignorePath, "utf-8");
+      expect(content).toContain(".urateam/.env");
+      expect(content).toContain(".urateam/node_modules/");
+    });
+
+    it(".urateam/package.json has sidecar name and @urateam/cli dependency", () => {
+      const projectDir = join(tempDir, "cool-agent");
+      scaffold(baseOptions(projectDir, "cool-agent"));
+
+      const pkg = JSON.parse(readFileSync(join(projectDir, ".urateam", "package.json"), "utf-8"));
+      expect(pkg.name).toBe("cool-agent-urateam");
+      expect(pkg.dependencies["@urateam/cli"]).toBeDefined();
+      expect(pkg.scripts.dev).toBe("ura dev");
+      expect(pkg.scripts.start).toBe("ura start");
+    });
+
+    it(".urateam/.env has provided credentials", () => {
+      const projectDir = join(tempDir, "my-project");
+      scaffold({
+        projectDir,
+        projectName: "my-project",
+        linearApiKey: "lin_api_abc123",
+        linearTeamId: "team-xyz",
+        repoUrl: "https://github.com/org/mobile-app",
+        defaultBranch: "develop",
+      });
+
+      const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+      expect(env).toContain("LINEAR_API_KEY=lin_api_abc123");
+      expect(env).toContain("LINEAR_TEAM_ID=team-xyz");
+      expect(env).toContain("REPO_URL=https://github.com/org/mobile-app");
+      expect(env).toContain("REPO_DEFAULT_BRANCH=develop");
+      expect(env).toContain("REPO_TEAM_ID=team-xyz");
+    });
+
+    it(".urateam/.env has a random DASHBOARD_PASSWORD", () => {
+      const projectDir = join(tempDir, "my-project");
+      scaffold(baseOptions(projectDir, "my-project"));
+
+      const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+      const match = env.match(/DASHBOARD_PASSWORD=([a-f0-9]+)/);
+      expect(match).not.toBeNull();
+      expect(match![1].length).toBeGreaterThanOrEqual(32);
+    });
   });
 
-  it("package.json uses project name and depends on @urateam/cli", () => {
-    const projectDir = join(tempDir, "cool-agent");
-    scaffold({
-      projectDir,
-      projectName: "cool-agent",
-      linearApiKey: "key",
-      linearTeamId: "team",
-      repoUrl: "https://github.com/x/y",
-      defaultBranch: "main",
+  describe("existing project (directory with files already)", () => {
+    it("preserves existing CLAUDE.md at project root", () => {
+      const projectDir = join(tempDir, "existing-project");
+      mkdirSync(projectDir, { recursive: true });
+      const existingContent = "# My Existing Project\n\nCustom content that should be preserved.\n";
+      writeFileSync(join(projectDir, "CLAUDE.md"), existingContent);
+
+      scaffold(baseOptions(projectDir, "existing-project"));
+
+      const finalContent = readFileSync(join(projectDir, "CLAUDE.md"), "utf-8");
+      expect(finalContent).toBe(existingContent);
     });
 
-    const pkg = JSON.parse(readFileSync(join(projectDir, "package.json"), "utf-8"));
-    expect(pkg.name).toBe("cool-agent");
-    expect(pkg.dependencies["@urateam/cli"]).toBeDefined();
-  });
+    it("preserves existing package.json at project root", () => {
+      const projectDir = join(tempDir, "existing-project");
+      mkdirSync(projectDir, { recursive: true });
+      const existingPkg = { name: "my-app", version: "1.0.0", dependencies: { react: "^19.0.0" } };
+      writeFileSync(join(projectDir, "package.json"), JSON.stringify(existingPkg, null, 2));
 
-  it("README.md includes project name", () => {
-    const projectDir = join(tempDir, "my-app");
-    scaffold({
-      projectDir,
-      projectName: "my-app",
-      linearApiKey: "key",
-      linearTeamId: "team",
-      repoUrl: "https://github.com/x/y",
-      defaultBranch: "main",
+      scaffold(baseOptions(projectDir, "existing-project"));
+
+      const finalPkg = JSON.parse(readFileSync(join(projectDir, "package.json"), "utf-8"));
+      expect(finalPkg.name).toBe("my-app");
+      expect(finalPkg.dependencies.react).toBe("^19.0.0");
+      expect(finalPkg.dependencies["@urateam/cli"]).toBeUndefined();
     });
 
-    const readme = readFileSync(join(projectDir, "README.md"), "utf-8");
-    expect(readme).toContain("my-app");
-    expect(readme).not.toContain("{{PROJECT_NAME}}");
-  });
+    it("appends .urateam/.env to existing .gitignore without duplication", () => {
+      const projectDir = join(tempDir, "existing-project");
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(join(projectDir, ".gitignore"), "node_modules/\ndist/\n");
 
-  it("copies .github/workflows/ci.yml", () => {
-    const projectDir = join(tempDir, "ci-test");
-    scaffold({
-      projectDir,
-      projectName: "ci-test",
-      linearApiKey: "key",
-      linearTeamId: "team",
-      repoUrl: "https://github.com/x/y",
-      defaultBranch: "main",
+      scaffold(baseOptions(projectDir, "existing-project"));
+
+      const content = readFileSync(join(projectDir, ".gitignore"), "utf-8");
+      expect(content).toContain("node_modules/");
+      expect(content).toContain("dist/");
+      expect(content).toContain(".urateam/.env");
     });
 
-    expect(existsSync(join(projectDir, ".github", "workflows", "ci.yml"))).toBe(true);
+    it("does NOT duplicate .urateam/.env entry if already present", () => {
+      const projectDir = join(tempDir, "existing-project");
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(join(projectDir, ".gitignore"), "node_modules/\n.urateam/.env\n");
+
+      scaffold(baseOptions(projectDir, "existing-project"));
+
+      const content = readFileSync(join(projectDir, ".gitignore"), "utf-8");
+      const matches = content.match(/\.urateam\/\.env/g);
+      expect(matches?.length).toBe(1);
+    });
+
+    it("still creates .urateam/ sidecar in existing project", () => {
+      const projectDir = join(tempDir, "existing-project");
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(join(projectDir, "README.md"), "# My App");
+      writeFileSync(join(projectDir, "package.json"), '{"name":"my-app"}');
+
+      scaffold(baseOptions(projectDir, "existing-project"));
+
+      expect(existsSync(join(projectDir, ".urateam", "package.json"))).toBe(true);
+      expect(existsSync(join(projectDir, ".urateam", ".env"))).toBe(true);
+    });
   });
 });
