@@ -4,6 +4,7 @@ import {
   writeFileSync,
   cpSync,
   readFileSync,
+  readdirSync,
   statSync,
   existsSync,
   appendFileSync,
@@ -56,38 +57,61 @@ export function scaffold(options: ScaffoldOptions): void {
     templateDir = join(__dirname, "..", "..", "template");
   }
 
-  // --- Sidecar files: copy template/.urateam/ → projectDir/.urateam/ (force overwrite) ---
+  // --- Sidecar files: refresh template files but preserve .env ---
+  // Template files (Dockerfile, docker-compose.yml, .env.example, README.md)
+  // are always overwritten with the latest version from the package.
+  // User-editable files (.env, package.json) are preserved if they exist
+  // so re-running create-urateam is safe and non-destructive to credentials.
   const urateamDir = join(projectDir, ".urateam");
-  cpSync(join(templateDir, ".urateam"), urateamDir, { recursive: true, force: true });
+  mkdirSync(urateamDir, { recursive: true });
 
-  // Write .urateam/package.json — the sidecar's own package.json
-  const pkg = {
-    name: `${projectName}-urateam`,
-    private: true,
-    type: "module",
-    scripts: {
-      dev: "ura dev",
-      start: "ura start",
-    },
-    dependencies: {
-      "@urateam/cli": "^0.1.4",
-    },
-  };
-  writeFileSync(join(urateamDir, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
+  // Copy template files from template/.urateam/, skipping .env if user has one
+  const urateamTemplateDir = join(templateDir, ".urateam");
+  for (const entry of readdirSync(urateamTemplateDir)) {
+    const src = join(urateamTemplateDir, entry);
+    const dest = join(urateamDir, entry);
+    // .env is never in the template — it's generated below — but guard anyway
+    if (entry === ".env") continue;
+    cpSync(src, dest, { recursive: true, force: true });
+  }
 
-  // Write .urateam/.env from user-provided values
-  const envContent = [
-    `LINEAR_API_KEY=${linearApiKey}`,
-    `LINEAR_WEBHOOK_SECRET=`,
-    `LINEAR_TEAM_ID=${linearTeamId}`,
-    `REPO_URL=${repoUrl}`,
-    `REPO_DEFAULT_BRANCH=${defaultBranch}`,
-    `REPO_TEAM_ID=${linearTeamId}`,
-    `DATABASE_URL=postgres://urateam:password@postgres:5432/urateam`,
-    `DASHBOARD_USER=admin`,
-    `DASHBOARD_PASSWORD=${randomBytes(16).toString("hex")}`,
-  ].join("\n") + "\n";
-  writeFileSync(join(urateamDir, ".env"), envContent);
+  // Write .urateam/package.json only if absent (user may have customized deps)
+  const pkgPath = join(urateamDir, "package.json");
+  if (!existsSync(pkgPath)) {
+    const pkg = {
+      name: `${projectName}-urateam`,
+      private: true,
+      type: "module",
+      scripts: {
+        dev: "ura dev",
+        start: "ura start",
+      },
+      dependencies: {
+        "@urateam/cli": "^0.1.4",
+      },
+    };
+    writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
+  }
+
+  // Write .urateam/.env only if absent — preserves real credentials on re-run.
+  // On first run, generates a random DASHBOARD_PASSWORD and fills in the values
+  // from user prompts. On re-run, the existing .env is kept intact and the
+  // user can re-edit it manually if they want to update credentials.
+  const envPath = join(urateamDir, ".env");
+  if (!existsSync(envPath)) {
+    const envContent = [
+      `LINEAR_API_KEY=${linearApiKey}`,
+      `LINEAR_WEBHOOK_SECRET=`,
+      `LINEAR_TEAM_ID=${linearTeamId}`,
+      `REPO_URL=${repoUrl}`,
+      `REPO_DEFAULT_BRANCH=${defaultBranch}`,
+      `REPO_TEAM_ID=${linearTeamId}`,
+      `DATABASE_URL=postgres://urateam:password@postgres:5432/urateam`,
+      `DASHBOARD_USER=admin`,
+      `DASHBOARD_PASSWORD=${randomBytes(16).toString("hex")}`,
+    ].join("\n") + "\n";
+    writeFileSync(envPath, envContent);
+  }
 
   // --- Project root files: copy only if absent (don't clobber user files) ---
   // Files with {{PROJECT_NAME}} placeholder get the substitution applied.
