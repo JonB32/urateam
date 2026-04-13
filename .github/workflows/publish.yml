@@ -30,14 +30,28 @@ jobs:
       - name: Test
         run: pnpm test
 
-      - name: Publish @urateam/core
-        run: pnpm --filter @urateam/core publish --access public --no-git-checks --provenance
+      # pnpm pack resolves workspace:* to real versions in the tarball.
+      # npm publish the tarball with --provenance for OIDC-based auth.
+      - name: Pack and publish @urateam/core
+        run: |
+          cd packages/core
+          pnpm pack
+          npm publish *.tgz --access public --provenance
 
-      - name: Publish @urateam/dashboard
-        run: pnpm --filter @urateam/dashboard publish --access public --no-git-checks --provenance
+      - name: Pack and publish @urateam/dashboard
+        run: |
+          cd packages/dashboard
+          pnpm pack
+          npm publish *.tgz --access public --provenance
 
-      - name: Publish @urateam/cli
-        run: pnpm --filter @urateam/cli publish --access public --no-git-checks --provenance
+      - name: Pack and publish @urateam/cli
+        run: |
+          cd packages/cli
+          pnpm pack
+          npm publish *.tgz --access public --provenance
 
-      - name: Publish create-urateam
-        run: pnpm --filter create-urateam publish --access public --no-git-checks --provenance
+      - name: Pack and publish create-urateam
+        run: |
+          cd packages/create-urateam
+          pnpm pack
+          npm publish *.tgz --access public --provenance
