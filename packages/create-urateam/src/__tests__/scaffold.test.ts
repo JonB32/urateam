@@ -122,13 +122,28 @@ describe("scaffold — sidecar pattern", () => {
       expect(content).not.toContain("{{PROJECT_NAME}}");
     });
 
-    it(".gitignore template has .env.* wildcard with example exception", () => {
+    it(".gitignore has .env.* wildcard with example exception", () => {
       const projectDir = join(tempDir, "my-project");
       scaffold(baseOptions(projectDir, "my-project"));
 
       const content = readFileSync(join(projectDir, ".gitignore"), "utf-8");
       expect(content).toContain(".urateam/.env.*");
       expect(content).toContain("!.urateam/.env.example");
+    });
+
+    it(".gitignore content is inlined (not loaded from template file)", () => {
+      // Regression test: npm publish excludes files named `.gitignore` from
+      // tarballs automatically, so if the scaffold were to read it from disk,
+      // it would fail with ENOENT when installed from npm. This test verifies
+      // that the scaffold works regardless of whether template/.gitignore
+      // exists on disk.
+      const projectDir = join(tempDir, "my-project");
+      scaffold(baseOptions(projectDir, "my-project"));
+
+      const content = readFileSync(join(projectDir, ".gitignore"), "utf-8");
+      expect(content).toContain("# urateam sidecar");
+      expect(content).toContain(".urateam/.env");
+      expect(content).toContain(".urateam/node_modules/");
     });
   });
 

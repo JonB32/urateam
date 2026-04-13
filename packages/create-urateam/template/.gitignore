@@ -1,7 +1,0 @@
-# urateam sidecar
-.urateam/.env
-.urateam/.env.*
-!.urateam/.env.example
-.urateam/node_modules/
-.urateam/dist/
-.urateam/pnpm-lock.yaml
