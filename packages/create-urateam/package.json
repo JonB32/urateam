@@ -16,7 +16,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
     "prompts": "^2.4.2"

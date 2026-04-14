@@ -8,7 +8,7 @@
   "scripts": {
     "build": "turbo build",
     "test": "turbo test",
-    "test:integration": "pnpm --filter @urateam/core test:integration",
+    "test:integration": "pnpm --filter @urateam/core test:integration && pnpm --filter create-urateam test:integration",
     "lint": "turbo lint",
     "dev": "turbo dev"
   },
