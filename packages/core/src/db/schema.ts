@@ -162,3 +162,19 @@ export const budgetAlerts = sqliteTable(
     unique().on(t.date, t.scope, t.threshold),
   ],
 );
+
+export const auditEvents = sqliteTable("audit_events", {
+  id: text("id").primaryKey(),
+  timestamp: crossTimestamp("timestamp")
+    .notNull()
+    .$defaultFn(() => new Date()),
+  eventType: text("event_type").notNull(),
+  actor: text("actor").notNull(),
+  actorType: text("actor_type").notNull(),
+  scope: text("scope"),
+  runId: text("run_id"),
+  issueId: text("issue_id"),
+  inputTokens: integer("input_tokens").notNull().default(0),
+  outputTokens: integer("output_tokens").notNull().default(0),
+  payload: text("payload").notNull().default("{}"),
+});
