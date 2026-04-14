@@ -5,7 +5,13 @@ import { listAuditEvents, type ListAuditEventsFilters } from "./reader.js";
 const CSV_HEADER =
   "timestamp_utc,event_type,actor,actor_type,scope,run_id,issue_id,input_tokens,output_tokens,payload_json";
 
+// Cells starting with these characters are interpreted as formulas by Excel
+// and Google Sheets when the CSV is opened. Prefix with a single quote to
+// neutralize — RFC 4180 quoting alone does not defeat formula injection.
+const FORMULA_PREFIX = /^[=+\-@\t]/;
+
 function escapeCsvField(value: string): string {
+  if (FORMULA_PREFIX.test(value)) value = "'" + value;
   if (value.includes(",") || value.includes('"') || value.includes("\n") || value.includes("\r")) {
     return `"${value.replace(/"/g, '""')}"`;
   }

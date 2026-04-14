@@ -99,6 +99,48 @@ describe("streamAuditCsv", () => {
     expect(dataRow).toContain('"line1\nline2"');
   });
 
+  it("neutralizes formula-injection prefixes in user-controlled fields", async () => {
+    // Excel/Sheets interpret cells starting with =, +, -, @, or \t as formulas.
+    // RFC 4180 quoting alone does NOT defeat this — we must prefix with a single quote.
+    for (const [id, actor] of [
+      ["evt_eq", '=HYPERLINK("http://evil.com","Click")'],
+      ["evt_plus", "+1+2"],
+      ["evt_minus", "-2+3"],
+      ["evt_at", "@SUM(A1:A2)"],
+      ["evt_tab", "\tinjected"],
+    ] as const) {
+      await logAuditEvent(db, {
+        id,
+        timestamp: new Date(),
+        eventType: "dashboard.manual_action",
+        actor,
+        actorType: "dashboard-user",
+        scope: null,
+        runId: null,
+        issueId: null,
+        inputTokens: 0,
+        outputTokens: 0,
+        payload: {},
+      });
+    }
+    const rows = await collect(streamAuditCsv(db, {}));
+    const dataRows = rows.filter((r) => r.includes("dash"));
+    // Every row's actor field must begin with a literal single quote AFTER any wrapping quotes.
+    // For RFC-4180-quoted cells: `"'=HYPERLINK..."`; for unquoted: `'+1+2`.
+    for (const row of dataRows) {
+      // The actor cell is field index 2 (timestamp,event_type,actor,...). Find the third comma-separated field.
+      // Easier assertion: the row must contain the literal escape prefix.
+      expect(
+        row.includes(",'=") ||
+          row.includes(",'+") ||
+          row.includes(",'-") ||
+          row.includes(",'@") ||
+          row.includes(",'\t") ||
+          row.includes(',"\'='),
+      ).toBe(true);
+    }
+  });
+
   it("pages through events via pageSize", async () => {
     for (let i = 0; i < 6; i++) {
       await logAuditEvent(
