@@ -83,3 +83,75 @@ describe("issueLicense", () => {
     ).toThrow(/URATEAM_LICENSE_SIGNING_KEY_DER_B64/);
   });
 });
+
+describe("licenseCommand action", () => {
+  let originalSigningKey: string | undefined;
+
+  beforeEach(() => {
+    const { privateKey } = generateKeyPairSync("ed25519");
+    originalSigningKey = process.env.URATEAM_LICENSE_SIGNING_KEY_DER_B64;
+    process.env.URATEAM_LICENSE_SIGNING_KEY_DER_B64 = Buffer.from(
+      privateKey.export({ format: "der", type: "pkcs8" }),
+    ).toString("base64");
+  });
+
+  afterEach(() => {
+    if (originalSigningKey === undefined) {
+      delete process.env.URATEAM_LICENSE_SIGNING_KEY_DER_B64;
+    } else {
+      process.env.URATEAM_LICENSE_SIGNING_KEY_DER_B64 = originalSigningKey;
+    }
+  });
+
+  it("rejects --seats 0 instead of silently issuing an unlimited license", async () => {
+    const { licenseCommand } = await import("../commands/license.js");
+    licenseCommand.exitOverride(); // throw instead of process.exit on commander errors
+
+    await expect(
+      licenseCommand.parseAsync(
+        [
+          "issue",
+          "--customer-id", "cust_test",
+          "--tier", "pro",
+          "--expires", "2027-12-31",
+          "--seats", "0",
+        ],
+        { from: "user" },
+      ),
+    ).rejects.toThrow(/--seats must be a positive integer/);
+  });
+
+  it("rejects an unknown --tier value", async () => {
+    const { licenseCommand } = await import("../commands/license.js");
+    licenseCommand.exitOverride();
+
+    await expect(
+      licenseCommand.parseAsync(
+        [
+          "issue",
+          "--customer-id", "cust_test",
+          "--tier", "free",
+          "--expires", "2027-12-31",
+        ],
+        { from: "user" },
+      ),
+    ).rejects.toThrow(/tier must be 'pro' or 'enterprise'/);
+  });
+
+  it("rejects an unparseable --expires", async () => {
+    const { licenseCommand } = await import("../commands/license.js");
+    licenseCommand.exitOverride();
+
+    await expect(
+      licenseCommand.parseAsync(
+        [
+          "issue",
+          "--customer-id", "cust_test",
+          "--tier", "pro",
+          "--expires", "not-a-date",
+        ],
+        { from: "user" },
+      ),
+    ).rejects.toThrow(/invalid --expires/);
+  });
+});

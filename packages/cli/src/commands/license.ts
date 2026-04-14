@@ -77,10 +77,18 @@ export const licenseCommand = new Command("license")
         if (Number.isNaN(expiresAt.getTime())) {
           throw new Error(`invalid --expires: '${opts.expires}'`);
         }
+        let seats: number | null = null;
+        if (opts.seats !== undefined) {
+          const parsed = Number.parseInt(opts.seats, 10);
+          if (Number.isNaN(parsed) || parsed <= 0) {
+            throw new Error(`--seats must be a positive integer, got '${opts.seats}'`);
+          }
+          seats = parsed;
+        }
         const token = issueLicense({
           customerId: opts.customerId,
           tier: opts.tier,
-          seats: opts.seats ? Number.parseInt(opts.seats, 10) : null,
+          seats,
           expiresAt,
           features: opts.features ? opts.features.split(",").map((s) => s.trim()) : undefined,
         });
