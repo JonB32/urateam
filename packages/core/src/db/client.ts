@@ -55,6 +55,7 @@ const MIGRATION_COLUMNS: MigrationColumn[] = [
   { table: "pipeline_runs", column: "auto_merge_reason", sqliteType: "TEXT", pgType: "TEXT" },
   // BEC-94: auto-commit quality metric
   { table: "pipeline_runs", column: "auto_committed", sqliteType: "INTEGER", pgType: "BOOLEAN" },
+  { table: "pipeline_runs", column: "linear_team_id", sqliteType: "TEXT", pgType: "TEXT" },
 ];
 
 /**
@@ -92,7 +93,8 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
     feedback_context TEXT,
     auto_merged ${bool},
     auto_merge_reason TEXT,
-    auto_committed ${bool}
+    auto_committed ${bool},
+    linear_team_id TEXT
   );
 
   CREATE TABLE IF NOT EXISTS stage_runs (
@@ -151,6 +153,17 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
     id TEXT PRIMARY KEY,
     expires_at ${ts} NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS budget_alerts (
+    id TEXT PRIMARY KEY,
+    date TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    threshold INTEGER NOT NULL,
+    fired_at ${ts} NOT NULL,
+    UNIQUE(date, scope, threshold)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_budget_alerts_date_scope ON budget_alerts(date, scope);
 `;
 }
 
