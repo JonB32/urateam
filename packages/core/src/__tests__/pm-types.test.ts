@@ -181,4 +181,47 @@ describe("PmAgentConfigSchema — full coverage", () => {
     const parsed = PmAgentConfigSchema.parse(minimalRequired);
     expectTypeOf(parsed).toEqualTypeOf<PmAgentConfig>();
   });
+
+  it("accepts a full config with budgets block", () => {
+    const parsed = PmAgentConfigSchema.parse({
+      ...minimalRequired,
+      budgets: {
+        default: 5_000_000,
+        perTeam: { "team-a": 3_000_000, "team-b": 2_000_000 },
+        perRepo: { "github.com/org/repo": 1_500_000 },
+        alertChannel: "C_BUDGETS",
+      },
+    });
+    expect(parsed.budgets?.default).toBe(5_000_000);
+    expect(parsed.budgets?.perTeam?.["team-a"]).toBe(3_000_000);
+    expect(parsed.budgets?.perRepo?.["github.com/org/repo"]).toBe(1_500_000);
+    expect(parsed.budgets?.alertChannel).toBe("C_BUDGETS");
+  });
+
+  it("accepts a minimal config with no budgets field (backward compat)", () => {
+    const parsed = PmAgentConfigSchema.parse(minimalRequired);
+    expect(parsed.budgets).toBeUndefined();
+  });
+
+  it("rejects non-positive budget values", () => {
+    const resultNeg = PmAgentConfigSchema.safeParse({
+      ...minimalRequired,
+      budgets: { default: -1 },
+    });
+    expect(resultNeg.success).toBe(false);
+
+    const resultZero = PmAgentConfigSchema.safeParse({
+      ...minimalRequired,
+      budgets: { perTeam: { "team-a": 0 } },
+    });
+    expect(resultZero.success).toBe(false);
+  });
+
+  it("rejects empty string keys in perTeam/perRepo", () => {
+    const result = PmAgentConfigSchema.safeParse({
+      ...minimalRequired,
+      budgets: { perTeam: { "": 100 } },
+    });
+    expect(result.success).toBe(false);
+  });
 });

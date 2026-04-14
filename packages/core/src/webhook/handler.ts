@@ -11,6 +11,8 @@ import type { PipelineConfig, RepoConfig } from "../types.js";
 import { createLogger } from "../logger.js";
 import { webhookDedup } from "../db/schema.js";
 import type { AnyDb } from "../db/client.js";
+import type { PmAgentConfig } from "../pm/types.js";
+import { evaluateBudget } from "../pm/budget.js";
 
 const log = createLogger({ component: "WebhookHandler" });
 
@@ -24,6 +26,8 @@ export interface WebhookHandlerConfig {
   triggerMap?: TriggerMap;
   /** When provided, dedup keys are persisted in the database (survives restarts). */
   db?: AnyDb;
+  /** PM Agent config — when provided, enables the 100% budget gate on webhook starts. */
+  pmConfig?: PmAgentConfig;
 }
 
 /** Dedup interface shared by in-memory and DB-backed implementations. */
@@ -187,6 +191,38 @@ export function createWebhookHandler(config: WebhookHandlerConfig): Hono {
           }, 422);
         }
 
+        const linearTeamId = stateChange.issue.teamId ?? null;
+
+        // Budget gate: refuse new runs when any scope is at 100%.
+        // In-flight runs continue; PM Agent's startTodoIssues will
+        // pick this issue up on the next tick when the budget recovers.
+        if (config.pmConfig && config.db) {
+          try {
+            const evaluation = await evaluateBudget({
+              db: config.db,
+              config: config.pmConfig,
+            });
+            if (evaluation.promoteBlocked) {
+              log.warn(
+                {
+                  issueId: stateChange.issue.identifier,
+                  reason: evaluation.blockReason,
+                },
+                "webhook start refused — budget exceeded",
+              );
+              return c.json({
+                ok: true,
+                action: "start",
+                runQueued: false,
+                reason: "budget-exceeded",
+              });
+            }
+          } catch (err) {
+            log.error({ err }, "budget evaluation failed in webhook gate; allowing run");
+            // Fail open — if the evaluation crashes, let the run proceed.
+          }
+        }
+
         const sanitizedIssue = mapIssueToSchema(stateChange.issue);
 
         // Enqueue async - don't await, but catch unhandled errors
@@ -196,6 +232,7 @@ export function createWebhookHandler(config: WebhookHandlerConfig): Hono {
           resolved.config,
           repoConfig,
           sanitizedIssue,
+          linearTeamId,
         ).catch((err) => log.error({ err }, "runner.start() failed"));
 
         return c.json({ ok: true, action: "start", runQueued: true });

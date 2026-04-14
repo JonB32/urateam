@@ -176,6 +176,7 @@ export class PipelineRunner {
     pipelineConfig: PipelineConfig,
     repoConfig: RepoConfig,
     sanitizedIssue: SanitizedIssue,
+    linearTeamId: string | null = null,
   ): Promise<void> {
     log.info({ issueId: issue.identifier, pipeline: pipelineKey }, "start() called");
 
@@ -210,6 +211,7 @@ export class PipelineRunner {
         repoUrl: repoConfig.url,
         branch,
         status: "queued",
+        linearTeamId,
       });
     runLog.info({ branch }, "run queued");
 
@@ -539,6 +541,17 @@ export class PipelineRunner {
       issueId: issue.identifier,
     });
 
+    // Copy linearTeamId from the parent run (if any) for spend-cap accounting.
+    let linearTeamId: string | null = null;
+    if (parentRunId) {
+      const parentRows = await db
+        .select({ linearTeamId: pipelineRuns.linearTeamId })
+        .from(pipelineRuns)
+        .where(eq(pipelineRuns.id, parentRunId))
+        .limit(1);
+      linearTeamId = parentRows[0]?.linearTeamId ?? null;
+    }
+
     runLog.info({ branch, prUrl }, "inserting feedback run into DB");
     await db.insert(pipelineRuns).values({
       id: runId,
@@ -552,6 +565,7 @@ export class PipelineRunner {
       runType: "review-feedback",
       parentRunId: parentRunId ?? null,
       feedbackContext: JSON.stringify(feedbackComments),
+      linearTeamId,
     });
 
     const run = this.buildPipelineRun(runId, issue, pipelineKey, repoConfig, branch);

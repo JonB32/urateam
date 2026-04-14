@@ -4,6 +4,7 @@ import { resolvePipeline } from "../../pipeline/router.js";
 import { mapIssueToSchema } from "../../executor/prompt/schema-mapper.js";
 import type { PipelineConfig, RepoConfig } from "../../types.js";
 import type { PipelineRunner, LinearIssue } from "../../pipeline/runner.js";
+import type { BudgetEvaluation } from "../types.js";
 import { createLogger } from "../../logger.js";
 
 const log = createLogger({ component: "PmAgent:startTodo" });
@@ -17,6 +18,8 @@ export interface StartTodoInput {
   repoConfigs: Record<string, RepoConfig>;
   /** Maximum number of Todo issues to start per tick (rate limiter). */
   maxPerTick: number;
+  /** Budget evaluation from the current tick. When blocked, this action short-circuits. */
+  budgetEvaluation?: BudgetEvaluation;
 }
 
 export interface StartTodoResult {
@@ -37,6 +40,14 @@ export async function startTodoIssues(
   input: StartTodoInput,
 ): Promise<StartTodoResult[]> {
   const { linearClient, db, teamIds, runner, pipelineConfigs, repoConfigs, maxPerTick } = input;
+
+  if (input.budgetEvaluation?.promoteBlocked) {
+    log.info(
+      { reason: input.budgetEvaluation.blockReason },
+      "startTodoIssues skipped — budget exceeded",
+    );
+    return [];
+  }
 
   // 1. Query Linear for all "Todo" issues across configured teams
   const issuesResponse = await linearClient.issues({
@@ -143,7 +154,14 @@ export async function startTodoIssues(
     const sanitizedIssue = mapIssueToSchema(linearIssue);
 
     try {
-      await runner.start(linearIssue, resolved.key, resolved.config, repoConfig, sanitizedIssue);
+      await runner.start(
+        linearIssue,
+        resolved.key,
+        resolved.config,
+        repoConfig,
+        sanitizedIssue,
+        teamId ?? null,
+      );
       results.push({
         identifier: issue.identifier,
         title: issue.title,

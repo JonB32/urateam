@@ -1,15 +1,49 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createPmScheduler } from "../pm/scheduler.js";
 import { installTestProLicense, restoreLicense } from "./helpers/license.js";
+import type { BudgetEvaluation } from "../pm/types.js";
+
+function mockOkEvaluation(overrides: Partial<BudgetEvaluation> = {}): BudgetEvaluation {
+  return {
+    scopes: [
+      {
+        scope: { kind: "global" as const },
+        scopeLabel: "global",
+        limit: 5_000_000,
+        used: 0,
+        percent: 0,
+        tier: "ok" as const,
+      },
+    ],
+    worstTier: "ok",
+    promoteBlocked: false,
+    activeCount: 0,
+    ...overrides,
+  };
+}
+
+function mockBlockedEvaluation(): BudgetEvaluation {
+  return {
+    scopes: [
+      {
+        scope: { kind: "global" as const },
+        scopeLabel: "global",
+        limit: 5_000_000,
+        used: 5_000_000,
+        percent: 100,
+        tier: "blocked-100" as const,
+      },
+    ],
+    worstTier: "blocked-100",
+    promoteBlocked: true,
+    blockReason: "global at 100% (5,000,000 / 5,000,000 tokens)",
+    activeCount: 0,
+  };
+}
 
 describe("PmScheduler.tick", () => {
   const mockActions = {
-    checkBudgetGuards: vi.fn().mockResolvedValue({
-      promoteBlocked: false,
-      activeCount: 1,
-      tokenSpendPercent: 30,
-      dailyTokensUsed: 1500000,
-    }),
+    evaluateBudget: vi.fn().mockResolvedValue(mockOkEvaluation()),
     recoverRetriableRuns: vi.fn().mockResolvedValue({ recovered: [], exhausted: [] }),
     recoverStuckInProgressIssues: vi.fn().mockResolvedValue([]),
     triageNewIssues: vi.fn().mockResolvedValue([]),
@@ -54,9 +88,9 @@ describe("PmScheduler.tick", () => {
 
   it("executes actions in correct sequence", async () => {
     const callOrder: string[] = [];
-    mockActions.checkBudgetGuards.mockImplementation(async () => {
+    mockActions.evaluateBudget.mockImplementation(async () => {
       callOrder.push("budget");
-      return { promoteBlocked: false, activeCount: 1, tokenSpendPercent: 30, dailyTokensUsed: 1500000 };
+      return mockOkEvaluation({ activeCount: 1 });
     });
     mockActions.recoverRetriableRuns.mockImplementation(async () => { callOrder.push("recover"); return { recovered: [], exhausted: [] }; });
     mockActions.recoverStuckInProgressIssues.mockImplementation(async () => { callOrder.push("recoverStuck"); return []; });
@@ -83,7 +117,7 @@ describe("PmScheduler.tick", () => {
     expect(mockActions.recoverStuckInProgressIssues).toHaveBeenCalledTimes(2);
 
     // Verify ordering: recoverStuck must be called after budget and before triage
-    const budgetOrder = mockActions.checkBudgetGuards.mock.invocationCallOrder[0];
+    const budgetOrder = mockActions.evaluateBudget.mock.invocationCallOrder[0];
     const recoverStuckOrder = mockActions.recoverStuckInProgressIssues.mock.invocationCallOrder[0];
     const triageOrder = mockActions.triageNewIssues.mock.invocationCallOrder[0];
     expect(recoverStuckOrder).toBeGreaterThan(budgetOrder);
@@ -91,13 +125,7 @@ describe("PmScheduler.tick", () => {
   });
 
   it("skips promote when budget blocked", async () => {
-    mockActions.checkBudgetGuards.mockResolvedValue({
-      promoteBlocked: true,
-      reason: "maxInFlight reached",
-      activeCount: 3,
-      tokenSpendPercent: 50,
-      dailyTokensUsed: 2500000,
-    });
+    mockActions.evaluateBudget.mockResolvedValue(mockBlockedEvaluation());
 
     const scheduler = makeScheduler();
     await scheduler.tick();

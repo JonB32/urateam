@@ -1,4 +1,4 @@
-import { customType, sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { customType, sqliteTable, text, integer, unique } from "drizzle-orm/sqlite-core";
 
 /**
  * Active driver mode for cross-database timestamp serialization.
@@ -73,6 +73,8 @@ export const pipelineRuns = sqliteTable("pipeline_runs", {
   autoMergeReason: text("auto_merge_reason"),
   /** True (1) when auto-commit was triggered because the agent did not commit its work. Quality metric. */
   autoCommitted: integer("auto_committed", { mode: "boolean" }),
+  /** Linear team ID from the webhook payload. Nullable for legacy rows created before per-team budget scoping. */
+  linearTeamId: text("linear_team_id"),
 });
 
 export const stageRuns = sqliteTable("stage_runs", {
@@ -136,3 +138,27 @@ export const pmApprovals = sqliteTable("pm_approvals", {
     .$defaultFn(() => new Date()),
   resolvedAt: crossTimestamp("resolved_at"),
 });
+
+/**
+ * Dedup table for budget threshold alerts. One row per (date, scope, threshold)
+ * — the UNIQUE constraint + onConflictDoNothing() guarantees an alert fires at
+ * most once per day per scope per threshold.
+ */
+export const budgetAlerts = sqliteTable(
+  "budget_alerts",
+  {
+    id: text("id").primaryKey(),
+    /** UTC date the alert covers, formatted 'YYYY-MM-DD'. */
+    date: text("date").notNull(),
+    /** 'global' | 'team:<linearTeamId>' | 'repo:<repoUrl>'. */
+    scope: text("scope").notNull(),
+    /** 50 | 80 | 100. */
+    threshold: integer("threshold").notNull(),
+    firedAt: crossTimestamp("fired_at")
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    unique().on(t.date, t.scope, t.threshold),
+  ],
+);

@@ -77,6 +77,11 @@ describe("startTodoIssues", () => {
     expect(results[0].identifier).toBe("BEC-200");
     expect(results[0].started).toBe(true);
     expect(runner.start).toHaveBeenCalledOnce();
+    // Regression: linearTeamId must be propagated as the 6th argument so spend-cap
+    // accounting per team works. Previously defaulted to null, breaking team scopes.
+    const callArgs = runner.start.mock.calls[0];
+    expect(callArgs.length).toBeGreaterThanOrEqual(6);
+    expect(callArgs[5]).toBe("team-1");
   });
 
   it("skips Todo issue that already has an active run", async () => {

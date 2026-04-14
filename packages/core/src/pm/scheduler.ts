@@ -1,5 +1,7 @@
-import type { PmAgentConfig, TickResult, BudgetGuardResult } from "./types.js";
-import { checkBudgetGuards, type BudgetGuardInput } from "./budget.js";
+import type { PmAgentConfig, TickResult, BudgetEvaluation } from "./types.js";
+import { evaluateBudget } from "./budget.js";
+import { maybeFireAlerts, type PostSlackMessage } from "./budget-alerts.js";
+import { postSlackMessage } from "./slack-helpers.js";
 import { triageNewIssues, type TriageInput } from "./actions/triage.js";
 import { promoteReadyIssues, type PromoteInput } from "./actions/promote.js";
 import { deprioritizeStaleIssues, type DeprioritizeInput } from "./actions/deprioritize.js";
@@ -40,7 +42,8 @@ export interface PmSchedulerDeps {
 }
 
 interface PmSchedulerActions {
-  checkBudgetGuards: (input: BudgetGuardInput) => Promise<BudgetGuardResult>;
+  evaluateBudget: (input: { db: AnyDb; config: PmAgentConfig }) => Promise<BudgetEvaluation>;
+  postSlackMessage?: PostSlackMessage;
   recoverRetriableRuns: (input: any) => Promise<RecoverResult>;
   recoverStuckInProgressIssues?: (input: any) => Promise<StuckIssueResult[]>;
   startTodoIssues?: (input: StartTodoInput) => Promise<StartTodoResult[]>;
@@ -130,13 +133,63 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
         const db = deps.db as AnyDb;
         const config = deps.config;
 
+        let evaluation: BudgetEvaluation;
         try {
-          tick.budgetGuard = actions
-            ? await actions.checkBudgetGuards({ db, maxInFlight: config.maxInFlight, dailyTokenBudget: config.dailyTokenBudget })
-            : await checkBudgetGuards({ db, maxInFlight: config.maxInFlight, dailyTokenBudget: config.dailyTokenBudget });
+          evaluation = actions?.evaluateBudget
+            ? await actions.evaluateBudget({ db, config })
+            : await evaluateBudget({ db, config });
         } catch (err) {
-          log.error({ err }, "budget check failed");
+          log.error({ err }, "budget evaluation failed");
           tick.errors.push(`budget: ${(err as Error).message}`);
+          evaluation = {
+            scopes: [],
+            worstTier: "ok",
+            promoteBlocked: false,
+            activeCount: 0,
+          };
+        }
+
+        // Backward-compat TickResult shape: derive BudgetGuardResult from evaluation.
+        const globalScope = evaluation.scopes.find((s) => s.scope.kind === "global");
+        tick.budgetGuard = {
+          promoteBlocked: evaluation.promoteBlocked,
+          reason: evaluation.blockReason,
+          activeCount: evaluation.activeCount,
+          tokenSpendPercent: globalScope?.percent ?? 0,
+          dailyTokensUsed: globalScope?.used ?? 0,
+        };
+
+        // Preserve legacy maxInFlight block: if we're at capacity, treat as blocked
+        // (existing promoters already check tick.budgetGuard.promoteBlocked).
+        if (evaluation.activeCount >= config.maxInFlight && !tick.budgetGuard.promoteBlocked) {
+          tick.budgetGuard.promoteBlocked = true;
+          tick.budgetGuard.reason = `maxInFlight reached (${evaluation.activeCount}/${config.maxInFlight})`;
+        }
+
+        // Fire threshold alerts for newly-crossed scopes (deduped in budget_alerts).
+        try {
+          const alertChannel = config.budgets?.alertChannel ?? config.slackChannelId;
+          const postSlack: PostSlackMessage | undefined = actions?.postSlackMessage
+            ?? (deps.slackBotToken
+              ? async (channel, blocks) => {
+                  const result = await postSlackMessage(deps.slackBotToken, { channel, blocks });
+                  // postSlackMessage swallows fetch errors (returns null) and logs
+                  // ok:false without throwing. Re-throw here so maybeFireAlerts'
+                  // catch-block triggers the dedup row rollback and the next tick
+                  // re-posts the alert.
+                  if (result === null) {
+                    throw new Error("postSlackMessage returned null (fetch failed)");
+                  }
+                  if (result && result.ok === false) {
+                    throw new Error(`postSlackMessage returned ok:false (${result.error ?? "unknown"})`);
+                  }
+                }
+              : undefined);
+          if (postSlack) {
+            await maybeFireAlerts(evaluation, db, postSlack, alertChannel);
+          }
+        } catch (err) {
+          log.error({ err }, "failed to fire budget alerts");
         }
 
         // --- Recovery sweep: requeue retriable (transient-failure) runs ---
@@ -215,6 +268,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                     pipelineConfigs: deps.pipelineConfigs,
                     repoConfigs: deps.repoConfigs,
                     maxPerTick: slotsAvailable,
+                    budgetEvaluation: evaluation,
                   });
               const started = todoResults.filter((r) => r.started);
               if (started.length > 0) {

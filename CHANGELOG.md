@@ -16,8 +16,17 @@ notes call out when a change affects only a single package.
 - `@urateam/core`: license keys are now Ed25519-signed JWTs validated offline against an embedded public key. Replaces the previous "any non-empty key grants Pro" placeholder.
 - `@urateam/core`: new test helper `__tests__/helpers/license.ts` exports `installTestProLicense()` / `restoreLicense()` for downstream tests that need a valid signed JWT.
 - `scripts/generate-license-keypair.ts`: operator helper that prints a fresh Ed25519 keypair for license signing.
+- `@urateam/core`: per-team and per-repo daily token budgets via new `PmAgentConfig.budgets` block. Layers on top of the existing global `dailyTokenBudget` as an org-wide ceiling. Enterprise tier feature 4.3.
+- `@urateam/core`: Slack budget alerts fire at 50%, 80%, and 100% of any scope's daily budget. Deduped once per `(date, scope, threshold)` via a new `budget_alerts` table. Cumulative thresholds — a scope that jumps from 0% to 85% in one tick posts both the 50% and 80% messages.
+- `@urateam/core`: direct-webhook pipeline starts now respect the budget gate — at 100%, the run is refused with `{ runQueued: false, reason: "budget-exceeded" }` and logged. The PM Agent's `startTodoIssues` action on the next tick picks it up automatically after the budget resets (midnight UTC) or the cap is raised.
+- `@urateam/core`: `startTodoIssues` short-circuits when the budget is blocked, so orphaned Todo issues don't bypass the cap.
+- `pipeline_runs` table gains a `linear_team_id` column (nullable for legacy rows), populated from the Linear webhook payload at run creation time and from the parent run for review-feedback runs.
+- New `budget_alerts` table with `UNIQUE(date, scope, threshold)` for persistent alert dedup.
 
 ### Changed
+- `pm/budget.ts`: `checkBudgetGuards` is replaced by `evaluateBudget`, which returns per-scope breakdowns (`ScopeBudget[]`) and a `worstTier` / `promoteBlocked` / `blockReason` verdict. Installs that don't configure `budgets` keep the existing single-global behavior with the addition of threshold alerts on the global scope. The previous silent 80% promotion-block gate is replaced with a 100% hard gate plus explicit 50/80 warnings. `checkBudgetGuards` remains as a thin backward-compat shim.
+- In-flight pipeline runs are NOT aborted when the cap is crossed. Only new runs are refused. Operators resume by raising the cap (restart required) or waiting for midnight UTC.
+- `percent` values now use `Math.floor` rather than `Math.round`, so thresholds trigger exactly at the integer boundary (99.9% → 99, not 100).
 - **Breaking (license)**: tier enum renamed from `free | pro | team | enterprise` to `oss | pro | enterprise`. The `team` tier is removed. Code reading `LicenseStatus.tier` should expect `"oss"` where it previously expected `"free"`.
 - **Breaking (license)**: `URATEAM_LICENSE_KEY` must now be a valid Ed25519-signed JWT issued by urateam. Existing placeholder keys will fail validation; the system falls back to OSS mode and logs a warning at startup.
 - `LicenseStatus` interface gains `features: Set<string>`, `customerId`, `expiresAt`, `seats`, and `invalidReason` fields. The `key` field is removed.

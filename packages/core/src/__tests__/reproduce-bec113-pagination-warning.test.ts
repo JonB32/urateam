@@ -196,9 +196,21 @@ describe("BEC-113 CONFIRMED FIXED: scheduler integration", () => {
     const callOrder: string[] = [];
 
     const mockActions = {
-      checkBudgetGuards: vi.fn().mockImplementation(async () => {
+      evaluateBudget: vi.fn().mockImplementation(async () => {
         callOrder.push("budget");
-        return { promoteBlocked: false, activeCount: 0, tokenSpendPercent: 0, dailyTokensUsed: 0 };
+        return {
+          scopes: [{
+            scope: { kind: "global" as const },
+            scopeLabel: "global",
+            limit: 5_000_000,
+            used: 0,
+            percent: 0,
+            tier: "ok" as const,
+          }],
+          worstTier: "ok" as const,
+          promoteBlocked: false,
+          activeCount: 0,
+        };
       }),
       recoverRetriableRuns: vi.fn().mockImplementation(async () => {
         callOrder.push("recoverRetriable");

@@ -14,6 +14,18 @@ export const PmAgentConfigSchema = z.object({
   stuckIssueTargetState: z.enum(["Backlog", "Todo"]).default("Backlog"),
   /** Max number of stuck issues to recover per PM Agent tick (rate limiter). */
   stuckIssueMaxPerTick: z.number().int().min(1).default(5),
+  budgets: z
+    .object({
+      /** Default daily token budget for any team or repo not explicitly listed. Falls back to top-level dailyTokenBudget if omitted. */
+      default: z.number().int().positive().optional(),
+      /** Per-team daily token budget, keyed by Linear team ID. Overrides default for that team. */
+      perTeam: z.record(z.string().min(1), z.number().int().positive()).optional(),
+      /** Per-repo daily token budget, keyed by full repo URL. Overrides default for that repo. */
+      perRepo: z.record(z.string().min(1), z.number().int().positive()).optional(),
+      /** Slack channel for budget alerts. Defaults to the PM Agent's slackChannelId. */
+      alertChannel: z.string().min(1).optional(),
+    })
+    .optional(),
 });
 export type PmAgentConfig = z.infer<typeof PmAgentConfigSchema>;
 
@@ -23,6 +35,33 @@ export interface BudgetGuardResult {
   activeCount: number;
   tokenSpendPercent: number;
   dailyTokensUsed: number;
+}
+
+export type BudgetTier = "ok" | "warn-50" | "warn-80" | "blocked-100";
+
+export type BudgetScope =
+  | { kind: "global" }
+  | { kind: "team"; teamId: string }
+  | { kind: "repo"; repoUrl: string };
+
+export interface ScopeBudget {
+  scope: BudgetScope;
+  /** Human-readable label: "global" | "team <id>" | "repo <short-name>". Used in Slack messages and log lines. */
+  scopeLabel: string;
+  limit: number;
+  used: number;
+  percent: number;
+  tier: BudgetTier;
+}
+
+export interface BudgetEvaluation {
+  scopes: ScopeBudget[];
+  worstTier: BudgetTier;
+  /** True iff any scope is at tier 'blocked-100'. */
+  promoteBlocked: boolean;
+  /** Human-readable reason for a block, naming the first blocking scope. Undefined when not blocked. */
+  blockReason?: string;
+  activeCount: number;
 }
 
 export interface TriageResult {
