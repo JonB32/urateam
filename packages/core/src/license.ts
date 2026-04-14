@@ -2,7 +2,7 @@ import { createPublicKey, verify } from "node:crypto";
 import { createLogger } from "./logger.js";
 import * as publicKeyMod from "./license-public-key.js";
 import type { AnyDb } from "./db/client.js";
-import { logAuditEvent } from "./audit/writer.js";
+import { logAuditEventUnchecked } from "./audit/writer.js";
 import { licenseValidationFailedEvent } from "./audit/events.js";
 
 const log = createLogger({ component: "license" });
@@ -91,7 +91,7 @@ export function checkLicense(db?: AnyDb): LicenseStatus {
     cachedStatus = ossStatus(result.reason);
     log.warn({ reason: result.reason }, "license key invalid — running in OSS mode");
     if (db && result.reason !== "malformed") {
-      void logAuditEvent(
+      void logAuditEventUnchecked(
         db,
         licenseValidationFailedEvent({ invalidReason: result.reason }),
       );

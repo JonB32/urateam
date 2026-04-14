@@ -1,14 +1,20 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createDb } from "../../db/client.js";
 import { logAuditEvent } from "../../audit/writer.js";
 import { pmPromotedEvent, budgetRefusedEvent } from "../../audit/events.js";
 import { streamAuditCsv } from "../../audit/csv.js";
 import type { AuditEvent } from "../../types.js";
+import { installTestProLicense, restoreLicense } from "../helpers/license.js";
 
 let db: any;
 
 beforeEach(async () => {
+  await installTestProLicense("enterprise");
   db = await createDb({ connectionString: ":memory:" });
+});
+
+afterEach(async () => {
+  await restoreLicense();
 });
 
 async function collect(gen: AsyncIterable<string>): Promise<string[]> {

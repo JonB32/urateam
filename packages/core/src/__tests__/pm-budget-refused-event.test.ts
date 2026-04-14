@@ -42,7 +42,7 @@ function mixedBlockedEvaluation(): BudgetEvaluation {
 
 describe("budget.run_refused audit event", () => {
   beforeEach(async () => {
-    await installTestProLicense();
+    await installTestProLicense("enterprise");
   });
 
   afterEach(async () => {

@@ -89,7 +89,7 @@ export async function listAuditEvents(
     .from(auditEvents)
     .where(nativeConditions.length ? and(...nativeConditions) : undefined)
     .orderBy(desc(auditEvents.timestamp))
-    .limit(limit * 2);
+    .limit(limit * 4);
 
   // Projected: pipeline_runs
   const runConditions: any[] = [];
@@ -97,26 +97,37 @@ export async function listAuditEvents(
   if (filters.to) runConditions.push(lte(pipelineRuns.startedAt, filters.to));
   if (filters.runId) runConditions.push(eq(pipelineRuns.id, filters.runId));
   if (filters.issueId) runConditions.push(eq(pipelineRuns.issueId, filters.issueId));
+  if (cursorTs) runConditions.push(lte(pipelineRuns.startedAt, cursorTs));
   const runRows = await (db as any)
     .select()
     .from(pipelineRuns)
     .where(runConditions.length ? and(...runConditions) : undefined)
     .orderBy(desc(pipelineRuns.startedAt))
-    .limit(limit * 2);
+    .limit(limit * 4);
 
-  // Projected: pm_approvals
+  // Projected: pm_approvals (filter by createdAt)
+  const apprConditions: any[] = [];
+  if (filters.from) apprConditions.push(gte(pmApprovals.createdAt, filters.from));
+  if (filters.to) apprConditions.push(lte(pmApprovals.createdAt, filters.to));
+  if (cursorTs) apprConditions.push(lte(pmApprovals.createdAt, cursorTs));
   const apprRows = await (db as any)
     .select()
     .from(pmApprovals)
+    .where(apprConditions.length ? and(...apprConditions) : undefined)
     .orderBy(desc(pmApprovals.createdAt))
-    .limit(limit * 2);
+    .limit(limit * 4);
 
-  // Projected: budget_alerts
+  // Projected: budget_alerts (filter by firedAt)
+  const alertConditions: any[] = [];
+  if (filters.from) alertConditions.push(gte(budgetAlerts.firedAt, filters.from));
+  if (filters.to) alertConditions.push(lte(budgetAlerts.firedAt, filters.to));
+  if (cursorTs) alertConditions.push(lte(budgetAlerts.firedAt, cursorTs));
   const alertRows = await (db as any)
     .select()
     .from(budgetAlerts)
+    .where(alertConditions.length ? and(...alertConditions) : undefined)
     .orderBy(desc(budgetAlerts.firedAt))
-    .limit(limit * 2);
+    .limit(limit * 4);
 
   const merged: AuditEvent[] = [
     ...nativeRows.map(parseNativeRow),

@@ -190,6 +190,18 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
         if (evaluation.activeCount >= config.maxInFlight && !tick.budgetGuard.promoteBlocked) {
           tick.budgetGuard.promoteBlocked = true;
           tick.budgetGuard.reason = `maxInFlight reached (${evaluation.activeCount}/${config.maxInFlight})`;
+          // Emit a budget.run_refused event so operators can trace "why didn't
+          // this run start?" when capacity (not token spend) is the blocker.
+          void logAuditEvent(
+            db,
+            budgetRefusedEvent({
+              scope: "global",
+              scopeType: "global",
+              tokensUsed: evaluation.activeCount,
+              limit: config.maxInFlight,
+              utilization: 100,
+            }),
+          );
         }
 
         // Fire threshold alerts for newly-crossed scopes (deduped in budget_alerts).

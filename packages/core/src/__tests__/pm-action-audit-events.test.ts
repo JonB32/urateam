@@ -1,15 +1,23 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createDb } from "../db/client.js";
 import { auditEvents, pmApprovals } from "../db/schema.js";
 import { promoteReadyIssues } from "../pm/actions/promote.js";
 import { triageNewIssues } from "../pm/actions/triage.js";
 import { resolveApprovals } from "../pm/actions/resolve-approvals.js";
+import { installTestProLicense, restoreLicense } from "./helpers/license.js";
 
 async function getAuditRows(db: any) {
   return await db.select().from(auditEvents);
 }
 
 describe("pm action audit events", () => {
+  beforeEach(async () => {
+    await installTestProLicense("enterprise");
+  });
+  afterEach(async () => {
+    await restoreLicense();
+  });
+
   it("emits pm.issue_promoted when promote.ts moves issue to Todo", async () => {
     const db = await createDb({ connectionString: ":memory:" });
 

@@ -39,7 +39,6 @@ export async function* streamAuditCsv(
 ): AsyncGenerator<string, void, void> {
   yield CSV_HEADER;
   let cursor: string | null = null;
-  const seen = new Set<string>();
   // safety bound to prevent infinite loops from broken cursors
   let pages = 0;
   const maxPages = 100000;
@@ -51,8 +50,6 @@ export async function* streamAuditCsv(
         cursor: cursor ?? undefined,
       });
     for (const e of events) {
-      if (seen.has(e.id)) continue;
-      seen.add(e.id);
       yield eventToCsvRow(e);
     }
     if (!nextCursor || events.length === 0) break;
