@@ -42,26 +42,35 @@ jobs:
       # errors so per-package version bumps are supported (the workflow
       # publishes all 4 packages on each tag, but some may already be at
       # the same version).
-      - name: Pack and publish @urateam/core
+      # Each package is packed → verified → published. The verify step
+      # extracts the tarball and asserts expected files are present (and
+      # for create-urateam, runs scaffold() end-to-end). Verification
+      # failure blocks the subsequent publish, preventing broken artifacts
+      # from reaching npm — the safety net the 0.1.4 ENOENT crash needed.
+      - name: Pack, verify, and publish @urateam/core
         run: |
           cd packages/core
           pnpm pack
+          ../../.github/scripts/verify-tarball.sh "$(ls *.tgz)" @urateam/core
           ../../.github/scripts/publish-package.sh *.tgz
 
-      - name: Pack and publish @urateam/dashboard
+      - name: Pack, verify, and publish @urateam/dashboard
         run: |
           cd packages/dashboard
           pnpm pack
+          ../../.github/scripts/verify-tarball.sh "$(ls *.tgz)" @urateam/dashboard
           ../../.github/scripts/publish-package.sh *.tgz
 
-      - name: Pack and publish @urateam/cli
+      - name: Pack, verify, and publish @urateam/cli
         run: |
           cd packages/cli
           pnpm pack
+          ../../.github/scripts/verify-tarball.sh "$(ls *.tgz)" @urateam/cli
           ../../.github/scripts/publish-package.sh *.tgz
 
-      - name: Pack and publish create-urateam
+      - name: Pack, verify, and publish create-urateam
         run: |
           cd packages/create-urateam
           pnpm pack
+          ../../.github/scripts/verify-tarball.sh "$(ls *.tgz)" create-urateam
           ../../.github/scripts/publish-package.sh *.tgz
