@@ -4,6 +4,7 @@ import { pmApprovals } from "../../db/schema.js";
 import { eq } from "drizzle-orm";
 import { resolveWorkflowStates } from "../linear-helpers.js";
 import { createLogger } from "../../logger.js";
+import { logAuditEvent, pmDeprioritizedEvent, pmCancelledEvent } from "../../audit/index.js";
 
 const log = createLogger({ component: "PmAgent:approvals" });
 
@@ -108,6 +109,20 @@ export async function resolveApprovals(input: ResolveApprovalsInput): Promise<Re
       if (!actionExecuted) {
         log.error({ issueId: approval.issueId, action: approval.action }, "approved in DB but Linear action failed — manual intervention needed");
       } else {
+        if (approval.action === "deprioritize") {
+          void logAuditEvent(db, pmDeprioritizedEvent({
+            issueId: approval.issueId,
+            oldPriority: null,
+            newPriority: 4,
+            approvalId: approval.id,
+          }));
+        } else if (approval.action === "cancel") {
+          void logAuditEvent(db, pmCancelledEvent({
+            issueId: approval.issueId,
+            approvalId: approval.id,
+            reason: approval.reason,
+          }));
+        }
         log.info({ issueId: approval.issueId, action: approval.action }, "approval executed");
       }
     } catch (err) {

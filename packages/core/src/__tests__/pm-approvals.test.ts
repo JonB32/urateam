@@ -23,7 +23,7 @@ function mockApprovalDb() {
     rows,
     select: () => ({
       from: () => ({
-        where: () => Promise.resolve(rows),
+        where: () => Promise.resolve([...rows]),
       }),
     }),
     insert: () => ({

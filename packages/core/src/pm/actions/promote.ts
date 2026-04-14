@@ -1,6 +1,8 @@
 import type { PromoteResult, ConflictCheckResult } from "../types.js";
 import { resolveWorkflowStates } from "../linear-helpers.js";
 import { createLogger } from "../../logger.js";
+import type { AnyDb } from "../../db/client.js";
+import { logAuditEvent, pmPromotedEvent } from "../../audit/index.js";
 
 const log = createLogger({ component: "PmAgent:promote" });
 
@@ -11,6 +13,8 @@ export interface PromoteInput {
   checkConflict: (description: string) => Promise<ConflictCheckResult>;
   /** Pre-fetched workflow state map. Falls back to fetching if not provided. */
   stateMap?: Map<string, string>;
+  /** Optional DB handle. When present, successful promotions write audit events. */
+  db?: AnyDb;
 }
 
 export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteResult[]> {
@@ -77,6 +81,18 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
     }
 
     await linearClient.updateIssue(candidate.id, { stateId: todoStateId });
+
+    if (input.db) {
+      void logAuditEvent(input.db, pmPromotedEvent({
+        issueId: candidate.identifier,
+        fromState: "Backlog",
+        toState: "Todo",
+        priority: candidate.priority,
+        reason: conflict.overlapRisk === "low"
+          ? `highest priority, low overlap: ${conflict.reasoning}`
+          : "highest priority, no conflict",
+      }));
+    }
 
     const overlapNote = conflict.overlapRisk === "low"
       ? `\n⚠️ *Low overlap risk:* ${conflict.reasoning}`

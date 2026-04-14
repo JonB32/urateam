@@ -318,6 +318,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                 sanitize,
                 batchSize: config.triageBatchSize,
                 stateMap,
+                db,
               });
         } catch (err) {
           log.error({ err }, "triage failed");
@@ -392,6 +393,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                 slotsAvailable,
                 checkConflict,
                 stateMap,
+                db,
               });
             }
           } catch (err) {
