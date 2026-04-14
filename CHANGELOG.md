@@ -12,6 +12,15 @@ notes call out when a change affects only a single package.
 
 ### Added
 - `@urateam/cli`: CLI version is now read from `package.json` instead of being hardcoded (#19, #25).
+- `@urateam/cli`: new hidden `ura license issue` admin command for generating Ed25519-signed Enterprise license keys.
+- `@urateam/core`: license keys are now Ed25519-signed JWTs validated offline against an embedded public key. Replaces the previous "any non-empty key grants Pro" placeholder.
+- `@urateam/core`: new test helper `__tests__/helpers/license.ts` exports `installTestProLicense()` / `restoreLicense()` for downstream tests that need a valid signed JWT.
+- `scripts/generate-license-keypair.ts`: operator helper that prints a fresh Ed25519 keypair for license signing.
+
+### Changed
+- **Breaking (license)**: tier enum renamed from `free | pro | team | enterprise` to `oss | pro | enterprise`. The `team` tier is removed. Code reading `LicenseStatus.tier` should expect `"oss"` where it previously expected `"free"`.
+- **Breaking (license)**: `URATEAM_LICENSE_KEY` must now be a valid Ed25519-signed JWT issued by urateam. Existing placeholder keys will fail validation; the system falls back to OSS mode and logs a warning at startup.
+- `LicenseStatus` interface gains `features: Set<string>`, `customerId`, `expiresAt`, `seats`, and `invalidReason` fields. The `key` field is removed.
 
 ## [0.1.6] - 2026-04-13
 
