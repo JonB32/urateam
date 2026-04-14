@@ -174,7 +174,7 @@ function verifyJwt(token: string): VerifyResult {
   if (claims.iss !== ISSUER) return { ok: false, reason: "wrong-issuer" };
 
   const now = Math.floor(Date.now() / 1000);
-  if (typeof claims.exp !== "number" || claims.exp < now) {
+  if (typeof claims.exp !== "number" || claims.exp <= now) {
     return { ok: false, reason: "expired" };
   }
 

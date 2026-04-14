@@ -206,4 +206,38 @@ describe("checkLicense — JWT validation", () => {
     expect(status.tier).toBe("oss");
     expect(status.invalidReason).toBe("malformed");
   });
+
+  it("rejects tokens with non-EdDSA `alg` headers (algorithm confusion guard)", () => {
+    // Hand-craft a JWT with a different alg header and any signature.
+    // The verifier must reject it before the signature is even checked.
+    function craft(headerObj: object, payloadObj: object): string {
+      const header = b64url(Buffer.from(JSON.stringify(headerObj)));
+      const payload = b64url(Buffer.from(JSON.stringify(payloadObj)));
+      const fakeSig = b64url(Buffer.from("anything"));
+      return `${header}.${payload}.${fakeSig}`;
+    }
+
+    const validPayload = {
+      iss: "urateam.dev",
+      sub: "cust_attacker",
+      tier: "enterprise",
+      seats: null,
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 86_400,
+    };
+
+    // Each of these must be rejected as malformed — never bypass the alg check.
+    for (const header of [
+      { alg: "HS256", typ: "JWT" },
+      { alg: "none", typ: "JWT" },
+      { alg: "RS256", typ: "JWT" },
+      { typ: "JWT" }, // missing alg entirely
+    ]) {
+      _resetLicenseCache();
+      process.env.URATEAM_LICENSE_KEY = craft(header, validPayload);
+      const status = checkLicense();
+      expect(status.tier).toBe("oss");
+      expect(status.invalidReason).toBe("malformed");
+    }
+  });
 });
