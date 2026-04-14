@@ -22,7 +22,7 @@ import { sanitize } from "../executor/prompt/sanitizer.js";
 import { resolveWorkflowStates } from "./linear-helpers.js";
 import { sql } from "drizzle-orm";
 import { createLogger } from "../logger.js";
-import { logAuditEvent, budgetRefusedEvent } from "../audit/index.js";
+import { logAuditEvent, budgetRefusedEvent, pruneAuditLog } from "../audit/index.js";
 
 const log = createLogger({ component: "PmAgent:scheduler" });
 
@@ -451,6 +451,17 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           }
         } catch (err) {
           log.error({ err }, "digest failed");
+        }
+
+        // Audit log retention sweep (no-op if unlicensed or not configured).
+        // Wrapped in try/catch — retention failure must not crash the tick.
+        try {
+          if (isFeatureLicensed("audit-log")) {
+            const days = (config as any).auditLog?.retentionDays ?? 365;
+            await pruneAuditLog(db, days);
+          }
+        } catch (err) {
+          log.warn({ err }, "audit retention sweep failed");
         }
 
       log.info({
