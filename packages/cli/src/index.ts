@@ -25,6 +25,7 @@ import { configCommand } from "./commands/config.js";
 import { startCommand } from "./commands/start.js";
 import { migrateCommand } from "./commands/migrate.js";
 import { getPackageVersion } from "./version.js";
+import { licenseCommand } from "./commands/license.js";
 
 const program = new Command();
 
@@ -39,5 +40,6 @@ program.addCommand(webhookCommand);
 program.addCommand(configCommand);
 program.addCommand(startCommand);
 program.addCommand(migrateCommand);
+program.addCommand(licenseCommand, { hidden: true });
 
 program.parse();
