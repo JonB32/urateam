@@ -16,7 +16,7 @@
  * pipeline through the webhook handler to exercise the full runner code path.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createHmac } from "node:crypto";
 import { Hono } from "hono";
 import { createDb } from "../db/client.js";
@@ -33,7 +33,7 @@ import type {
   ReviewFinding,
 } from "../types.js";
 import type { DeepReviewFinding } from "../executor/deep-review.js";
-import { _resetLicenseCache } from "../license.js";
+import { installTestProLicense, restoreLicense } from "./helpers/license.js";
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -372,8 +372,7 @@ describe("RALPH gate and draft PR behavior", () => {
 
   beforeEach(async () => {
     // Enable commercial features for tests that exercise them
-    process.env.URATEAM_LICENSE_KEY = "test-license-key";
-    _resetLicenseCache();
+    await installTestProLicense();
 
     // Reset all mocks to known state
     mockCheckRequirements
@@ -407,6 +406,10 @@ describe("RALPH gate and draft PR behavior", () => {
         humanReviewCalls.push({ run, prUrl, reason });
       }),
     };
+  });
+
+  afterEach(async () => {
+    await restoreLicense();
   });
 
   function buildApp(pipelineConfig: PipelineConfig): Hono {
