@@ -2,6 +2,8 @@ import type { TriageResult } from "../types.js";
 import { parseJsonObject } from "../../executor/agent-stream.js";
 import { resolveWorkflowStates } from "../linear-helpers.js";
 import { createLogger } from "../../logger.js";
+import type { AnyDb } from "../../db/client.js";
+import { logAuditEvent, pmTriageClassifiedEvent } from "../../audit/index.js";
 
 const log = createLogger({ component: "PmAgent:triage" });
 
@@ -17,6 +19,8 @@ export interface TriageInput {
   batchSize?: number;
   /** Pre-fetched workflow state map (teamId:stateName → stateId). Fetched once per scheduler tick. */
   stateMap?: Map<string, string>;
+  /** Optional DB handle. When present, successful classifications write audit events. */
+  db?: AnyDb;
 }
 
 /**
@@ -133,6 +137,13 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
         });
 
         const result: TriageResult = { issueId: issue.identifier, priority, labels: issueLabels, complexity, rationale, acceptanceCriteria };
+        if (input.db) {
+          void logAuditEvent(input.db, pmTriageClassifiedEvent({
+            issueId: issue.identifier,
+            label: pipelineLabel,
+            rationale: String(rationale),
+          }));
+        }
         log.info({ issueId: issue.identifier, priority, labels: issueLabels, pipelineLabel, complexity }, "triaged issue");
         return result;
       } catch (err) {

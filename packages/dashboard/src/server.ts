@@ -8,6 +8,7 @@ import { createTokensRouter } from "./routes/tokens.js";
 import { createErrorsRouter } from "./routes/errors.js";
 import { createConfigRouter } from "./routes/config.js";
 import { createCoordinationRouter } from "./routes/coordination.js";
+import { createAuditRouter } from "./routes/audit.js";
 
 const logger = createLogger({ component: "dashboard" });
 
@@ -153,6 +154,9 @@ export function createDashboard(config: DashboardConfig): Hono {
 
   const coordinationRouter = createCoordinationRouter(config.db, basePath);
   app.route("/", coordinationRouter);
+
+  const auditRouter = createAuditRouter(config.db, basePath);
+  app.route("/", auditRouter);
 
   return app;
 }

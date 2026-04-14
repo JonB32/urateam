@@ -368,3 +368,49 @@ export interface SandboxConfig {
   denyRead: string[];
   denyWrite: string[];
 }
+
+// --- Audit Log ---
+export const AuditEventTypeSchema = z.enum([
+  "run.started", "run.completed", "run.failed",
+  "run.auto_merged", "run.auto_merge_skipped",
+  "pm.approval_requested", "pm.approval_resolved",
+  "pm.issue_promoted", "pm.issue_deprioritized", "pm.issue_cancelled",
+  "pm.triage_classified",
+  "budget.alert_fired", "budget.run_refused",
+  "license.validation_failed", "config.loaded",
+  "dashboard.manual_action",
+]);
+export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
+
+export const AuditActorTypeSchema = z.enum([
+  "system", "pm-agent", "webhook", "dashboard-user", "cli",
+]);
+export type AuditActorType = z.infer<typeof AuditActorTypeSchema>;
+
+export const AuditEventSchema = z.object({
+  id: z.string(),
+  timestamp: z.date(),
+  eventType: AuditEventTypeSchema,
+  actor: z.string(),
+  actorType: AuditActorTypeSchema,
+  scope: z.string().nullable(),
+  runId: z.string().nullable(),
+  issueId: z.string().nullable(),
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  payload: z.record(z.string(), z.unknown()),
+});
+export type AuditEvent = z.infer<typeof AuditEventSchema>;
+
+/**
+ * Top-level application config schema. Currently only scopes the audit log
+ * section introduced with the audit-log feature; additional sections can be
+ * added here as the rest of the config is migrated to zod.
+ */
+export const AppConfigSchema = z.object({
+  auditLog: z.object({
+    enabled: z.boolean().optional(),
+    retentionDays: z.number().int().positive().optional().default(365),
+  }).optional(),
+});
+export type AppConfig = z.infer<typeof AppConfigSchema>;

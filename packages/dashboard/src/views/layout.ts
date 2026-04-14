@@ -64,6 +64,7 @@ export function layout(title: string, content: string, basePath?: string): strin
     <a href="${bp}/">Runs</a>
     <a href="${bp}/tokens">Tokens</a>
     <a href="${bp}/errors">Errors</a>
+    <a href="${bp}/audit">Audit</a>
     <a href="${bp}/config">Config</a>
     <a href="${bp}/coordination">Coordination</a>
   </nav>

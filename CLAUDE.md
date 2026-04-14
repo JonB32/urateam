@@ -148,6 +148,18 @@ It is a pnpm monorepo with 3 packages:
 4. Force-push the corrected branch: `git push --force-with-lease origin agent/<correct-issue>-<slug>`.
 5. On the contaminated branch, remove the stray commit: `git rebase -i --onto <parent-sha> <stray-sha> HEAD` or `git reset --hard <pre-stray-sha>`, then `git push --force-with-lease`.
 
+### Audit log (Enterprise feature 4.2)
+- Append-only `audit_events` table + read-time projection from `pipeline_runs`, `pm_approvals`, `budget_alerts` (no run-data duplication)
+- Module: `packages/core/src/audit/` — `events.ts` (typed builders), `writer.ts` (`logAuditEvent`, fire-and-forget; license-gated, returns no-op if `audit-log` feature unlicensed), `reader.ts` (`listAuditEvents` with cursor pagination), `projection.ts`, `retention.ts` (`pruneAuditLog` — sole authorized mutation), `csv.ts` (`streamAuditCsv` async iterator)
+- 16 event types: `run.{started,completed,failed,auto_merged,auto_merge_skipped}`, `pm.{approval_requested,approval_resolved,issue_promoted,issue_deprioritized,issue_cancelled,triage_classified}`, `budget.{alert_fired,run_refused}`, `license.validation_failed`, `config.loaded`, `dashboard.manual_action` (reserved)
+- Write sites: `pm/scheduler.ts` (budget refused, including `maxInFlight` blocks), `pm/actions/promote.ts`, `pm/actions/triage.ts`, `pm/actions/resolve-approvals.ts` (deprioritize/cancel — emitted on actual execution, not approval request), `license.ts` (via `logAuditEventUnchecked` — the only call site that bypasses the feature gate), `cli/commands/run.ts` (`config.loaded`)
+- **Immutability is convention-only**, enforced by `packages/core/src/__tests__/audit-immutability.test.ts` (greps for `delete(auditEvents)` / `update(auditEvents)`; only `audit/retention.ts` is allow-listed). Adding a new mutation site requires updating the allow-list.
+- Reader merges native rows + projected rows by `(timestamp DESC, id DESC)` and supports cursor-based SQL filtering on all 4 sources to avoid pagination truncation
+- Dashboard route: `/audit` (filter bar, HTMX pagination), `/audit/page` (partial), `/audit/export.csv` (streamed). All return 404 unless `isFeatureLicensed("audit-log")`. View: `packages/dashboard/src/views/audit.ts` — all user-controlled fields go through `escapeHtml`
+- Retention sweep runs in PM tick after `digest`, default 365 days, configurable via `auditLog.retentionDays`. Tick step is gated on `isFeatureLicensed("audit-log")`
+- **`config.loaded` event currently only fires from `ura run`** — `ura dev` / `ura start` (production paths) build config from env vars and have no file path to fingerprint. Follow-up to wire those when needed.
+- `/audit/event/:id` HTMX detail expansion route is in the spec but deferred — table shows truncated payload inline
+
 ### Coordination (`packages/core/src/pm/coordination.ts`)
 - DB-backed `active_work` table tracks files modified by in-flight pipeline runs
 - `upsertActiveWork` uses atomic `onConflictDoUpdate` (requires UNIQUE on `run_id`)

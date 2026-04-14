@@ -22,6 +22,7 @@ import { sanitize } from "../executor/prompt/sanitizer.js";
 import { resolveWorkflowStates } from "./linear-helpers.js";
 import { sql } from "drizzle-orm";
 import { createLogger } from "../logger.js";
+import { logAuditEvent, budgetRefusedEvent, pruneAuditLog } from "../audit/index.js";
 
 const log = createLogger({ component: "PmAgent:scheduler" });
 
@@ -159,11 +160,48 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           dailyTokensUsed: globalScope?.used ?? 0,
         };
 
+        // Emit budget.run_refused audit events for every scope at blocked-100.
+        // Recovers the per-scope breakdown that is otherwise dropped when we
+        // collapse the evaluation into tick.budgetGuard.
+        if (evaluation.promoteBlocked) {
+          for (const s of evaluation.scopes) {
+            if (s.tier !== "blocked-100") continue;
+            const scopeKey =
+              s.scope.kind === "global"
+                ? "global"
+                : s.scope.kind === "team"
+                  ? `team:${s.scope.teamId}`
+                  : `repo:${s.scope.repoUrl}`;
+            void logAuditEvent(
+              db,
+              budgetRefusedEvent({
+                scope: scopeKey,
+                scopeType: s.scope.kind,
+                tokensUsed: s.used,
+                limit: s.limit,
+                utilization: s.percent,
+              }),
+            );
+          }
+        }
+
         // Preserve legacy maxInFlight block: if we're at capacity, treat as blocked
         // (existing promoters already check tick.budgetGuard.promoteBlocked).
         if (evaluation.activeCount >= config.maxInFlight && !tick.budgetGuard.promoteBlocked) {
           tick.budgetGuard.promoteBlocked = true;
           tick.budgetGuard.reason = `maxInFlight reached (${evaluation.activeCount}/${config.maxInFlight})`;
+          // Emit a budget.run_refused event so operators can trace "why didn't
+          // this run start?" when capacity (not token spend) is the blocker.
+          void logAuditEvent(
+            db,
+            budgetRefusedEvent({
+              scope: "global",
+              scopeType: "global",
+              tokensUsed: evaluation.activeCount,
+              limit: config.maxInFlight,
+              utilization: 100,
+            }),
+          );
         }
 
         // Fire threshold alerts for newly-crossed scopes (deduped in budget_alerts).
@@ -292,6 +330,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                 sanitize,
                 batchSize: config.triageBatchSize,
                 stateMap,
+                db,
               });
         } catch (err) {
           log.error({ err }, "triage failed");
@@ -366,6 +405,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                 slotsAvailable,
                 checkConflict,
                 stateMap,
+                db,
               });
             }
           } catch (err) {
@@ -423,6 +463,17 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           }
         } catch (err) {
           log.error({ err }, "digest failed");
+        }
+
+        // Audit log retention sweep (no-op if unlicensed or not configured).
+        // Wrapped in try/catch — retention failure must not crash the tick.
+        try {
+          if (isFeatureLicensed("audit-log")) {
+            const days = (config as any).auditLog?.retentionDays ?? 365;
+            await pruneAuditLog(db, days);
+          }
+        } catch (err) {
+          log.warn({ err }, "audit retention sweep failed");
         }
 
       log.info({
