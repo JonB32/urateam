@@ -127,8 +127,18 @@ describe("BEC-91: stuck In Progress issues are not recovered by current PM Agent
    */
   it("scheduler tick calls recoverStuckInProgressIssues when stuckIssueRecovery is enabled", async () => {
     const mockActions = {
-      checkBudgetGuards: vi.fn().mockResolvedValue({
-        promoteBlocked: false, activeCount: 0, tokenSpendPercent: 0, dailyTokensUsed: 0,
+      evaluateBudget: vi.fn().mockResolvedValue({
+        scopes: [{
+          scope: { kind: "global" as const },
+          scopeLabel: "global",
+          limit: 5_000_000,
+          used: 0,
+          percent: 0,
+          tier: "ok" as const,
+        }],
+        worstTier: "ok" as const,
+        promoteBlocked: false,
+        activeCount: 0,
       }),
       recoverRetriableRuns: vi.fn().mockResolvedValue({ recovered: [], exhausted: [] }),
       recoverStuckInProgressIssues: vi.fn().mockResolvedValue([]),
@@ -174,8 +184,18 @@ describe("BEC-91: stuck In Progress issues are not recovered by current PM Agent
    */
   it("scheduler tick skips recoverStuckInProgressIssues when stuckIssueRecovery is false", async () => {
     const mockActions = {
-      checkBudgetGuards: vi.fn().mockResolvedValue({
-        promoteBlocked: false, activeCount: 0, tokenSpendPercent: 0, dailyTokensUsed: 0,
+      evaluateBudget: vi.fn().mockResolvedValue({
+        scopes: [{
+          scope: { kind: "global" as const },
+          scopeLabel: "global",
+          limit: 5_000_000,
+          used: 0,
+          percent: 0,
+          tier: "ok" as const,
+        }],
+        worstTier: "ok" as const,
+        promoteBlocked: false,
+        activeCount: 0,
       }),
       recoverRetriableRuns: vi.fn().mockResolvedValue({ recovered: [], exhausted: [] }),
       recoverStuckInProgressIssues: vi.fn().mockResolvedValue([]),

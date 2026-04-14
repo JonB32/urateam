@@ -1,5 +1,5 @@
-import type { PmAgentConfig, TickResult, BudgetGuardResult, BudgetEvaluation } from "./types.js";
-import { evaluateBudget, type BudgetGuardInput } from "./budget.js";
+import type { PmAgentConfig, TickResult, BudgetEvaluation } from "./types.js";
+import { evaluateBudget } from "./budget.js";
 import { maybeFireAlerts, type PostSlackMessage } from "./budget-alerts.js";
 import { postSlackMessage } from "./slack-helpers.js";
 import { triageNewIssues, type TriageInput } from "./actions/triage.js";
@@ -42,8 +42,7 @@ export interface PmSchedulerDeps {
 }
 
 interface PmSchedulerActions {
-  checkBudgetGuards: (input: BudgetGuardInput) => Promise<BudgetGuardResult>;
-  evaluateBudget?: (input: { db: AnyDb; config: PmAgentConfig }) => Promise<BudgetEvaluation>;
+  evaluateBudget: (input: { db: AnyDb; config: PmAgentConfig }) => Promise<BudgetEvaluation>;
   postSlackMessage?: PostSlackMessage;
   recoverRetriableRuns: (input: any) => Promise<RecoverResult>;
   recoverStuckInProgressIssues?: (input: any) => Promise<StuckIssueResult[]>;
@@ -173,7 +172,17 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           const postSlack: PostSlackMessage | undefined = actions?.postSlackMessage
             ?? (deps.slackBotToken
               ? async (channel, blocks) => {
-                  await postSlackMessage(deps.slackBotToken, { channel, blocks });
+                  const result = await postSlackMessage(deps.slackBotToken, { channel, blocks });
+                  // postSlackMessage swallows fetch errors (returns null) and logs
+                  // ok:false without throwing. Re-throw here so maybeFireAlerts'
+                  // catch-block triggers the dedup row rollback and the next tick
+                  // re-posts the alert.
+                  if (result === null) {
+                    throw new Error("postSlackMessage returned null (fetch failed)");
+                  }
+                  if (result && result.ok === false) {
+                    throw new Error(`postSlackMessage returned ok:false (${result.error ?? "unknown"})`);
+                  }
                 }
               : undefined);
           if (postSlack) {

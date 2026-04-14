@@ -44,13 +44,6 @@ function mockBlockedEvaluation(): BudgetEvaluation {
 describe("PmScheduler.tick", () => {
   const mockActions = {
     evaluateBudget: vi.fn().mockResolvedValue(mockOkEvaluation()),
-    // Keep checkBudgetGuards stub to satisfy the required field in PmSchedulerActions type
-    checkBudgetGuards: vi.fn().mockResolvedValue({
-      promoteBlocked: false,
-      activeCount: 0,
-      tokenSpendPercent: 0,
-      dailyTokensUsed: 0,
-    }),
     recoverRetriableRuns: vi.fn().mockResolvedValue({ recovered: [], exhausted: [] }),
     recoverStuckInProgressIssues: vi.fn().mockResolvedValue([]),
     triageNewIssues: vi.fn().mockResolvedValue([]),

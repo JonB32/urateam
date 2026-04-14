@@ -12,11 +12,18 @@ import { setPmPaused, isPmPaused } from "../pm/slack-interface.js";
 
 describe("BEC-62 reproduction — scheduler ignores isPmPaused()", () => {
   const mockActions = {
-    checkBudgetGuards: vi.fn().mockResolvedValue({
+    evaluateBudget: vi.fn().mockResolvedValue({
+      scopes: [{
+        scope: { kind: "global" as const },
+        scopeLabel: "global",
+        limit: 5_000_000,
+        used: 500_000,
+        percent: 10,
+        tier: "ok" as const,
+      }],
+      worstTier: "ok" as const,
       promoteBlocked: false,
       activeCount: 0,
-      tokenSpendPercent: 10,
-      dailyTokensUsed: 500000,
     }),
     triageNewIssues: vi.fn().mockResolvedValue([]),
     resolveApprovals: vi.fn().mockResolvedValue({ resolved: 0, stillPending: 0 }),

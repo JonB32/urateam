@@ -3,7 +3,6 @@ import { pipelineRuns } from "../db/schema.js";
 import type { AnyDb } from "../db/client.js";
 import type {
   BudgetEvaluation,
-  BudgetGuardResult,
   BudgetScope,
   BudgetTier,
   PmAgentConfig,
@@ -175,54 +174,3 @@ function formatScopeLabel(scope: BudgetScope): string {
   return `repo ${scope.repoUrl}`;
 }
 
-// --- Backward-compat shim ---
-// The PM Agent scheduler (pm/scheduler.ts) still imports `checkBudgetGuards`
-// and the existing `BudgetGuardInput` type. Task 5 of the spend-caps plan
-// migrates the scheduler to `evaluateBudget` directly and removes this shim.
-// Keeping it here as a thin adapter keeps the build green between tasks.
-
-export interface BudgetGuardInput {
-  db: AnyDb;
-  maxInFlight: number;
-  dailyTokenBudget: number;
-}
-
-export async function checkBudgetGuards(
-  input: BudgetGuardInput,
-): Promise<BudgetGuardResult> {
-  const { db, maxInFlight, dailyTokenBudget } = input;
-  const config: PmAgentConfig = {
-    enabled: true,
-    dailyTokenBudget,
-    slackChannelId: "",
-    teamIds: [],
-    maxInFlight,
-    cronIntervalMs: 1_800_000,
-    triageBatchSize: 1,
-    stuckIssueRecovery: false,
-    stuckIssueTargetState: "Backlog",
-    stuckIssueMaxPerTick: 1,
-  };
-  const evaluation = await evaluateBudget({ db, config });
-  const global = evaluation.scopes.find((s) => s.scope.kind === "global");
-  const tokenSpendPercent = global?.percent ?? 0;
-  const dailyTokensUsed = global?.used ?? 0;
-
-  if (evaluation.activeCount >= maxInFlight) {
-    return {
-      promoteBlocked: true,
-      reason: `maxInFlight reached (${evaluation.activeCount}/${maxInFlight})`,
-      activeCount: evaluation.activeCount,
-      tokenSpendPercent,
-      dailyTokensUsed,
-    };
-  }
-
-  return {
-    promoteBlocked: evaluation.promoteBlocked,
-    reason: evaluation.blockReason,
-    activeCount: evaluation.activeCount,
-    tokenSpendPercent,
-    dailyTokensUsed,
-  };
-}
