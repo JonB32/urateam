@@ -22,6 +22,7 @@ import { sanitize } from "../executor/prompt/sanitizer.js";
 import { resolveWorkflowStates } from "./linear-helpers.js";
 import { sql } from "drizzle-orm";
 import { createLogger } from "../logger.js";
+import { logAuditEvent, budgetRefusedEvent } from "../audit/index.js";
 
 const log = createLogger({ component: "PmAgent:scheduler" });
 
@@ -158,6 +159,31 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           tokenSpendPercent: globalScope?.percent ?? 0,
           dailyTokensUsed: globalScope?.used ?? 0,
         };
+
+        // Emit budget.run_refused audit events for every scope at blocked-100.
+        // Recovers the per-scope breakdown that is otherwise dropped when we
+        // collapse the evaluation into tick.budgetGuard.
+        if (evaluation.promoteBlocked) {
+          for (const s of evaluation.scopes) {
+            if (s.tier !== "blocked-100") continue;
+            const scopeKey =
+              s.scope.kind === "global"
+                ? "global"
+                : s.scope.kind === "team"
+                  ? `team:${s.scope.teamId}`
+                  : `repo:${s.scope.repoUrl}`;
+            void logAuditEvent(
+              db,
+              budgetRefusedEvent({
+                scope: scopeKey,
+                scopeType: s.scope.kind,
+                tokensUsed: s.used,
+                limit: s.limit,
+                utilization: s.percent,
+              }),
+            );
+          }
+        }
 
         // Preserve legacy maxInFlight block: if we're at capacity, treat as blocked
         // (existing promoters already check tick.budgetGuard.promoteBlocked).
