@@ -53,6 +53,8 @@ describe("streamAuditCsv", () => {
     // `has "quotes", commas` value must be CSV-escaped: wrap in quotes,
     // double internal quotes → `"has ""quotes"", commas"`.
     await logAuditEvent(db, {
+      id: "evt_csv_1",
+      timestamp: new Date(),
       eventType: "pm.issue_promoted",
       actor: "pm-agent",
       actorType: "system",
@@ -62,7 +64,7 @@ describe("streamAuditCsv", () => {
       inputTokens: 0,
       outputTokens: 0,
       payload: {},
-    } as Omit<AuditEvent, "id" | "timestamp">);
+    });
     const rows = await collect(streamAuditCsv(db, {}));
     const dataRow = rows.find((r) => r.includes("pm.issue_promoted"));
     expect(dataRow).toBeDefined();
@@ -74,6 +76,8 @@ describe("streamAuditCsv", () => {
 
   it("escapes fields containing newlines", async () => {
     await logAuditEvent(db, {
+      id: "evt_csv_2",
+      timestamp: new Date(),
       eventType: "pm.issue_promoted",
       actor: "pm-agent",
       actorType: "system",
@@ -83,7 +87,7 @@ describe("streamAuditCsv", () => {
       inputTokens: 0,
       outputTokens: 0,
       payload: {},
-    } as Omit<AuditEvent, "id" | "timestamp">);
+    });
     const rows = await collect(streamAuditCsv(db, {}));
     const dataRow = rows.find((r) => r.includes("pm.issue_promoted"));
     expect(dataRow).toContain('"line1\nline2"');
