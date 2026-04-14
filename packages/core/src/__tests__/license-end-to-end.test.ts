@@ -1,18 +1,48 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
+import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
 import { checkLicense, _resetLicenseCache } from "../license.js";
+
 // Direct relative import into the CLI package's compiled output. This
 // deliberately avoids declaring @urateam/cli as a devDep of @urateam/core
 // to keep the dependency direction one-way (cli depends on core, not the
 // reverse). The CLI must be built (`pnpm --filter @urateam/cli build`)
-// before this test runs — pnpm test runs cli's build task in parallel.
-// @ts-ignore — relative path into a sibling package's dist/
-import { issueLicense } from "../../../cli/dist/commands/license.js";
+// before this test runs. We use a dynamic import inside beforeAll so the
+// guard can build cli on-demand if its dist/ is missing — a static import
+// would be hoisted and fail at module-load time before the guard runs.
+type IssueLicenseFn = (args: {
+  customerId: string;
+  tier: "enterprise" | "team" | "personal";
+  seats: number | null;
+  expiresAt: Date;
+}) => string;
 
 describe("license end-to-end (CLI issue → core validate)", () => {
   let originalSigningKey: string | undefined;
   let originalLicenseKey: string | undefined;
   let originalPublicKey: string | undefined;
+  let issueLicense: IssueLicenseFn;
+
+  // The CLI package's compiled output must exist before this test can import
+  // issueLicense() from it. turbo's task graph does not express this dependency
+  // (core:test does not depend on cli:build — see PR #34 cross-task review),
+  // so a `pnpm clean && pnpm test` run could otherwise execute this test before
+  // cli is built and fail with ERR_MODULE_NOT_FOUND. We make the test
+  // self-sufficient by building cli on-demand if its dist/ is missing.
+  beforeAll(async () => {
+    const cliDist = resolve(__dirname, "..", "..", "..", "cli", "dist", "commands", "license.js");
+    if (!existsSync(cliDist)) {
+      execFileSync("pnpm", ["--filter", "@urateam/cli", "build"], {
+        stdio: "inherit",
+        cwd: resolve(__dirname, "..", "..", "..", ".."),
+      });
+    }
+    // @ts-ignore — relative path into a sibling package's dist/
+    const mod = await import("../../../cli/dist/commands/license.js");
+    issueLicense = (mod as { issueLicense: IssueLicenseFn }).issueLicense;
+  }, 60_000);
 
   beforeEach(async () => {
     _resetLicenseCache();
