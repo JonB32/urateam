@@ -93,6 +93,44 @@ export const startCommand = new Command("start")
         }
       : undefined;
 
+    // --- PM Agent config (built up-front so createApp can thread it into the webhook) ---
+    // The webhook-side budget gate in webhook/handler.ts needs config.pmConfig to
+    // activate the 100% hard-stop. If we only built this inside the PM_AGENT_ENABLED
+    // branch below, the gate would be inert in production.
+    const pmAgentEnabled = process.env.PM_AGENT_ENABLED === "true";
+    let pmConfig: import("@urateam/core").PmAgentConfig | undefined;
+    if (pmAgentEnabled) {
+      const { PmAgentConfigSchema } = await import("@urateam/core");
+      const slackBotToken = process.env.SLACK_BOT_TOKEN;
+      if (!slackBotToken) {
+        console.error("SLACK_BOT_TOKEN is required when PM_AGENT_ENABLED=true");
+        process.exit(1);
+      }
+      const dailyBudgetStr = process.env.PM_AGENT_DAILY_TOKEN_BUDGET;
+      if (!dailyBudgetStr) {
+        console.error("PM_AGENT_DAILY_TOKEN_BUDGET is required when PM_AGENT_ENABLED=true");
+        process.exit(1);
+      }
+      const slackChannelId = process.env.PM_AGENT_SLACK_CHANNEL_ID;
+      if (!slackChannelId) {
+        console.error("PM_AGENT_SLACK_CHANNEL_ID is required when PM_AGENT_ENABLED=true");
+        process.exit(1);
+      }
+      const teamIds = (process.env.PM_AGENT_TEAM_IDS ?? "").split(",").filter(Boolean);
+      if (teamIds.length === 0) {
+        console.error("PM_AGENT_TEAM_IDS is required when PM_AGENT_ENABLED=true");
+        process.exit(1);
+      }
+      pmConfig = PmAgentConfigSchema.parse({
+        enabled: true,
+        cronIntervalMs: parseInt(process.env.PM_AGENT_CRON_INTERVAL_MS ?? "1800000", 10),
+        maxInFlight: parseInt(process.env.PM_AGENT_MAX_IN_FLIGHT ?? "3", 10),
+        dailyTokenBudget: parseInt(dailyBudgetStr, 10),
+        slackChannelId,
+        teamIds,
+      });
+    }
+
     const config = {
       webhookSecret: process.env.LINEAR_WEBHOOK_SECRET,
       linearApiKey: process.env.LINEAR_API_KEY ?? "",
@@ -107,6 +145,7 @@ export const startCommand = new Command("start")
       github,
       dashboardAuth,
       pmSlack,
+      pmConfig,
       githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET,
     };
 
@@ -152,41 +191,9 @@ export const startCommand = new Command("start")
 
     // --- PM Agent (opt-in) ---
     let pmInterval: ReturnType<typeof setInterval> | undefined;
-    if (process.env.PM_AGENT_ENABLED === "true") {
-      const { createPmScheduler, PmAgentConfigSchema } = await import("@urateam/core");
-
-      const slackBotToken = process.env.SLACK_BOT_TOKEN;
-      if (!slackBotToken) {
-        console.error("SLACK_BOT_TOKEN is required when PM_AGENT_ENABLED=true");
-        process.exit(1);
-      }
-
-      const dailyBudgetStr = process.env.PM_AGENT_DAILY_TOKEN_BUDGET;
-      if (!dailyBudgetStr) {
-        console.error("PM_AGENT_DAILY_TOKEN_BUDGET is required when PM_AGENT_ENABLED=true");
-        process.exit(1);
-      }
-
-      const slackChannelId = process.env.PM_AGENT_SLACK_CHANNEL_ID;
-      if (!slackChannelId) {
-        console.error("PM_AGENT_SLACK_CHANNEL_ID is required when PM_AGENT_ENABLED=true");
-        process.exit(1);
-      }
-
-      const teamIds = (process.env.PM_AGENT_TEAM_IDS ?? "").split(",").filter(Boolean);
-      if (teamIds.length === 0) {
-        console.error("PM_AGENT_TEAM_IDS is required when PM_AGENT_ENABLED=true");
-        process.exit(1);
-      }
-
-      const pmConfig = PmAgentConfigSchema.parse({
-        enabled: true,
-        cronIntervalMs: parseInt(process.env.PM_AGENT_CRON_INTERVAL_MS ?? "1800000", 10),
-        maxInFlight: parseInt(process.env.PM_AGENT_MAX_IN_FLIGHT ?? "3", 10),
-        dailyTokenBudget: parseInt(dailyBudgetStr, 10),
-        slackChannelId,
-        teamIds,
-      });
+    if (pmAgentEnabled && pmConfig) {
+      const { createPmScheduler } = await import("@urateam/core");
+      const slackBotToken = process.env.SLACK_BOT_TOKEN!;
 
       const pmScheduler = createPmScheduler({
         config: pmConfig,
