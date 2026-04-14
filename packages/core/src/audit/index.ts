@@ -3,3 +3,4 @@ export * from "./writer.js";
 export * from "./projection.js";
 export * from "./reader.js";
 export * from "./retention.js";
+export * from "./csv.js";
