@@ -341,3 +341,158 @@ describe("createWebhookHandler", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Spend caps & alerts: webhook 100% budget gate
+// ---------------------------------------------------------------------------
+describe("webhook handler — 100% budget gate", () => {
+  const basePmConfig = {
+    enabled: true,
+    dailyTokenBudget: 1_000_000,
+    slackChannelId: "C_TEST",
+    teamIds: ["team-frontend"],
+    maxInFlight: 3,
+    cronIntervalMs: 1_800_000,
+    triageBatchSize: 3,
+    stuckIssueRecovery: true,
+    stuckIssueTargetState: "Backlog" as const,
+    stuckIssueMaxPerTick: 5,
+  };
+
+  it("refuses to start a pipeline when the configured scope is at 100%", async () => {
+    const startSpy = vi.fn().mockResolvedValue(undefined);
+
+    const db = await createDb({ connectionString: ":memory:" });
+    const { pipelineRuns } = await import("../db/schema.js");
+
+    // Pre-seed a row dated today that pushes the global scope above the limit.
+    await (db as any).insert(pipelineRuns).values({
+      id: "seed-blocked",
+      issueId: "LIN-41",
+      issueTitle: "prior run",
+      pipelineKey: "auto-implement",
+      repoUrl: "https://github.com/org/repo",
+      status: "running",
+      startedAt: new Date(),
+      totalInputTokens: 700_000,
+      totalOutputTokens: 400_000, // sum = 1.1M > 1M budget → blocked
+      linearTeamId: "team-frontend",
+    });
+
+    const app = createWebhookHandler({
+      webhookSecret: SECRET,
+      runner: {
+        start: startSpy,
+        resume: vi.fn(),
+        pause: vi.fn(),
+        abort: vi.fn(),
+      } as any,
+      pipelineConfigs: { "auto-implement": pipelineConfig },
+      repoConfigs: { "team-frontend": repoConfig },
+      db,
+      pmConfig: { ...basePmConfig },
+    });
+
+    const body = JSON.stringify(stateChangePayload("Todo"));
+    const res = await app.request("/webhooks/linear", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "linear-signature": sign(body, SECRET),
+      },
+      body,
+    });
+
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json).toMatchObject({
+      ok: true,
+      action: "start",
+      runQueued: false,
+      reason: "budget-exceeded",
+    });
+    expect(startSpy).not.toHaveBeenCalled();
+  });
+
+  it("starts the pipeline normally when the budget is well under 100%", async () => {
+    const startSpy = vi.fn().mockResolvedValue(undefined);
+
+    const db = await createDb({ connectionString: ":memory:" });
+    const { pipelineRuns } = await import("../db/schema.js");
+
+    // Seed a small amount of spend — well under the 10M budget
+    await (db as any).insert(pipelineRuns).values({
+      id: "seed-ok",
+      issueId: "LIN-40",
+      issueTitle: "small run",
+      pipelineKey: "auto-implement",
+      repoUrl: "https://github.com/org/repo",
+      status: "completed",
+      startedAt: new Date(),
+      totalInputTokens: 50_000,
+      totalOutputTokens: 50_000,
+      linearTeamId: "team-frontend",
+    });
+
+    const app = createWebhookHandler({
+      webhookSecret: SECRET,
+      runner: {
+        start: startSpy,
+        resume: vi.fn(),
+        pause: vi.fn(),
+        abort: vi.fn(),
+      } as any,
+      pipelineConfigs: { "auto-implement": pipelineConfig },
+      repoConfigs: { "team-frontend": repoConfig },
+      db,
+      pmConfig: { ...basePmConfig, dailyTokenBudget: 10_000_000 },
+    });
+
+    const body = JSON.stringify(stateChangePayload("Todo"));
+    const res = await app.request("/webhooks/linear", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "linear-signature": sign(body, SECRET),
+      },
+      body,
+    });
+
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json).toMatchObject({ ok: true, action: "start", runQueued: true });
+    expect(json.reason).not.toBe("budget-exceeded");
+  });
+
+  it("starts the pipeline normally when pmConfig is absent (backward compat)", async () => {
+    const startSpy = vi.fn().mockResolvedValue(undefined);
+
+    const app = createWebhookHandler({
+      webhookSecret: SECRET,
+      runner: {
+        start: startSpy,
+        resume: vi.fn(),
+        pause: vi.fn(),
+        abort: vi.fn(),
+      } as any,
+      pipelineConfigs: { "auto-implement": pipelineConfig },
+      repoConfigs: { "team-frontend": repoConfig },
+      // No db, no pmConfig — gate is inert
+    });
+
+    const body = JSON.stringify(stateChangePayload("Todo"));
+    const res = await app.request("/webhooks/linear", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "linear-signature": sign(body, SECRET),
+      },
+      body,
+    });
+
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json).toMatchObject({ ok: true, action: "start", runQueued: true });
+    expect(json.reason).not.toBe("budget-exceeded");
+  });
+});
