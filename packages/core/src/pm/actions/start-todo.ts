@@ -154,7 +154,14 @@ export async function startTodoIssues(
     const sanitizedIssue = mapIssueToSchema(linearIssue);
 
     try {
-      await runner.start(linearIssue, resolved.key, resolved.config, repoConfig, sanitizedIssue);
+      await runner.start(
+        linearIssue,
+        resolved.key,
+        resolved.config,
+        repoConfig,
+        sanitizedIssue,
+        teamId ?? null,
+      );
       results.push({
         identifier: issue.identifier,
         title: issue.title,
