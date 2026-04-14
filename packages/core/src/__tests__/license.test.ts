@@ -1,60 +1,55 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { checkLicense, isFeatureLicensed, _resetLicenseCache } from "../license.js";
+import {
+  checkLicense,
+  isFeatureLicensed,
+  _resetLicenseCache,
+} from "../license.js";
 
-describe("checkLicense", () => {
+describe("checkLicense — OSS path", () => {
   beforeEach(() => {
     _resetLicenseCache();
     delete process.env.URATEAM_LICENSE_KEY;
   });
 
-  it("returns unlicensed when URATEAM_LICENSE_KEY is not set", () => {
+  it("returns oss tier when URATEAM_LICENSE_KEY is unset", () => {
     const status = checkLicense();
     expect(status.licensed).toBe(false);
-    expect(status.tier).toBe("free");
+    expect(status.tier).toBe("oss");
+    expect(status.invalidReason).toBeUndefined();
+    expect(status.features.size).toBe(0);
   });
 
-  it("returns licensed when URATEAM_LICENSE_KEY is set", () => {
-    process.env.URATEAM_LICENSE_KEY = "test-key-123";
-    const status = checkLicense();
-    expect(status.licensed).toBe(true);
-    expect(status.tier).toBe("pro");
-  });
-
-  it("caches the result", () => {
+  it("caches the result for the process lifetime", () => {
     const first = checkLicense();
-    process.env.URATEAM_LICENSE_KEY = "test-key-123";
+    process.env.URATEAM_LICENSE_KEY = "anything";
     const second = checkLicense();
-    expect(second.licensed).toBe(first.licensed); // cached, not re-read
+    expect(second).toBe(first); // same object reference
   });
 });
 
-describe("isFeatureLicensed", () => {
+describe("isFeatureLicensed — OSS path", () => {
   beforeEach(() => {
     _resetLicenseCache();
     delete process.env.URATEAM_LICENSE_KEY;
   });
 
-  it("returns false for commercial features without key", () => {
-    expect(isFeatureLicensed("slack-interface")).toBe(false);
-    expect(isFeatureLicensed("deep-review")).toBe(false);
-    expect(isFeatureLicensed("conflict-detection")).toBe(false);
-    expect(isFeatureLicensed("multi-repo")).toBe(false);
-    expect(isFeatureLicensed("stage-models")).toBe(false);
-    expect(isFeatureLicensed("advanced-automerge")).toBe(false);
-    expect(isFeatureLicensed("approval-workflows")).toBe(false);
+  it("returns false for commercial features without a key", () => {
+    for (const feat of [
+      "slack-interface",
+      "deep-review",
+      "conflict-detection",
+      "multi-repo",
+      "stage-models",
+      "advanced-automerge",
+      "approval-workflows",
+    ]) {
+      expect(isFeatureLicensed(feat)).toBe(false);
+    }
   });
 
-  it("returns true for commercial features with key", () => {
-    process.env.URATEAM_LICENSE_KEY = "test-key-123";
-    expect(isFeatureLicensed("slack-interface")).toBe(true);
-    expect(isFeatureLicensed("deep-review")).toBe(true);
-    expect(isFeatureLicensed("conflict-detection")).toBe(true);
-  });
-
-  it("always returns true for free features regardless of key", () => {
+  it("returns true for non-commercial / unknown features", () => {
     expect(isFeatureLicensed("pipeline-runner")).toBe(true);
     expect(isFeatureLicensed("basic-pm")).toBe(true);
-    expect(isFeatureLicensed("auto-merge-basic")).toBe(true);
     expect(isFeatureLicensed("unknown-feature")).toBe(true);
   });
 });
