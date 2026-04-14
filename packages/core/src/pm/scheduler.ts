@@ -259,6 +259,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                     pipelineConfigs: deps.pipelineConfigs,
                     repoConfigs: deps.repoConfigs,
                     maxPerTick: slotsAvailable,
+                    budgetEvaluation: evaluation,
                   });
               const started = todoResults.filter((r) => r.started);
               if (started.length > 0) {

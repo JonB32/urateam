@@ -8,6 +8,7 @@ import { LinearNotifier } from "./notifier/linear.js";
 import { SlackNotifier } from "./notifier/slack.js";
 import { DiscordNotifier } from "./notifier/discord.js";
 import type { PipelineConfig, RepoConfig, TriggerMap } from "./types.js";
+import type { PmAgentConfig } from "./pm/types.js";
 import type { GitHubConfig } from "./repo/github.js";
 import type { GitLabConfig } from "./repo/gitlab.js";
 import { isFeatureLicensed, checkLicense } from "./license.js";
@@ -49,6 +50,11 @@ export interface ServerConfig {
    * The secret here is the GitHub webhook secret (separate from the Linear webhook secret).
    */
   githubWebhookSecret?: string;
+  /**
+   * PM Agent config. When provided, enables the 100% budget gate in the
+   * webhook handler so new runs are refused when spend caps are exhausted.
+   */
+  pmConfig?: PmAgentConfig;
 }
 
 export async function createApp(config: ServerConfig) {
@@ -98,6 +104,7 @@ export async function createApp(config: ServerConfig) {
     repoConfigs: config.repoConfigs,
     triggerMap: config.triggerMap,
     db: db as any,
+    pmConfig: config.pmConfig,
   });
 
   // Mount routes
