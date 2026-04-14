@@ -311,6 +311,27 @@ export const runCommand = new Command("run")
         process.env.DATABASE_URL ?? ":memory:",
     });
 
+    // --- Startup audit events (license + config fingerprint) ---------------
+    try {
+      const {
+        checkLicense,
+        computeConfigFingerprint,
+        logAuditEvent,
+        configLoadedEvent,
+      } = await import("@urateam/core");
+      const status = checkLicense(db);
+      const sha = await computeConfigFingerprint(configPath);
+      if (sha) {
+        void logAuditEvent(
+          db,
+          configLoadedEvent({ path: configPath, sha256: sha, tier: status.tier }),
+        );
+      }
+    } catch (err) {
+      // audit must never crash startup
+      console.warn(`[lag run] startup audit emit failed: ${(err as Error).message}`);
+    }
+
     const consoleNotifier = createConsoleNotifier();
 
     // Completion promise — resolves when pipeline finishes or rejects on failure

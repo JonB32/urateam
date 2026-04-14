@@ -1,6 +1,9 @@
 import { createPublicKey, verify } from "node:crypto";
 import { createLogger } from "./logger.js";
 import * as publicKeyMod from "./license-public-key.js";
+import type { AnyDb } from "./db/client.js";
+import { logAuditEvent } from "./audit/writer.js";
+import { licenseValidationFailedEvent } from "./audit/events.js";
 
 const log = createLogger({ component: "license" });
 
@@ -69,8 +72,11 @@ function ossStatus(invalidReason?: LicenseStatus["invalidReason"]): LicenseStatu
 /**
  * Check the license status from URATEAM_LICENSE_KEY env var.
  * Result is cached for the lifetime of the process.
+ *
+ * Pass `db` to emit a `license.validation_failed` audit event on the failure
+ * path. Only the first call with a db argument will emit (thanks to caching).
  */
-export function checkLicense(): LicenseStatus {
+export function checkLicense(db?: AnyDb): LicenseStatus {
   if (cachedStatus) return cachedStatus;
 
   const key = process.env.URATEAM_LICENSE_KEY;
@@ -84,6 +90,12 @@ export function checkLicense(): LicenseStatus {
   if (!result.ok) {
     cachedStatus = ossStatus(result.reason);
     log.warn({ reason: result.reason }, "license key invalid — running in OSS mode");
+    if (db && result.reason !== "malformed") {
+      void logAuditEvent(
+        db,
+        licenseValidationFailedEvent({ invalidReason: result.reason }),
+      );
+    }
     return cachedStatus;
   }
 

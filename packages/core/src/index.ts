@@ -1,5 +1,7 @@
 export * from "./types.js";
 export { checkLicense, isFeatureLicensed, type LicenseStatus } from "./license.js";
+export * from "./audit/index.js";
+export { computeConfigFingerprint } from "./audit/config-fingerprint.js";
 export { rootLogger, createLogger, addLogStream } from "./logger.js";
 export { createDb, isPostgres, sqlDateGroup, sqlDaysAgoFilter, type Db } from "./db/index.js";
 export { pipelineRuns, stageRuns, agentLogs, activeWork, pmApprovals } from "./db/index.js";
