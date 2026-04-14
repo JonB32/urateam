@@ -24,13 +24,14 @@ import { webhookCommand } from "./commands/webhook.js";
 import { configCommand } from "./commands/config.js";
 import { startCommand } from "./commands/start.js";
 import { migrateCommand } from "./commands/migrate.js";
+import { getPackageVersion } from "./version.js";
 
 const program = new Command();
 
 program
   .name("ura")
   .description("urateam CLI")
-  .version("0.1.4");
+  .version(getPackageVersion());
 
 program.addCommand(runCommand);
 program.addCommand(devCommand);
