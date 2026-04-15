@@ -22,16 +22,34 @@ export interface SsoBootstrapResult {
  *   - URATEAM_SSO_COOKIE_NAME (default "urateam_session")
  *   - URATEAM_SSO_COOKIE_SECURE (default "true")
  */
+function trimEnv(v: string | undefined): string | undefined {
+  return v?.trim() || undefined;
+}
+
 export async function bootstrapSsoFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<SsoBootstrapResult | undefined> {
-  if (env.URATEAM_SSO_ENABLED !== "true") return undefined;
+  const enabledRaw = trimEnv(env.URATEAM_SSO_ENABLED);
+  if (!enabledRaw) return undefined;
+  const enabledLower = enabledRaw.toLowerCase();
+  if (enabledLower !== "true") {
+    // Refuse silently-falsy values like "false"/"no"/"0" without warning,
+    // but anything else is almost certainly a misconfigured truthy value
+    // (e.g. "True", "yes", "1") — warn loudly so it shows up in startup logs.
+    if (!["false", "no", "0", "off"].includes(enabledLower)) {
+      console.warn(
+        `URATEAM_SSO_ENABLED=${enabledRaw} is not a recognized boolean. ` +
+          `SSO will NOT be enabled. Use "true" to enable.`,
+      );
+    }
+    return undefined;
+  }
 
   const required = {
-    URATEAM_WORKOS_API_KEY: env.URATEAM_WORKOS_API_KEY,
-    URATEAM_WORKOS_CLIENT_ID: env.URATEAM_WORKOS_CLIENT_ID,
-    URATEAM_WORKOS_REDIRECT_URI: env.URATEAM_WORKOS_REDIRECT_URI,
-    URATEAM_SSO_STATE_SECRET: env.URATEAM_SSO_STATE_SECRET,
+    URATEAM_WORKOS_API_KEY: trimEnv(env.URATEAM_WORKOS_API_KEY),
+    URATEAM_WORKOS_CLIENT_ID: trimEnv(env.URATEAM_WORKOS_CLIENT_ID),
+    URATEAM_WORKOS_REDIRECT_URI: trimEnv(env.URATEAM_WORKOS_REDIRECT_URI),
+    URATEAM_SSO_STATE_SECRET: trimEnv(env.URATEAM_SSO_STATE_SECRET),
   };
   const missing = Object.entries(required)
     .filter(([, v]) => !v)
@@ -55,7 +73,7 @@ export async function bootstrapSsoFromEnv(
       workosApiKey: required.URATEAM_WORKOS_API_KEY,
       workosClientId: required.URATEAM_WORKOS_CLIENT_ID,
       redirectUri: required.URATEAM_WORKOS_REDIRECT_URI,
-      allowedDomain: env.URATEAM_SSO_ALLOWED_DOMAIN || undefined,
+      allowedDomain: trimEnv(env.URATEAM_SSO_ALLOWED_DOMAIN),
       sessionDurationHours: env.URATEAM_SSO_SESSION_HOURS
         ? parseInt(env.URATEAM_SSO_SESSION_HOURS, 10)
         : 24,

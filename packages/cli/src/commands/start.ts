@@ -150,6 +150,11 @@ export const startCommand = new Command("start")
       githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET,
     };
 
+    // --- SSO (Enterprise, opt-in via URATEAM_SSO_ENABLED=true) ---
+    // Validate SSO env vars BEFORE opening the DB / starting the runner so a
+    // misconfigured deployment fails fast without leaking resources.
+    const ssoBootstrap = await bootstrapSsoFromEnv();
+
     // --- Start servers ---
     const { app, runner, db } = await createApp(config);
 
@@ -158,8 +163,6 @@ export const startCommand = new Command("start")
     const port = parseInt(process.env.PORT ?? options.port, 10);
     const dashboardPort = parseInt(process.env.DASHBOARD_PORT ?? options.dashboardPort, 10);
 
-    // --- SSO (Enterprise, opt-in via URATEAM_SSO_ENABLED=true) ---
-    const ssoBootstrap = await bootstrapSsoFromEnv();
     const dashboardApp = createDashboard({
       db,
       pipelineConfigs: config.pipelineConfigs,

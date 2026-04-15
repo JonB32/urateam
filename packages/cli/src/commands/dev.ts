@@ -54,8 +54,10 @@ export const devCommand = new Command("dev")
       githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET,
     };
 
-    const { app, db } = await createApp(config);
+    // Validate SSO env vars before opening DB so misconfig fails fast.
     const ssoBootstrap = await bootstrapSsoFromEnv();
+
+    const { app, db } = await createApp(config);
     const dashboardApp = createDashboard({
       db,
       pipelineConfigs: config.pipelineConfigs,

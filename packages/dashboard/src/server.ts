@@ -147,6 +147,15 @@ export function createDashboard(config: DashboardConfig): Hono {
   const ssoActive =
     isFeatureLicensed("sso") && config.sso?.enabled === true;
 
+  // Warn when sso config is present but the feature is not licensed —
+  // operators with `sso.enabled: true` in their config but no enterprise
+  // license would otherwise silently get basicAuth with no clue why.
+  if (config.sso?.enabled === true && !isFeatureLicensed("sso")) {
+    logger.warn(
+      "SSO is configured (sso.enabled=true) but the 'sso' feature is not licensed — falling back to basic auth",
+    );
+  }
+
   if (ssoActive) {
     if (!config.workos) {
       throw new Error(
