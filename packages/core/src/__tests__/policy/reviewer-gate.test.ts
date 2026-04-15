@@ -103,4 +103,37 @@ describe("verifyApprovalsReceived", () => {
     expect(r.satisfied).toBe(false);
     expect(r.missingTeams).toEqual(["security"]);
   });
+
+  it("does not count a user as approved if they later requested changes", async () => {
+    const octokit = {
+      pulls: {
+        listReviews: vi.fn().mockResolvedValue({
+          data: [
+            { user: { login: "alice" }, state: "APPROVED" },
+            { user: { login: "alice" }, state: "CHANGES_REQUESTED" },
+          ],
+        }),
+      },
+      teams: { listMembersInOrg: vi.fn() },
+    } as any;
+    const r = await verifyApprovalsReceived(octokit, "owner", "repo", 1, { users: ["alice"], teams: [] });
+    expect(r.satisfied).toBe(false);
+    expect(r.missingUsers).toEqual(["alice"]);
+  });
+
+  it("counts a user as approved if their latest review is APPROVED after requesting changes", async () => {
+    const octokit = {
+      pulls: {
+        listReviews: vi.fn().mockResolvedValue({
+          data: [
+            { user: { login: "alice" }, state: "CHANGES_REQUESTED" },
+            { user: { login: "alice" }, state: "APPROVED" },
+          ],
+        }),
+      },
+      teams: { listMembersInOrg: vi.fn() },
+    } as any;
+    const r = await verifyApprovalsReceived(octokit, "owner", "repo", 1, { users: ["alice"], teams: [] });
+    expect(r.satisfied).toBe(true);
+  });
 });

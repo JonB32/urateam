@@ -49,10 +49,17 @@ export async function verifyApprovalsReceived(
   }
 
   const reviews = await octokit.pulls.listReviews({ owner, repo, pull_number });
+  // De-dup by user: listReviews returns reviews chronologically (oldest first),
+  // so iterating and overwriting gives the latest state per user. A user who
+  // APPROVED then CHANGES_REQUESTED must NOT count as approved.
+  const latestByUser = new Map<string, string>();
+  for (const r of reviews.data) {
+    if (r.user) latestByUser.set(r.user.login.toLowerCase(), r.state);
+  }
   const approved = new Set(
-    reviews.data
-      .filter((r) => r.state === "APPROVED" && r.user)
-      .map((r) => r.user!.login.toLowerCase()),
+    Array.from(latestByUser.entries())
+      .filter(([, state]) => state === "APPROVED")
+      .map(([login]) => login),
   );
 
   const missingUsers = required.users.filter((u) => !approved.has(u.toLowerCase()));

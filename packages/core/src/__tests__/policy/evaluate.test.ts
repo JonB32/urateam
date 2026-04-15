@@ -107,9 +107,10 @@ describe("evaluatePolicyGates", () => {
     expect(r.violations).toHaveLength(2); // path + cost
     await flushFireAndForget();
     const events = await db.select().from(auditEvents);
-    expect(
-      events.find((e: any) => e.eventType === "policy.override_used"),
-    ).toBeDefined();
+    // Both path and cost violations fire — expect one override event per gate type (2 total).
+    const overrideEvents = events.filter((e: any) => e.eventType === "policy.override_used");
+    expect(overrideEvents).toHaveLength(2);
+    expect(overrideEvents.map((e: any) => JSON.parse(e.payload).gateType).sort()).toEqual(["cost", "path"]);
     expect(
       events.find((e: any) => e.eventType === "policy.path_blocked"),
     ).toBeUndefined();

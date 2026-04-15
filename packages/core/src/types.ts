@@ -92,7 +92,7 @@ export type PipelineConfig = z.infer<typeof PipelineConfigSchema>;
 export const PolicySchema = z.object({
   pathBlocklist: z.array(z.string()).default([]),
   maxTokensPerIssue: z.number().int().positive().optional(),
-  overrideLabel: z.string().default("policy-override"),
+  overrideLabel: z.string().min(1).default("policy-override"),
   mandatoryReviewers: z.object({
     users: z.array(z.string()).default([]),
     teams: z.array(z.string()).default([]),

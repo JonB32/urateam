@@ -66,15 +66,28 @@ export async function evaluatePolicyGates(
   }
 
   if (overrideActive) {
-    void logAuditEvent(
-      input.db,
-      policyOverrideUsedEvent({
-        runId: input.runId,
-        issueId: input.issue.id,
-        gateType: pathViolations.length > 0 ? "path" : "cost",
-        label: input.policy.overrideLabel,
-      }),
-    );
+    if (pathViolations.length > 0) {
+      void logAuditEvent(
+        input.db,
+        policyOverrideUsedEvent({
+          runId: input.runId,
+          issueId: input.issue.id,
+          gateType: "path",
+          label: input.policy.overrideLabel,
+        }),
+      );
+    }
+    if (costViolation) {
+      void logAuditEvent(
+        input.db,
+        policyOverrideUsedEvent({
+          runId: input.runId,
+          issueId: input.issue.id,
+          gateType: "cost",
+          label: input.policy.overrideLabel,
+        }),
+      );
+    }
     return { violations: all, overrideActive: true, shouldDraft: false };
   }
 

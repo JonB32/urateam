@@ -69,11 +69,11 @@ export async function createMR(
     (options.teamReviewers && options.teamReviewers.length > 0)
   ) {
     // Mandatory reviewers (enterprise feature 4.6) are not wired through to
-    // GitLab's assignee/reviewer API in v1 — warn and ignore.
+    // GitLab's assignee/reviewer API in v1 — log informatively and ignore.
     const { createLogger } = await import("../logger.js");
-    createLogger({ module: "repo/gitlab" }).warn(
+    createLogger({ module: "repo/gitlab" }).info(
       { reviewers: options.reviewers, teamReviewers: options.teamReviewers },
-      "GitLab path does not support mandatory reviewers; ignoring",
+      "GitLab path does not request reviewers via API; configured reviewers are not applied",
     );
   }
 

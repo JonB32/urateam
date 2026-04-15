@@ -1497,6 +1497,25 @@ export class PipelineRunner {
               nodes: sanitizedIssue.labels.map((name) => ({ name })),
             }),
           };
+          // Defensive: if a path blocklist is configured and getChangedFiles returned
+          // no files, treat this as "could not evaluate" and force draft rather than
+          // fail-open. getChangedFiles is fail-open (logs warn on git error, returns
+          // []), so we can't distinguish a broken git call from an empty-diff run here.
+          // False-positive rate is low because an empty diff should never reach this
+          // point anyway (the pipeline would have failed earlier).
+          if (changedFiles.length === 0 && config.policy.pathBlocklist.length > 0) {
+            runLog.warn("policy: path blocklist configured but no changed files detected — forcing draft as defensive measure");
+            shouldDraft = true;
+            unresolvedBlockingFindings.push({
+              severity: "blocking",
+              file: "(policy)",
+              line: 0,
+              category: "policy-error",
+              description: "Path policy blocklist could not be evaluated (git diff returned no files). Review the diff manually before merging.",
+              fix: "Verify the diff manually and merge once path policy is confirmed satisfied.",
+            } as any);
+          }
+
           const gateResult = await evaluatePolicyGates({
             db: this.db as AnyDb,
             runId: run.id,
