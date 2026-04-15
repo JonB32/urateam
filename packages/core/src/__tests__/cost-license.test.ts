@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { installTestProLicense, restoreLicense } from "./helpers/license.js";
 import { isFeatureLicensed } from "../license.js";
 import * as core from "../index.js";

@@ -24,6 +24,7 @@ import { sql } from "drizzle-orm";
 import { createLogger } from "../logger.js";
 import { logAuditEvent, budgetRefusedEvent, pruneAuditLog } from "../audit/index.js";
 import { pruneExpiredSessions } from "../auth/index.js";
+import { recomputeCostRollups } from "../cost/index.js";
 
 const log = createLogger({ component: "PmAgent:scheduler" });
 
@@ -485,6 +486,16 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           }
         } catch (err) {
           log.warn({ err }, "session prune failed");
+        }
+
+        // Cost & ROI daily rollup (no-op if unlicensed).
+        // Wrapped in try/catch — rollup failure must not crash the tick.
+        try {
+          if (isFeatureLicensed("cost-roi")) {
+            await recomputeCostRollups(db, config as any);
+          }
+        } catch (err) {
+          log.warn({ err }, "cost rollup failed");
         }
 
       log.info({
