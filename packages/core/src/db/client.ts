@@ -69,6 +69,7 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
   const ts = driver === "postgres" ? "TIMESTAMPTZ" : "INTEGER";
   const now = driver === "postgres" ? "now()" : "unixepoch()";
   const bool = driver === "postgres" ? "BOOLEAN" : "INTEGER";
+  const num = driver === "postgres" ? "DOUBLE PRECISION" : "REAL";
 
   return `
   CREATE TABLE IF NOT EXISTS pipeline_runs (
@@ -202,6 +203,24 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
 
   CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_user_id ON dashboard_sessions(user_id);
   CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_expires_at ON dashboard_sessions(expires_at);
+
+  CREATE TABLE IF NOT EXISTS cost_rollups_daily (
+    id TEXT PRIMARY KEY,
+    date TEXT NOT NULL,
+    pipeline_key TEXT NOT NULL,
+    linear_team_id TEXT,
+    repo_url TEXT NOT NULL,
+    runs INTEGER NOT NULL DEFAULT 0,
+    prs_merged INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    dollars ${num} NOT NULL DEFAULT 0,
+    time_saved_hours ${num} NOT NULL DEFAULT 0,
+    computed_at ${ts} NOT NULL,
+    UNIQUE (date, pipeline_key, linear_team_id, repo_url)
+  );
+  CREATE INDEX IF NOT EXISTS idx_cost_rollups_date ON cost_rollups_daily(date);
+  CREATE INDEX IF NOT EXISTS idx_cost_rollups_date_pipeline ON cost_rollups_daily(date, pipeline_key);
 `;
 }
 
