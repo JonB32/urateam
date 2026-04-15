@@ -1,4 +1,4 @@
-import { matchesAnyPattern } from "../pipeline/runner.js";
+import { matchesAnyPattern } from "../util/glob.js";
 import type { PolicyViolation } from "./types.js";
 
 export function evaluatePathBlocklist(

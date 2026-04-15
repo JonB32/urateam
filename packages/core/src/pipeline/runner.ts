@@ -89,31 +89,12 @@ import { nanoid } from "nanoid";
 import { createLogger, runWithLogContext } from "../logger.js";
 import { isTransientError, MAX_TRANSIENT_RETRIES } from "./error-classifier.js";
 import { evaluatePolicyGates } from "../policy/evaluate.js";
-import { evaluateCostGate, buildReviewerRequest, verifyApprovalsReceived } from "../policy/index.js";
-import { logAuditEvent, policyCostExceededEvent, policyReviewersRequestedEvent } from "../audit/index.js";
+import { buildReviewerRequest, verifyApprovalsReceived } from "../policy/index.js";
+import { logAuditEvent, policyReviewersRequestedEvent } from "../audit/index.js";
+import { matchesAnyPattern } from "../util/glob.js";
 
 // Module-level logger (no runId yet — used for pre-run messages)
 const log = createLogger({ component: "PipelineRunner" });
-
-/**
- * Test whether a file path matches any of the provided glob patterns.
- * Supports `**` (any path segments), `*` (any chars except `/`), and `?`
- * (any single char except `/`). Used for auto-merge exclusion patterns.
- */
-export function matchesAnyPattern(filePath: string, patterns: string[]): boolean {
-  return patterns.some((pattern) => {
-    const regexStr = pattern
-      .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-      .replace(/\*\*/g, "\x00")
-      .replace(/\*/g, "[^/]*")
-      .replace(/\?/g, "[^/]")
-      .replace(/\/\x00\//g, "(?:/|/.+/)")
-      .replace(/^\x00\//, "(?:.+/)?")
-      .replace(/\/\x00$/, "(?:/.+)?")
-      .replace(/\x00/g, ".*");
-    return new RegExp(`^${regexStr}$`).test(filePath);
-  });
-}
 
 export interface PipelineRunnerConfig {
   db: Db;
@@ -1523,7 +1504,7 @@ export class PipelineRunner {
             policy: config.policy,
             changedFiles,
             tokensUsed,
-            stage: "implement",
+            stage: "all-stages",
           });
           if (gateResult.shouldDraft) {
             shouldDraft = true;
@@ -1558,44 +1539,6 @@ export class PipelineRunner {
             );
           }
 
-          // Cost-only re-check framed as the "review" stage — mirrors the
-          // plan's intent of rechecking cumulative token usage after the
-          // test/review stages have run. Path is not re-checked here.
-          if (!gateResult.overrideActive && config.policy.maxTokensPerIssue) {
-            const cv = evaluateCostGate(
-              tokensUsed,
-              config.policy.maxTokensPerIssue,
-              "review",
-            );
-            if (cv) {
-              // Avoid double-emitting when the implement-stage cost gate
-              // already fired for the same run.
-              const alreadyFired = gateResult.violations.some(
-                (v) => v.gate === "cost",
-              );
-              if (!alreadyFired) {
-                void logAuditEvent(
-                  this.db as AnyDb,
-                  policyCostExceededEvent({
-                    runId: run.id,
-                    tokensUsed,
-                    limit: config.policy.maxTokensPerIssue,
-                    stage: "review",
-                    hadOverride: false,
-                  }),
-                );
-                shouldDraft = true;
-                unresolvedBlockingFindings.push({
-                  severity: "blocking",
-                  file: "(policy)",
-                  line: 0,
-                  category: "policy-cost",
-                  description: cv.detail,
-                  fix: `Reduce token usage, or add the \`${config.policy.overrideLabel}\` label to bypass.`,
-                });
-              }
-            }
-          }
         } catch (policyErr) {
           // Fail-open on unexpected errors — policy is advisory, not a hard
           // block on the pipeline. Still log for operators.
@@ -1801,7 +1744,7 @@ export class PipelineRunner {
         // Audit: reviewers requested (enterprise feature 4.6)
         if (reviewerRequest && prUrl) {
           void logAuditEvent(
-            this.db as any,
+            this.db as AnyDb,
             policyReviewersRequestedEvent({
               runId: run.id,
               prUrl,
@@ -1934,6 +1877,9 @@ export class PipelineRunner {
                 if (owner && repo && prNumber) {
                   try {
                     const octokit = await createGitHubClient(this.githubConfig);
+                    // TODO(perf): cache listMembersInOrg results per (org, team) for ~5min to
+                    // avoid secondary rate limit exhaustion on high-frequency CI webhooks.
+                    // See spec §13 deferred items.
                     const check = await verifyApprovalsReceived(
                       octokit as any,
                       owner,
