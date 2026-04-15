@@ -1,8 +1,12 @@
 import { and, eq, ne, count } from "drizzle-orm";
-import { randomUUID } from "node:crypto";
 import type { AnyDb } from "../db/client.js";
 import { dashboardUsers } from "../db/schema.js";
-import { logAuditEvent } from "../audit/index.js";
+import {
+  logAuditEvent,
+  dashboardGrantRoleEvent,
+  dashboardRevokeRoleEvent,
+  dashboardBootstrapAdminEvent,
+} from "../audit/index.js";
 import type { Role } from "./types.js";
 import { SelfDemoteError, LastAdminError } from "./errors.js";
 
@@ -46,27 +50,23 @@ export async function setUserRole(db: AnyDb, args: SetUserRoleArgs): Promise<voi
     .where(eq(dashboardUsers.id, args.userId));
 
   const isRevoke = args.newRole === "viewer";
-  await logAuditEvent(db, {
-    id: `evt_${randomUUID()}`,
-    timestamp: new Date(),
-    eventType: "dashboard.manual_action",
-    actor: `dashboard:${args.actorUserId}`,
-    actorType: "dashboard-user",
-    scope: null,
-    runId: null,
-    issueId: null,
-    inputTokens: 0,
-    outputTokens: 0,
-    payload: {
-      action: isRevoke ? "revoke_role" : "grant_role",
+  const actorRows = await (db as any)
+    .select()
+    .from(dashboardUsers)
+    .where(eq(dashboardUsers.id, args.actorUserId));
+  const actorEmail = (actorRows[0] as any)?.email ?? "unknown";
+  const builder = isRevoke ? dashboardRevokeRoleEvent : dashboardGrantRoleEvent;
+  await logAuditEvent(
+    db,
+    builder({
       targetUserId: args.userId,
       targetEmail: current.email,
       oldRole,
       newRole: args.newRole,
       actorUserId: args.actorUserId,
-      reason: args.reason,
-    },
-  });
+      actorEmail,
+    }),
+  );
 }
 
 export async function getUserRole(db: AnyDb, userId: string): Promise<Role | null> {
@@ -114,24 +114,13 @@ export async function applyBootstrapAdmins(
     .set({ role: "admin" as Role })
     .where(eq(dashboardUsers.id, userId));
 
-  await logAuditEvent(db, {
-    id: `evt_${randomUUID()}`,
-    timestamp: new Date(),
-    eventType: "dashboard.manual_action",
-    actor: "system",
-    actorType: "system",
-    scope: null,
-    runId: null,
-    issueId: null,
-    inputTokens: 0,
-    outputTokens: 0,
-    payload: {
-      action: "bootstrap_admin",
+  await logAuditEvent(
+    db,
+    dashboardBootstrapAdminEvent({
       targetUserId: userId,
       targetEmail: normalizedEmail,
-      envVarMatched: true,
-    },
-  });
+    }),
+  );
   return true;
 }
 

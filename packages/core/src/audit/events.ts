@@ -164,6 +164,90 @@ export function dashboardLoginDeniedEvent(args: {
   });
 }
 
+export function dashboardGrantRoleEvent(args: {
+  targetUserId: string;
+  targetEmail: string;
+  oldRole: string;
+  newRole: string;
+  actorUserId: string;
+  actorEmail: string;
+}): AuditEvent {
+  return base({
+    eventType: "dashboard.manual_action",
+    actor: `dashboard:${args.actorEmail}`,
+    actorType: "dashboard-user",
+    payload: {
+      action: "grant_role",
+      targetUserId: args.targetUserId,
+      targetEmail: args.targetEmail,
+      oldRole: args.oldRole,
+      newRole: args.newRole,
+      actorUserId: args.actorUserId,
+    },
+  });
+}
+
+export function dashboardRevokeRoleEvent(args: {
+  targetUserId: string;
+  targetEmail: string;
+  oldRole: string;
+  newRole: string;
+  actorUserId: string;
+  actorEmail: string;
+}): AuditEvent {
+  return base({
+    eventType: "dashboard.manual_action",
+    actor: `dashboard:${args.actorEmail}`,
+    actorType: "dashboard-user",
+    payload: {
+      action: "revoke_role",
+      targetUserId: args.targetUserId,
+      targetEmail: args.targetEmail,
+      oldRole: args.oldRole,
+      newRole: args.newRole,
+      actorUserId: args.actorUserId,
+    },
+  });
+}
+
+export function dashboardBootstrapAdminEvent(args: {
+  targetUserId: string;
+  targetEmail: string;
+}): AuditEvent {
+  return base({
+    eventType: "dashboard.manual_action",
+    actor: "system",
+    actorType: "system",
+    payload: {
+      action: "bootstrap_admin",
+      targetUserId: args.targetUserId,
+      targetEmail: args.targetEmail,
+      envVarMatched: true,
+    },
+  });
+}
+
+export function dashboardRetryRunEvent(args: {
+  runId: string;
+  issueId: string;
+  previousStatus: string;
+  actorUserId: string;
+  actorEmail: string;
+}): AuditEvent {
+  return base({
+    eventType: "dashboard.manual_action",
+    actor: `dashboard:${args.actorEmail}`,
+    actorType: "dashboard-user",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      action: "retry_run",
+      previousStatus: args.previousStatus,
+      actorUserId: args.actorUserId,
+    },
+  });
+}
+
 export function configLoadedEvent(args: {
   path: string;
   sha256: string;
