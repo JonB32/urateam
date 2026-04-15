@@ -29,7 +29,7 @@ beforeEach(async () => {
 function appWithSso() {
   const app = new Hono();
   app.use("*", createSsoMiddleware({ db, sso: ssoConfig as any }));
-  app.get("/runs", (c) => c.text(`hello ${(c.get("user") as any).email}`));
+  app.get("/runs", (c) => c.text(`hello ${(c.get("user" as never) as any).email}`));
   app.post("/webhooks/linear", (c) => c.text("ok"));
   app.get("/auth/login", (c) => c.text("login page"));
   return app;
