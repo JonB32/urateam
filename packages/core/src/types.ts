@@ -85,6 +85,9 @@ export const PipelineConfigSchema = z.object({
   failOnAutoCommit: z.boolean().optional(),
   /** Optional org-policy guardrails (path blocklist, per-issue cost cap, mandatory reviewers). */
   policy: z.lazy(() => PolicySchema).optional(),
+  /** Hours of engineer time saved when this pipeline merges a PR.
+   *  Overrides costs.timeSavedPerPrDefault for this specific pipeline. */
+  timeSavedPerPr: z.number().positive().optional(),
 });
 export type PipelineConfig = z.infer<typeof PipelineConfigSchema>;
 
@@ -419,6 +422,24 @@ export const AuditEventSchema = z.object({
 });
 export type AuditEvent = z.infer<typeof AuditEventSchema>;
 
+// --- Cost / ROI ---
+export const ModelPricingSchema = z.object({
+  inputPerMillion: z.number().positive(),
+  outputPerMillion: z.number().positive(),
+});
+export type ModelPricing = z.infer<typeof ModelPricingSchema>;
+
+export const CostsConfigSchema = z.object({
+  modelPricing: z.record(z.string(), ModelPricingSchema).default({
+    "claude-opus-4-6":   { inputPerMillion: 15, outputPerMillion: 75 },
+    "claude-sonnet-4-6": { inputPerMillion:  3, outputPerMillion: 15 },
+    "claude-haiku-4-5":  { inputPerMillion:  1, outputPerMillion:  5 },
+  }),
+  hourlyEngRate: z.number().positive().default(50),
+  timeSavedPerPrDefault: z.number().positive().default(4),
+});
+export type CostsConfig = z.infer<typeof CostsConfigSchema>;
+
 /**
  * Top-level application config schema. Currently only scopes the audit log
  * section introduced with the audit-log feature; additional sections can be
@@ -443,5 +464,6 @@ export const AppConfigSchema = z.object({
     retentionDays: z.number().int().positive().optional().default(365),
   }).optional(),
   sso: SsoConfigSchema.optional(),
+  costs: CostsConfigSchema.optional(),
 });
 export type AppConfig = z.infer<typeof AppConfigSchema>;
