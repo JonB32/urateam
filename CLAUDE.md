@@ -174,6 +174,19 @@ It is a pnpm monorepo with 3 packages:
 - **Sign Out link is currently only on the Audit page**; threading user context through `runs`/`tokens`/`errors`/`config` views is a follow-up
 - **Session id MUST NOT be logged** — they're credentials. The `touchSessionLastSeen` warn logs only `idPrefix: id.slice(0,8) + "…"`
 
+### Org policy / guardrails (Enterprise feature 4.6)
+- Module: `packages/core/src/policy/` — `path-gate.ts`, `cost-gate.ts`, `reviewer-gate.ts`, `override.ts`, `evaluate.ts` (orchestrator)
+- Config: `PipelineConfig.policy = { pathBlocklist, maxTokensPerIssue, overrideLabel, mandatoryReviewers: { users, teams } }` — per-pipeline
+- Path gate: uses `matchesAnyPattern` from `util/glob.ts` (not `pipeline/runner.ts` — moved to break a circular dep)
+- Cost gate: checks `run.totalInputTokens + run.totalOutputTokens` once after all stages complete (cumulative snapshot); the `stage` field in the audit event is `"all-stages"`
+- Override: `hasOverrideLabel(issue, labelName)` — case-insensitive Linear label check. **SECURITY NOTE: the override bypass relies on Linear label creation being restricted to authorized team members** — operators should scope the `overrideLabel` to principals they trust
+- Reviewer gate: `buildReviewerRequest` builds `{users, teams}`; PR creation threads it through `createPRViaCli`, GitHub App `createPR`, and GitLab `createMR` (warn-only on GitLab); auto-merge is blocked until `verifyApprovalsReceived` returns satisfied
+- Reviewer gate fires on **GitHub App path only** at auto-merge — `gh` CLI fallback has no API client; CLI path still passes `--reviewer` args at PR creation
+- Violations set `run.shouldDraft = true` and push `ReviewFinding` entries (`category: "policy-path" | "policy-cost"`) into `unresolvedBlockingFindings` — flows through the existing draft-PR renderer
+- Audit events: `policy.path_blocked`, `policy.cost_exceeded`, `policy.override_used`, `policy.reviewers_requested`
+- License gate: `isFeatureLicensed("org-policy")` required at every call site
+- **Known perf follow-up**: `verifyApprovalsReceived` calls `listMembersInOrg` per team per check with no cache — high-frequency CI webhooks on a PR with 5+ required teams can exhaust GitHub's secondary rate limit. Documented TODO in the auto-merge gate block
+
 ### Coordination (`packages/core/src/pm/coordination.ts`)
 - DB-backed `active_work` table tracks files modified by in-flight pipeline runs
 - `upsertActiveWork` uses atomic `onConflictDoUpdate` (requires UNIQUE on `run_id`)

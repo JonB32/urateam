@@ -8,6 +8,7 @@ import type {
   SanitizedIssue,
   DailyTokenSummary,
   PipelineRunStatus,
+  ReviewFinding,
 } from "../types.js";
 import type { Db, AnyDb } from "../db/client.js";
 import { pipelineRuns } from "../db/schema.js";
@@ -87,29 +88,13 @@ import { eq, and, or, sql, gte, lt } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { createLogger, runWithLogContext } from "../logger.js";
 import { isTransientError, MAX_TRANSIENT_RETRIES } from "./error-classifier.js";
+import { evaluatePolicyGates } from "../policy/evaluate.js";
+import { buildReviewerRequest, verifyApprovalsReceived } from "../policy/index.js";
+import { logAuditEvent, policyReviewersRequestedEvent } from "../audit/index.js";
+import { matchesAnyPattern } from "../util/glob.js";
 
 // Module-level logger (no runId yet — used for pre-run messages)
 const log = createLogger({ component: "PipelineRunner" });
-
-/**
- * Test whether a file path matches any of the provided glob patterns.
- * Supports `**` (any path segments), `*` (any chars except `/`), and `?`
- * (any single char except `/`). Used for auto-merge exclusion patterns.
- */
-export function matchesAnyPattern(filePath: string, patterns: string[]): boolean {
-  return patterns.some((pattern) => {
-    const regexStr = pattern
-      .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-      .replace(/\*\*/g, "\x00")
-      .replace(/\*/g, "[^/]*")
-      .replace(/\?/g, "[^/]")
-      .replace(/\/\x00\//g, "(?:/|/.+/)")
-      .replace(/^\x00\//, "(?:.+/)?")
-      .replace(/\/\x00$/, "(?:/.+)?")
-      .replace(/\x00/g, ".*");
-    return new RegExp(`^${regexStr}$`).test(filePath);
-  });
-}
 
 export interface PipelineRunnerConfig {
   db: Db;
@@ -1487,11 +1472,101 @@ export class PipelineRunner {
 
       // Determine if PR should be draft based on unresolved issues.
       // Computed AFTER all loops (RALPH, review-fix, deep review) so it reflects final state.
-      const unresolvedBlockingFindings =
+      const unresolvedBlockingFindings: ReviewFinding[] =
         Array.isArray(handoff?.context?.reviewFindings)
           ? handoff!.context.reviewFindings.filter((f) => f.severity === "blocking")
           : [];
-      const shouldDraft = !ralphSatisfied || unresolvedBlockingFindings.length > 0;
+      let shouldDraft = !ralphSatisfied || unresolvedBlockingFindings.length > 0;
+
+      // Org-policy guardrails (Enterprise feature): path blocklist + per-issue
+      // cost cap. When a gate fires with no override label, the PR is forced
+      // to draft and blocking findings are surfaced in the draft PR comment.
+      if (isFeatureLicensed("org-policy") && config.policy) {
+        try {
+          const wtPathForPolicy = worktreePath!;
+          const changedFiles = await getChangedFiles(
+            wtPathForPolicy,
+            repoConfig.defaultBranch,
+          );
+          const tokensUsed = run.totalInputTokens + run.totalOutputTokens;
+          // The runner's sanitizedIssue uses a plain `labels: string[]`; wrap
+          // it to match the Linear-SDK shape that `hasOverrideLabel` expects.
+          const issueForGate = {
+            id: sanitizedIssue.id,
+            labels: async () => ({
+              nodes: sanitizedIssue.labels.map((name) => ({ name })),
+            }),
+          };
+          // Defensive: if a path blocklist is configured and getChangedFiles returned
+          // no files, treat this as "could not evaluate" and force draft rather than
+          // fail-open. getChangedFiles is fail-open (logs warn on git error, returns
+          // []), so we can't distinguish a broken git call from an empty-diff run here.
+          // False-positive rate is low because an empty diff should never reach this
+          // point anyway (the pipeline would have failed earlier).
+          if (changedFiles.length === 0 && config.policy.pathBlocklist.length > 0) {
+            runLog.warn("policy: path blocklist configured but no changed files detected — forcing draft as defensive measure");
+            shouldDraft = true;
+            unresolvedBlockingFindings.push({
+              severity: "blocking",
+              file: "(policy)",
+              line: 0,
+              category: "policy-error",
+              description: "Path policy blocklist could not be evaluated (git diff returned no files). Review the diff manually before merging.",
+              fix: "Verify the diff manually and merge once path policy is confirmed satisfied.",
+            } as any);
+          }
+
+          const gateResult = await evaluatePolicyGates({
+            db: this.db as AnyDb,
+            runId: run.id,
+            issue: issueForGate,
+            policy: config.policy,
+            changedFiles,
+            tokensUsed,
+            stage: "all-stages",
+          });
+          if (gateResult.shouldDraft) {
+            shouldDraft = true;
+            for (const v of gateResult.violations) {
+              unresolvedBlockingFindings.push({
+                severity: "blocking",
+                file: (v.payload.path as string | undefined) ?? "(policy)",
+                line: 0,
+                category: `policy-${v.gate}`,
+                description: v.detail,
+                fix:
+                  v.gate === "path"
+                    ? `Remove changes to this path, or add the \`${config.policy.overrideLabel}\` label to bypass.`
+                    : `Reduce token usage, or add the \`${config.policy.overrideLabel}\` label to bypass.`,
+              });
+            }
+            runLog.warn(
+              {
+                issueId: sanitizedIssue.id,
+                violations: gateResult.violations.length,
+              },
+              "org-policy: gate fired — forcing draft PR",
+            );
+          } else if (gateResult.overrideActive && gateResult.violations.length > 0) {
+            runLog.info(
+              {
+                issueId: sanitizedIssue.id,
+                violations: gateResult.violations.length,
+                overrideLabel: config.policy.overrideLabel,
+              },
+              "org-policy: gate fired but override label present — proceeding",
+            );
+          }
+
+        } catch (policyErr) {
+          // Fail-open on unexpected errors — policy is advisory, not a hard
+          // block on the pipeline. Still log for operators.
+          runLog.warn(
+            { err: policyErr },
+            "org-policy: gate evaluation failed — skipping",
+          );
+        }
+      }
 
       // All stages complete — push branch and create PR.
       // The push queue (concurrency=1) serialises within this process.
@@ -1613,6 +1688,13 @@ export class PipelineRunner {
         });
         const isGitLab = repoConfig.provider === "gitlab";
 
+        // Mandatory reviewer request (enterprise feature 4.6). Only non-null
+        // when the org-policy feature is licensed and the pipeline config
+        // specifies mandatoryReviewers.
+        const reviewerRequest = isFeatureLicensed("org-policy")
+          ? buildReviewerRequest(config.policy)
+          : null;
+
         if (isGitLab && this.gitlabConfig) {
           // GitLab — create MR via REST API
           try {
@@ -1623,6 +1705,8 @@ export class PipelineRunner {
               targetBranch: repoConfig.defaultBranch,
               title: sanitizedIssue.title,
               description: prBody,
+              reviewers: reviewerRequest?.users,
+              teamReviewers: reviewerRequest?.teams,
             });
             run.prUrl = prUrl;
             runLog.info({ prUrl }, "MR created via GitLab API");
@@ -1642,6 +1726,8 @@ export class PipelineRunner {
               title: sanitizedIssue.title,
               body: prBody,
               draft: shouldDraft,
+              reviewers: reviewerRequest?.users,
+              teamReviewers: reviewerRequest?.teams,
             });
             run.prUrl = prUrl;
           } catch (prError) {
@@ -1650,6 +1736,13 @@ export class PipelineRunner {
         } else {
           // No provider-specific config — use gh CLI
           runLog.info("creating PR via gh CLI");
+          const { owner: ghOwner } = (() => {
+            try {
+              return parseRepoUrl(repoConfig.url);
+            } catch {
+              return { owner: undefined as string | undefined };
+            }
+          })();
           prUrl = await createPRViaCli({
             worktreePath: wtPath,
             branch,
@@ -1657,11 +1750,27 @@ export class PipelineRunner {
             title: sanitizedIssue.title,
             body: prBody,
             draft: shouldDraft,
+            reviewers: reviewerRequest?.users,
+            teamReviewers: reviewerRequest?.teams,
+            owner: ghOwner,
           });
           if (prUrl) {
             run.prUrl = prUrl;
             runLog.info({ prUrl }, "PR created");
           }
+        }
+
+        // Audit: reviewers requested (enterprise feature 4.6)
+        if (reviewerRequest && prUrl) {
+          void logAuditEvent(
+            this.db as AnyDb,
+            policyReviewersRequestedEvent({
+              runId: run.id,
+              prUrl,
+              users: reviewerRequest.users,
+              teams: reviewerRequest.teams,
+            }),
+          );
         }
 
         // 4. Flag for human review when conflicts could not be auto-resolved
@@ -1757,6 +1866,69 @@ export class PipelineRunner {
           } else if (excludedFile !== undefined) {
             autoMergeReason = `File matches exclusion pattern: ${excludedFile}`;
             shouldMerge = false;
+          }
+
+          // Mandatory reviewer gate (enterprise feature 4.6).
+          //
+          // Known limitation: the reviewer check requires an Octokit API
+          // client (to call pulls.listReviews / teams.listMembersInOrg), so
+          // it only fires when the GitHub App is configured. The `gh` CLI
+          // fallback and GitLab paths skip this check — documented in the
+          // plan as acceptable because production deployments use the App.
+          if (shouldMerge && isFeatureLicensed("org-policy")) {
+            const policyReviewerRequest = buildReviewerRequest(config.policy);
+            if (policyReviewerRequest) {
+              if (!this.githubConfig) {
+                runLog.info(
+                  "org-policy reviewer gate: no GitHub App configured, skipping reviewer approval check on auto-merge (gh CLI path has no API client)",
+                );
+              } else {
+                const ownerRepoMatch = repoConfig.url.match(
+                  /github\.com[:/]([^/]+)\/([^/.]+)/,
+                );
+                const owner = ownerRepoMatch?.[1];
+                const repo = ownerRepoMatch?.[2];
+                const prNumberMatch = prUrl?.match(/\/pull\/(\d+)/);
+                const prNumber = prNumberMatch
+                  ? parseInt(prNumberMatch[1]!, 10)
+                  : undefined;
+
+                if (owner && repo && prNumber) {
+                  try {
+                    const octokit = await createGitHubClient(this.githubConfig);
+                    // TODO(perf): cache listMembersInOrg results per (org, team) for ~5min to
+                    // avoid secondary rate limit exhaustion on high-frequency CI webhooks.
+                    // See spec §13 deferred items.
+                    const check = await verifyApprovalsReceived(
+                      octokit as any,
+                      owner,
+                      repo,
+                      prNumber,
+                      policyReviewerRequest,
+                    );
+                    if (!check.satisfied) {
+                      shouldMerge = false;
+                      autoMergeReason = `mandatory reviewers pending: users=${check.missingUsers.join(",") || "none"} teams=${check.missingTeams.join(",") || "none"}`;
+                      runLog.info(
+                        {
+                          missingUsers: check.missingUsers,
+                          missingTeams: check.missingTeams,
+                        },
+                        "auto-merge skipped: mandatory reviewers not yet approved",
+                      );
+                    }
+                  } catch (err) {
+                    runLog.warn(
+                      { err },
+                      "org-policy reviewer gate: verifyApprovalsReceived failed — skipping auto-merge to be safe",
+                    );
+                    shouldMerge = false;
+                    autoMergeReason =
+                      "mandatory reviewers check failed — requires manual verification";
+                  }
+                }
+              }
+            }
           }
 
           if (shouldMerge) {

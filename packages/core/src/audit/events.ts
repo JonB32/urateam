@@ -176,3 +176,70 @@ export function configLoadedEvent(args: {
     payload: { path: args.path, sha256: args.sha256, tier: args.tier },
   });
 }
+
+export function policyPathBlockedEvent(args: {
+  runId: string;
+  path: string;
+  pattern: string;
+  hadOverride: boolean;
+}): AuditEvent {
+  return base({
+    eventType: "policy.path_blocked",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    payload: { path: args.path, pattern: args.pattern, hadOverride: args.hadOverride },
+  });
+}
+
+export function policyCostExceededEvent(args: {
+  runId: string;
+  tokensUsed: number;
+  limit: number;
+  stage: string;
+  hadOverride: boolean;
+}): AuditEvent {
+  return base({
+    eventType: "policy.cost_exceeded",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    payload: {
+      tokensUsed: args.tokensUsed,
+      limit: args.limit,
+      stage: args.stage,
+      hadOverride: args.hadOverride,
+    },
+  });
+}
+
+export function policyOverrideUsedEvent(args: {
+  runId: string;
+  issueId: string;
+  gateType: "path" | "cost";
+  label: string;
+}): AuditEvent {
+  return base({
+    eventType: "policy.override_used",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: { gateType: args.gateType, label: args.label },
+  });
+}
+
+export function policyReviewersRequestedEvent(args: {
+  runId: string;
+  prUrl: string;
+  users: string[];
+  teams: string[];
+}): AuditEvent {
+  return base({
+    eventType: "policy.reviewers_requested",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    payload: { prUrl: args.prUrl, users: args.users, teams: args.teams },
+  });
+}

@@ -508,6 +508,15 @@ export async function createPRViaCli(options: {
   title: string;
   body: string;
   draft?: boolean;
+  /** GitHub usernames to request review from. */
+  reviewers?: string[];
+  /** GitHub team slugs (without owner prefix) to request review from. */
+  teamReviewers?: string[];
+  /**
+   * Repo owner — required when `teamReviewers` is supplied because
+   * `gh pr create --reviewer` expects `owner/team-slug` for team reviewers.
+   */
+  owner?: string;
 }): Promise<string> {
   const args = [
     "pr", "create",
@@ -517,6 +526,22 @@ export async function createPRViaCli(options: {
     "--body", options.body,
   ];
   if (options.draft) args.push("--draft");
+  if (options.reviewers && options.reviewers.length > 0) {
+    args.push("--reviewer", options.reviewers.join(","));
+  }
+  if (options.teamReviewers && options.teamReviewers.length > 0) {
+    if (!options.owner) {
+      getLog().warn(
+        { teamReviewers: options.teamReviewers },
+        "createPRViaCli: teamReviewers supplied without owner — skipping team reviewer request",
+      );
+    } else {
+      args.push(
+        "--reviewer",
+        options.teamReviewers.map((t) => `${options.owner}/${t}`).join(","),
+      );
+    }
+  }
 
   return new Promise((resolve) => {
     execFile(

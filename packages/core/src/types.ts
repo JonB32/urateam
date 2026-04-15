@@ -83,8 +83,22 @@ export const PipelineConfigSchema = z.object({
    *  When false (default), auto-commit is a silent safety net and the run continues normally.
    *  When true, triggering auto-commit is treated as a pipeline error so the issue surfaces immediately. */
   failOnAutoCommit: z.boolean().optional(),
+  /** Optional org-policy guardrails (path blocklist, per-issue cost cap, mandatory reviewers). */
+  policy: z.lazy(() => PolicySchema).optional(),
 });
 export type PipelineConfig = z.infer<typeof PipelineConfigSchema>;
+
+// --- Org Policy ---
+export const PolicySchema = z.object({
+  pathBlocklist: z.array(z.string()).default([]),
+  maxTokensPerIssue: z.number().int().positive().optional(),
+  overrideLabel: z.string().min(1).default("policy-override"),
+  mandatoryReviewers: z.object({
+    users: z.array(z.string()).default([]),
+    teams: z.array(z.string()).default([]),
+  }).optional(),
+});
+export type Policy = z.infer<typeof PolicySchema>;
 
 // --- Trigger Map ---
 export const TriggerMapSchema = z.object({
@@ -380,6 +394,8 @@ export const AuditEventTypeSchema = z.enum([
   "license.validation_failed", "config.loaded",
   "dashboard.manual_action",
   "dashboard.login", "dashboard.logout", "dashboard.login_denied",
+  "policy.path_blocked", "policy.cost_exceeded",
+  "policy.override_used", "policy.reviewers_requested",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 

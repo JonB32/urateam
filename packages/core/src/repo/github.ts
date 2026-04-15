@@ -1,5 +1,8 @@
 import { Octokit } from "@octokit/rest";
 import { createAppAuth } from "@octokit/auth-app";
+import { createLogger } from "../logger.js";
+
+const log = createLogger({ module: "repo/github" });
 
 export interface GitHubConfig {
   appId: string;
@@ -15,6 +18,10 @@ export interface CreatePROptions {
   title: string;
   body: string;
   draft?: boolean;
+  /** GitHub usernames to request review from. */
+  reviewers?: string[];
+  /** GitHub team slugs (without owner prefix). */
+  teamReviewers?: string[];
 }
 
 /**
@@ -50,6 +57,36 @@ export async function createPR(
     body: options.body,
     draft: options.draft ?? false,
   });
+
+  // Mandatory reviewer request (enterprise feature 4.6). Failures here must
+  // not fail the whole PR creation — reviewers can be re-requested later.
+  const hasReviewers =
+    (options.reviewers && options.reviewers.length > 0) ||
+    (options.teamReviewers && options.teamReviewers.length > 0);
+  if (hasReviewers) {
+    try {
+      await octokit.pulls.requestReviewers({
+        owner: options.owner,
+        repo: options.repo,
+        pull_number: response.data.number,
+        reviewers: options.reviewers ?? [],
+        team_reviewers: options.teamReviewers ?? [],
+      });
+    } catch (err) {
+      log.warn(
+        {
+          err,
+          owner: options.owner,
+          repo: options.repo,
+          prNumber: response.data.number,
+          reviewers: options.reviewers,
+          teamReviewers: options.teamReviewers,
+        },
+        "requestReviewers failed after PR creation — PR created without reviewer request",
+      );
+    }
+  }
+
   return response.data.html_url;
 }
 
