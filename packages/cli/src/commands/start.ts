@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
+import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
 
 export const startCommand = new Command("start")
   .description("Start production server (webhook + dashboard)")
@@ -149,6 +150,11 @@ export const startCommand = new Command("start")
       githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET,
     };
 
+    // --- SSO (Enterprise, opt-in via URATEAM_SSO_ENABLED=true) ---
+    // Validate SSO env vars BEFORE opening the DB / starting the runner so a
+    // misconfigured deployment fails fast without leaking resources.
+    const ssoBootstrap = await bootstrapSsoFromEnv();
+
     // --- Start servers ---
     const { app, runner, db } = await createApp(config);
 
@@ -162,7 +168,12 @@ export const startCommand = new Command("start")
       pipelineConfigs: config.pipelineConfigs,
       repoConfigs: config.repoConfigs,
       auth: dashboardAuth,
+      sso: ssoBootstrap?.sso,
+      workos: ssoBootstrap?.workos,
     });
+    if (ssoBootstrap) {
+      console.log(`SSO: enabled (WorkOS client ${ssoBootstrap.sso.workosClientId})`);
+    }
 
     console.log(`Linear Agent Framework starting`);
     console.log(`Webhook:   http://localhost:${port}`);

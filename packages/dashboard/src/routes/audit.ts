@@ -78,7 +78,10 @@ export function createAuditRouter(db: Db, basePath = ""): Hono {
     const { events, nextCursor } = await listAuditEvents(db as any, readerFilters);
     const content = renderAuditPage({ events, nextCursor, filters });
     if (c.req.header("HX-Request")) return c.html(content);
-    return c.html(layout("Audit Log", content, basePath));
+    const user = c.get("user" as never) as { email?: string } | undefined;
+    return c.html(
+      layout("Audit Log", content, basePath, { userEmail: user?.email }),
+    );
   });
 
   // HTMX partial used by the "Load more" link to append rows.

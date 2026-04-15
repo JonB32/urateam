@@ -1,14 +1,22 @@
 import { Hono } from "hono";
 import { basicAuth } from "hono/basic-auth";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { createLogger } from "@urateam/core";
-import type { Db, PipelineConfig, RepoConfig } from "@urateam/core";
+import { createLogger, isFeatureLicensed } from "@urateam/core";
+import type {
+  Db,
+  PipelineConfig,
+  RepoConfig,
+  SsoConfig,
+  WorkosClient,
+} from "@urateam/core";
 import { createRunsRouter } from "./routes/runs.js";
 import { createTokensRouter } from "./routes/tokens.js";
 import { createErrorsRouter } from "./routes/errors.js";
 import { createConfigRouter } from "./routes/config.js";
 import { createCoordinationRouter } from "./routes/coordination.js";
 import { createAuditRouter } from "./routes/audit.js";
+import { createAuthRouter } from "./routes/auth.js";
+import { createSsoMiddleware } from "./middleware/sso.js";
 
 const logger = createLogger({ component: "dashboard" });
 
@@ -17,6 +25,16 @@ export interface DashboardConfig {
   pipelineConfigs: Record<string, PipelineConfig>;
   repoConfigs: Record<string, RepoConfig>;
   auth?: { username: string; password: string };
+  /**
+   * Optional SSO configuration. When the `sso` feature is licensed AND
+   * `sso.enabled === true`, the dashboard mounts the WorkOS auth router
+   * and the session-validating SSO middleware in place of basic auth.
+   * Callers must also pass `workos` (a `WorkosClient` instance) — typically
+   * obtained from `getDefaultWorkosClient(sso.workosApiKey)`. This keeps
+   * `createDashboard` synchronous and lets tests inject a stub client.
+   */
+  sso?: SsoConfig;
+  workos?: WorkosClient;
   /**
    * Root path prefix for all dashboard navigation links (e.g. `"/ateam"`).
    * No trailing slash. Falls back to the `DASHBOARD_BASE_PATH` environment
@@ -95,7 +113,18 @@ export function createDashboard(config: DashboardConfig): Hono {
   // CSRF / Origin validation for state-changing requests
   app.use("*", async (c, next) => {
     const method = c.req.method;
-    if (["POST", "PUT", "DELETE", "PATCH"].includes(method)) {
+    // /auth/login and /auth/callback are GET-based OAuth handoffs with no
+    // body — they cannot be targets of CSRF. /auth/logout is POST and MUST
+    // go through CSRF (either HX-Request or a token) so an attacker can't
+    // embed a <form action="/auth/logout"> on a third-party site and force
+    // a logout.
+    const path = c.req.path;
+    const csrfExempt =
+      path === "/auth/login" || path === "/auth/callback";
+    if (
+      ["POST", "PUT", "DELETE", "PATCH"].includes(method) &&
+      !csrfExempt
+    ) {
       // Require HX-Request header on HTMX-driven state-changing endpoints
       if (!c.req.header("HX-Request")) {
         return c.text("Forbidden: HTMX header required", 403);
@@ -112,9 +141,40 @@ export function createDashboard(config: DashboardConfig): Hono {
     await next();
   });
 
-  // Always require basic auth — dashboard exposes sensitive operational data.
-  // If credentials are not configured, block all access with a clear error.
-  if (config.auth?.username && config.auth?.password) {
+  // Authentication: SSO (Enterprise) takes priority over basic auth when
+  // licensed AND enabled. Otherwise fall back to basic auth, or 503 if no
+  // credentials are configured.
+  const ssoActive =
+    isFeatureLicensed("sso") && config.sso?.enabled === true;
+
+  // Warn when sso config is present but the feature is not licensed —
+  // operators with `sso.enabled: true` in their config but no enterprise
+  // license would otherwise silently get basicAuth with no clue why.
+  if (config.sso?.enabled === true && !isFeatureLicensed("sso")) {
+    logger.warn(
+      "SSO is configured (sso.enabled=true) but the 'sso' feature is not licensed — falling back to basic auth",
+    );
+  }
+
+  if (ssoActive) {
+    if (!config.workos) {
+      throw new Error(
+        "SSO is licensed and enabled, but no WorkosClient was provided to createDashboard(). " +
+          "Pass `workos: await getDefaultWorkosClient(sso.workosApiKey)`.",
+      );
+    }
+    logger.info("Mounting SSO auth router and session middleware");
+    const authRouter = createAuthRouter({
+      db: config.db,
+      sso: config.sso!,
+      workos: config.workos,
+    });
+    app.route("/", authRouter);
+    app.use(
+      "*",
+      createSsoMiddleware({ db: config.db, sso: config.sso! }),
+    );
+  } else if (config.auth?.username && config.auth?.password) {
     app.use(
       "*",
       basicAuth({

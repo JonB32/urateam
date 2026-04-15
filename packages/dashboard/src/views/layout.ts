@@ -37,9 +37,31 @@ function normalizeBasePath(basePath: string): string {
  *                   (sourced from `DashboardConfig.basePath`) to decouple
  *                   link rendering from the process environment.
  */
-export function layout(title: string, content: string, basePath?: string): string {
+/**
+ * Optional context propagated from the request handler. When `userEmail`
+ * is set the nav renders a Sign Out form (POST /auth/logout). Routes that
+ * have access to `c.get("user")` should pass it; others omit and get the
+ * existing layout unchanged.
+ */
+export interface LayoutContext {
+  userEmail?: string;
+}
+
+export function layout(
+  title: string,
+  content: string,
+  basePath?: string,
+  ctx?: LayoutContext,
+): string {
   // Explicit parameter takes priority; fall back to env var for backward compat.
   const bp = normalizeBasePath(basePath ?? getBasePath());
+  // Logout goes through the dashboard CSRF middleware (which requires an
+  // HX-Request header on all state-changing routes). Using hx-post with an
+  // explicit HX-Request header on the button ensures the request is not
+  // forgeable from a third-party origin via a plain <form> submission.
+  const signOut = ctx?.userEmail
+    ? `<button type="button" class="link signout-btn" hx-post="${bp}/auth/logout" hx-headers='{"HX-Request":"true"}' hx-push-url="true" hx-swap="none">Sign out (${escapeHtml(ctx.userEmail)})</button>`
+    : "";
   const cspContent =
     "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self'";
   return `<!DOCTYPE html>
@@ -67,6 +89,7 @@ export function layout(title: string, content: string, basePath?: string): strin
     <a href="${bp}/audit">Audit</a>
     <a href="${bp}/config">Config</a>
     <a href="${bp}/coordination">Coordination</a>
+    ${signOut}
   </nav>
   <main>
     <h1>${escapeHtml(title)}</h1>

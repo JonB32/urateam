@@ -182,6 +182,26 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
   CREATE INDEX IF NOT EXISTS idx_audit_events_type_ts ON audit_events(event_type, timestamp DESC);
   CREATE INDEX IF NOT EXISTS idx_audit_events_scope_ts ON audit_events(scope, timestamp DESC);
   CREATE INDEX IF NOT EXISTS idx_audit_events_run_id ON audit_events(run_id);
+
+  CREATE TABLE IF NOT EXISTS dashboard_users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    name TEXT,
+    workos_user_id TEXT,
+    created_at ${ts} NOT NULL,
+    last_login_at ${ts}
+  );
+
+  CREATE TABLE IF NOT EXISTS dashboard_sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES dashboard_users(id),
+    created_at ${ts} NOT NULL,
+    expires_at ${ts} NOT NULL,
+    last_seen_at ${ts} NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_user_id ON dashboard_sessions(user_id);
+  CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_expires_at ON dashboard_sessions(expires_at);
 `;
 }
 

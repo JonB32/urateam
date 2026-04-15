@@ -23,6 +23,7 @@ import { resolveWorkflowStates } from "./linear-helpers.js";
 import { sql } from "drizzle-orm";
 import { createLogger } from "../logger.js";
 import { logAuditEvent, budgetRefusedEvent, pruneAuditLog } from "../audit/index.js";
+import { pruneExpiredSessions } from "../auth/index.js";
 
 const log = createLogger({ component: "PmAgent:scheduler" });
 
@@ -474,6 +475,16 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           }
         } catch (err) {
           log.warn({ err }, "audit retention sweep failed");
+        }
+
+        // Dashboard session prune sweep (no-op if SSO unlicensed).
+        // Wrapped in try/catch — prune failure must not crash the tick.
+        try {
+          if (isFeatureLicensed("sso")) {
+            await pruneExpiredSessions(db);
+          }
+        } catch (err) {
+          log.warn({ err }, "session prune failed");
         }
 
       log.info({

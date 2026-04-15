@@ -178,3 +178,28 @@ export const auditEvents = sqliteTable("audit_events", {
   outputTokens: integer("output_tokens").notNull().default(0),
   payload: text("payload").notNull().default("{}"),
 });
+
+export const dashboardUsers = sqliteTable("dashboard_users", {
+  id: text("id").primaryKey(),
+  email: text("email").notNull().unique(),
+  name: text("name"),
+  workosUserId: text("workos_user_id"),
+  createdAt: crossTimestamp("created_at")
+    .notNull()
+    .$defaultFn(() => new Date()),
+  lastLoginAt: crossTimestamp("last_login_at"),
+});
+
+export const dashboardSessions = sqliteTable("dashboard_sessions", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => dashboardUsers.id),
+  createdAt: crossTimestamp("created_at")
+    .notNull()
+    .$defaultFn(() => new Date()),
+  expiresAt: crossTimestamp("expires_at").notNull(),
+  lastSeenAt: crossTimestamp("last_seen_at")
+    .notNull()
+    .$defaultFn(() => new Date()),
+});

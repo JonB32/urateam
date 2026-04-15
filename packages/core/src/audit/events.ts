@@ -123,6 +123,47 @@ export function licenseValidationFailedEvent(args: {
   });
 }
 
+export function dashboardLoginEvent(args: {
+  userId: string;
+  email: string;
+  workosUserId: string;
+}): AuditEvent {
+  return base({
+    eventType: "dashboard.login",
+    actor: `dashboard:${args.email}`,
+    actorType: "dashboard-user",
+    payload: {
+      userId: args.userId,
+      email: args.email,
+      workosUserId: args.workosUserId,
+    },
+  });
+}
+
+export function dashboardLogoutEvent(args: {
+  userId: string;
+  email: string;
+}): AuditEvent {
+  return base({
+    eventType: "dashboard.logout",
+    actor: `dashboard:${args.email}`,
+    actorType: "dashboard-user",
+    payload: { userId: args.userId },
+  });
+}
+
+export function dashboardLoginDeniedEvent(args: {
+  email: string;
+  reason: "domain-mismatch";
+}): AuditEvent {
+  return base({
+    eventType: "dashboard.login_denied",
+    actor: `dashboard:${args.email}`,
+    actorType: "dashboard-user",
+    payload: { reason: args.reason },
+  });
+}
+
 export function configLoadedEvent(args: {
   path: string;
   sha256: string;
