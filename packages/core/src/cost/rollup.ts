@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, gte, lte, inArray } from "drizzle-orm";
+import { and, gte, lt, lte, inArray } from "drizzle-orm";
 import type { AnyDb } from "../db/client.js";
 import { pipelineRuns, stageRuns, costRollupsDaily } from "../db/schema.js";
 import { computeRunCost } from "./per-run.js";
@@ -18,7 +18,8 @@ interface CostConfig {
 
 function dayBounds(dateStr: string): { start: Date; end: Date } {
   const start = new Date(dateStr + "T00:00:00.000Z");
-  const end = new Date(dateStr + "T23:59:59.999Z");
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 1);
   return { start, end };
 }
 
@@ -41,7 +42,7 @@ export async function recomputeCostRollups(
   const runs = await db.select().from(pipelineRuns).where(
     and(
       gte(pipelineRuns.completedAt, start),
-      lte(pipelineRuns.completedAt, end),
+      lt(pipelineRuns.completedAt, end),
     ),
   );
 
@@ -63,7 +64,7 @@ export async function recomputeCostRollups(
   }
 
   const buckets = new Map<string, {
-    pipelineKey: string; linearTeamId: string | null; repoUrl: string;
+    pipelineKey: string; linearTeamId: string; repoUrl: string;
     runs: number; prsMerged: number; inputTokens: number; outputTokens: number;
     dollars: number; timeSavedHours: number;
   }>();
@@ -71,12 +72,17 @@ export async function recomputeCostRollups(
   for (const run of runs) {
     const runStages = stagesByRun.get(run.id) ?? [];
     const cost = computeRunCost(run as any, runStages as any, config);
+    // Sentinel "" (empty string) instead of NULL for linearTeamId so that
+    // the composite UNIQUE (date, pipeline_key, linear_team_id, repo_url)
+    // fires onConflictDoUpdate for unassigned runs. Both SQLite and Postgres
+    // treat NULL ≠ NULL in composite uniques, which would otherwise cause
+    // duplicate rollup rows for the "(unassigned)" bucket on every PM tick.
     const key = `${run.pipelineKey}|${run.linearTeamId ?? ""}|${run.repoUrl}`;
     let b = buckets.get(key);
     if (!b) {
       b = {
         pipelineKey: run.pipelineKey,
-        linearTeamId: run.linearTeamId ?? null,
+        linearTeamId: run.linearTeamId ?? "",
         repoUrl: run.repoUrl,
         runs: 0, prsMerged: 0,
         inputTokens: 0, outputTokens: 0,

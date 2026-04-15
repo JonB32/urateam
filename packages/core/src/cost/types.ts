@@ -19,6 +19,8 @@ export interface CostSummary {
   dollars: number;
   timeSavedHours: number;
   roiMultiplier: number;
+  /** Set when the underlying query exceeded the row cap and was truncated. */
+  truncated?: boolean;
 }
 
 export type BreakdownDimension = "team" | "repo" | "pipeline";

@@ -123,6 +123,30 @@ describe("aggregateAll", () => {
     expect(r.summary.runs).toBe(0);
   });
 
+  it("truncates to maxRuns most recent and flags summary.truncated", async () => {
+    // Seed 15 runs spread across April 2026.
+    for (let i = 0; i < 15; i++) {
+      await seedRun(String(i), {
+        pipelineKey: "quick-fix",
+        repoUrl: "https://github.com/acme/api",
+        implementInputTokens: 100_000,
+        implementOutputTokens: 50_000,
+        completedAt: new Date(`2026-04-${String(i + 1).padStart(2, "0")}T10:00:00Z`),
+      });
+    }
+    const r = await aggregateAll(
+      db,
+      {
+        from: new Date("2026-04-01T00:00:00Z"),
+        to: new Date("2026-04-30T23:59:59Z"),
+      },
+      config,
+      { maxRuns: 5 },
+    );
+    expect(r.summary.truncated).toBe(true);
+    expect(r.summary.runs).toBe(5);
+  });
+
   it("counts failed runs in cost but not in prsMerged / timeSaved", async () => {
     await seedRun("1", {
       pipelineKey: "quick-fix", status: "failed",

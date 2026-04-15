@@ -100,7 +100,8 @@ export function renderCostPage(args: RenderCostPageArgs): string {
   const hourlyRate = costs.hourlyEngRate ?? 50;
   const value = summary.timeSavedHours * hourlyRate;
 
-  const bodyInner = `<div class="summary-card">
+  const bodyInner = `${summary.truncated ? `<div class="warning-banner">⚠ Window exceeds 10,000 runs. Results truncated to the 10,000 most recent. Narrow your date range for complete totals.</div>` : ""}
+    <div class="summary-card">
       <p><strong>${fmtNumber(summary.prsMerged)} PRs merged</strong>
          &middot; <strong>${fmtHours(summary.timeSavedHours)}h saved</strong>
          &middot; <strong>${fmtNumber(summary.runs)} runs</strong></p>

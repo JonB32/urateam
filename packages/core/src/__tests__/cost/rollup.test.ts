@@ -74,6 +74,61 @@ describe("recomputeCostRollups", () => {
     expect(rows[0].runs).toBe(1);
   });
 
+  it("dedupes rollup rows when linearTeamId is null (empty-string sentinel)", async () => {
+    const yesterday = new Date(Date.now() - 86400_000);
+    // Seed two completed runs with no team assigned, same pipeline + repo.
+    await db.insert(pipelineRuns).values({
+      id: "u1",
+      issueId: "BEC-u1",
+      issueTitle: "t",
+      pipelineKey: "quick-fix",
+      repoUrl: "https://github.com/acme/api",
+      status: "completed",
+      startedAt: new Date(yesterday.getTime() - 60000),
+      completedAt: yesterday,
+      linearTeamId: null,
+    });
+    await db.insert(stageRuns).values({
+      id: "s_u1",
+      pipelineRunId: "u1",
+      stage: "implement",
+      status: "completed",
+      startedAt: new Date(yesterday.getTime() - 60000),
+      completedAt: yesterday,
+      inputTokens: 100_000,
+      outputTokens: 50_000,
+    });
+    await db.insert(pipelineRuns).values({
+      id: "u2",
+      issueId: "BEC-u2",
+      issueTitle: "t",
+      pipelineKey: "quick-fix",
+      repoUrl: "https://github.com/acme/api",
+      status: "completed",
+      startedAt: new Date(yesterday.getTime() - 60000),
+      completedAt: yesterday,
+      linearTeamId: null,
+    });
+    await db.insert(stageRuns).values({
+      id: "s_u2",
+      pipelineRunId: "u2",
+      stage: "implement",
+      status: "completed",
+      startedAt: new Date(yesterday.getTime() - 60000),
+      completedAt: yesterday,
+      inputTokens: 100_000,
+      outputTokens: 50_000,
+    });
+
+    // Running twice must not produce duplicate rows for the unassigned bucket.
+    await recomputeCostRollups(db, config);
+    await recomputeCostRollups(db, config);
+    const rows = await db.select().from(costRollupsDaily);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].linearTeamId).toBe("");
+    expect(rows[0].runs).toBe(2);
+  });
+
   it("readRollupWindow returns rows inside the window", async () => {
     const yesterday = new Date(Date.now() - 86400_000);
     await seedCompletedRun("r1", yesterday);

@@ -2,7 +2,12 @@ import { and, gte, lte, inArray } from "drizzle-orm";
 import type { AnyDb } from "../db/client.js";
 import { pipelineRuns, stageRuns } from "../db/schema.js";
 import { computeRunCost } from "./per-run.js";
+import { createLogger } from "../logger.js";
 import type { AggregateResult, BreakdownRow, CostSummary } from "./types.js";
+
+const log = createLogger({ component: "cost.aggregate" });
+
+const DEFAULT_MAX_RUNS = 10_000;
 
 export interface AggregateFilters {
   from: Date;
@@ -35,8 +40,10 @@ export async function aggregateAll(
   db: AnyDb,
   filters: AggregateFilters,
   config: CostConfig,
+  opts: { maxRuns?: number } = {},
 ): Promise<AggregateResult> {
   const hourlyRate = config.costs?.hourlyEngRate ?? 50;
+  const maxRuns = opts.maxRuns ?? DEFAULT_MAX_RUNS;
 
   const runs = await db.select().from(pipelineRuns).where(
     and(
@@ -44,6 +51,22 @@ export async function aggregateAll(
       lte(pipelineRuns.completedAt, filters.to),
     ),
   );
+
+  let truncated = false;
+  if (runs.length > maxRuns) {
+    log.warn(
+      { runs: runs.length, maxRuns, from: filters.from, to: filters.to },
+      "aggregateAll: runs exceed cap, truncating to most recent",
+    );
+    // Sort by completedAt DESC (nulls last) and keep only the most recent `maxRuns`.
+    runs.sort((a: any, b: any) => {
+      const ta = a.completedAt ? new Date(a.completedAt).getTime() : 0;
+      const tb = b.completedAt ? new Date(b.completedAt).getTime() : 0;
+      return tb - ta;
+    });
+    runs.splice(maxRuns);
+    truncated = true;
+  }
 
   if (runs.length === 0) {
     return {
@@ -70,6 +93,7 @@ export async function aggregateAll(
     window: { from: filters.from, to: filters.to },
     runs: 0, prsMerged: 0, inputTokens: 0, outputTokens: 0,
     dollars: 0, timeSavedHours: 0, roiMultiplier: 0,
+    ...(truncated ? { truncated: true } : {}),
   };
   const byTeam = new Map<string, BreakdownRow>();
   const byRepo = new Map<string, BreakdownRow>();
