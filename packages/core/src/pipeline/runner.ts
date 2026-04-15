@@ -8,6 +8,7 @@ import type {
   SanitizedIssue,
   DailyTokenSummary,
   PipelineRunStatus,
+  ReviewFinding,
 } from "../types.js";
 import type { Db, AnyDb } from "../db/client.js";
 import { pipelineRuns } from "../db/schema.js";
@@ -87,7 +88,6 @@ import { eq, and, or, sql, gte, lt } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { createLogger, runWithLogContext } from "../logger.js";
 import { isTransientError, MAX_TRANSIENT_RETRIES } from "./error-classifier.js";
-import { isFeatureLicensed } from "../license.js";
 import { evaluatePolicyGates } from "../policy/evaluate.js";
 import { evaluateCostGate, buildReviewerRequest, verifyApprovalsReceived } from "../policy/index.js";
 import { logAuditEvent, policyCostExceededEvent, policyReviewersRequestedEvent } from "../audit/index.js";
