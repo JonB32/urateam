@@ -133,9 +133,16 @@ describe("/auth/logout", () => {
     const cookieHeader = cb.headers.get("set-cookie")!;
     const sid = cookieHeader.match(/urateam_session=([^;]+)/)![1];
 
+    // Logout is now CSRF-protected at the server level: the dashboard
+    // middleware requires an HX-Request header on all state-changing
+    // routes. This test drives createAuthRouter directly (no middleware
+    // stack) but we send the header anyway to mirror the real client.
     const res = await buildApp().request("/auth/logout", {
       method: "POST",
-      headers: { cookie: `urateam_session=${sid}` },
+      headers: {
+        cookie: `urateam_session=${sid}`,
+        "HX-Request": "true",
+      },
     });
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/auth/login");

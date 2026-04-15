@@ -55,8 +55,12 @@ export function layout(
 ): string {
   // Explicit parameter takes priority; fall back to env var for backward compat.
   const bp = normalizeBasePath(basePath ?? getBasePath());
+  // Logout goes through the dashboard CSRF middleware (which requires an
+  // HX-Request header on all state-changing routes). Using hx-post with an
+  // explicit HX-Request header on the button ensures the request is not
+  // forgeable from a third-party origin via a plain <form> submission.
   const signOut = ctx?.userEmail
-    ? `<form method="post" action="${bp}/auth/logout" class="signout-form"><button type="submit" class="link">Sign out (${escapeHtml(ctx.userEmail)})</button></form>`
+    ? `<button type="button" class="link signout-btn" hx-post="${bp}/auth/logout" hx-headers='{"HX-Request":"true"}' hx-push-url="true" hx-swap="none">Sign out (${escapeHtml(ctx.userEmail)})</button>`
     : "";
   const cspContent =
     "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self'";

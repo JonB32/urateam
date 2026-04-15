@@ -113,11 +113,17 @@ export function createDashboard(config: DashboardConfig): Hono {
   // CSRF / Origin validation for state-changing requests
   app.use("*", async (c, next) => {
     const method = c.req.method;
-    // /auth/* endpoints are SSO callbacks / form-submitted logout — they are
-    // not HTMX driven, so the HX-Request requirement does not apply.
+    // /auth/login and /auth/callback are GET-based OAuth handoffs with no
+    // body — they cannot be targets of CSRF. /auth/logout is POST and MUST
+    // go through CSRF (either HX-Request or a token) so an attacker can't
+    // embed a <form action="/auth/logout"> on a third-party site and force
+    // a logout.
+    const path = c.req.path;
+    const csrfExempt =
+      path === "/auth/login" || path === "/auth/callback";
     if (
       ["POST", "PUT", "DELETE", "PATCH"].includes(method) &&
-      !c.req.path.startsWith("/auth/")
+      !csrfExempt
     ) {
       // Require HX-Request header on HTMX-driven state-changing endpoints
       if (!c.req.header("HX-Request")) {
