@@ -160,6 +160,20 @@ It is a pnpm monorepo with 3 packages:
 - **`config.loaded` event currently only fires from `ura run`** — `ura dev` / `ura start` (production paths) build config from env vars and have no file path to fingerprint. Follow-up to wire those when needed.
 - `/audit/event/:id` HTMX detail expansion route is in the spec but deferred — table shows truncated payload inline
 
+### SSO via WorkOS (Enterprise feature 4.1)
+- Module: `packages/core/src/auth/` — `sso-config.ts` (zod schema, `signState`/`verifyState`/`validateNextPath` HMAC helpers), `user-store.ts` (`upsertUser` via atomic `onConflictDoUpdate`, `getUserById`), `session-store.ts` (`createSession`, `getSession`, `deleteSession`, `pruneExpiredSessions`, `touchSessionLastSeen`), `workos-client.ts` (DI seam over `@workos-inc/node`)
+- Tables: `dashboard_users` and `dashboard_sessions` (both via `crossTimestamp`)
+- Dashboard middleware: `packages/dashboard/src/middleware/sso.ts` — cookie → session → user → `c.set("user", ...)`. Skips `/auth/*` and `/webhooks/*`
+- Routes: `packages/dashboard/src/routes/auth.ts` — `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout`
+- Server wiring: `packages/dashboard/src/server.ts` mounts SSO stack iff `isFeatureLicensed("sso") && config.sso?.enabled === true`. Otherwise basicAuth (or 503). Mutually exclusive
+- CLI bootstrap: `packages/cli/src/sso-bootstrap.ts` reads env vars (`URATEAM_WORKOS_API_KEY`, `URATEAM_WORKOS_CLIENT_ID`, `URATEAM_WORKOS_REDIRECT_URI`, `URATEAM_SSO_STATE_SECRET`, `URATEAM_SSO_ALLOWED_DOMAIN`, `URATEAM_SSO_ENABLED`), validates, instantiates the WorkOS client, returns `{ sso, workos }`. Used from both `start.ts` and `dev.ts`
+- CSRF: `/auth/login` and `/auth/callback` bypass CSRF (GET); `/auth/logout` is CSRF-protected. Sign-out uses `hx-post` with `HX-Request: true` header to satisfy the dashboard CSRF middleware
+- Audit events: `dashboard.login`, `dashboard.logout`, `dashboard.login_denied` flow through the existing license-gated `logAuditEvent`
+- Retention: PM tick calls `pruneExpiredSessions` after `pruneAuditLog`, gated on the SSO feature
+- Setup doc: `deploy/SSO_SETUP.md`
+- **Sign Out link is currently only on the Audit page**; threading user context through `runs`/`tokens`/`errors`/`config` views is a follow-up
+- **Session id MUST NOT be logged** — they're credentials. The `touchSessionLastSeen` warn logs only `idPrefix: id.slice(0,8) + "…"`
+
 ### Coordination (`packages/core/src/pm/coordination.ts`)
 - DB-backed `active_work` table tracks files modified by in-flight pipeline runs
 - `upsertActiveWork` uses atomic `onConflictDoUpdate` (requires UNIQUE on `run_id`)
