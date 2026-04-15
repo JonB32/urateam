@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
 
 export const devCommand = new Command("dev")
   .description("Start local development server (webhook + dashboard)")
@@ -54,11 +55,14 @@ export const devCommand = new Command("dev")
     };
 
     const { app, db } = await createApp(config);
+    const ssoBootstrap = await bootstrapSsoFromEnv();
     const dashboardApp = createDashboard({
       db,
       pipelineConfigs: config.pipelineConfigs,
       repoConfigs: config.repoConfigs,
       auth: dashboardAuth,
+      sso: ssoBootstrap?.sso,
+      workos: ssoBootstrap?.workos,
     });
 
     const { serve } = await import("@hono/node-server");

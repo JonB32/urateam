@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
+import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
 
 export const startCommand = new Command("start")
   .description("Start production server (webhook + dashboard)")
@@ -157,12 +158,19 @@ export const startCommand = new Command("start")
     const port = parseInt(process.env.PORT ?? options.port, 10);
     const dashboardPort = parseInt(process.env.DASHBOARD_PORT ?? options.dashboardPort, 10);
 
+    // --- SSO (Enterprise, opt-in via URATEAM_SSO_ENABLED=true) ---
+    const ssoBootstrap = await bootstrapSsoFromEnv();
     const dashboardApp = createDashboard({
       db,
       pipelineConfigs: config.pipelineConfigs,
       repoConfigs: config.repoConfigs,
       auth: dashboardAuth,
+      sso: ssoBootstrap?.sso,
+      workos: ssoBootstrap?.workos,
     });
+    if (ssoBootstrap) {
+      console.log(`SSO: enabled (WorkOS client ${ssoBootstrap.sso.workosClientId})`);
+    }
 
     console.log(`Linear Agent Framework starting`);
     console.log(`Webhook:   http://localhost:${port}`);
