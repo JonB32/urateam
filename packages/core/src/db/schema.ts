@@ -188,6 +188,7 @@ export const dashboardUsers = sqliteTable("dashboard_users", {
     .notNull()
     .$defaultFn(() => new Date()),
   lastLoginAt: crossTimestamp("last_login_at"),
+  role: text("role").notNull().default("viewer"),
 });
 
 export const dashboardSessions = sqliteTable("dashboard_sessions", {
