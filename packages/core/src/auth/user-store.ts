@@ -24,13 +24,13 @@ function normalizeEmail(email: string): string {
 
 /**
  * Insert or update a dashboard user by normalized email. Returns the
- * resulting row. On update, `name`, `workosUserId`, and `lastLoginAt` are
+ * user id. On update, `name`, `workosUserId`, and `lastLoginAt` are
  * refreshed; `id` and `createdAt` are preserved.
  */
 export async function upsertUser(
   db: AnyDb,
   input: UpsertUserInput,
-): Promise<DashboardUser> {
+): Promise<string> {
   const email = normalizeEmail(input.email);
   const now = new Date();
 
@@ -50,14 +50,7 @@ export async function upsertUser(
         lastLoginAt: now,
       })
       .where(eq(dashboardUsers.id, row.id));
-    return {
-      id: row.id,
-      email,
-      name: input.name,
-      workosUserId: input.workosUserId,
-      createdAt: row.createdAt,
-      lastLoginAt: now,
-    };
+    return row.id;
   }
 
   const id = `usr_${randomUUID()}`;
@@ -70,14 +63,7 @@ export async function upsertUser(
     lastLoginAt: now,
   });
 
-  return {
-    id,
-    email,
-    name: input.name,
-    workosUserId: input.workosUserId,
-    createdAt: now,
-    lastLoginAt: now,
-  };
+  return id;
 }
 
 /**
