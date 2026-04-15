@@ -87,6 +87,10 @@ import { eq, and, or, sql, gte, lt } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { createLogger, runWithLogContext } from "../logger.js";
 import { isTransientError, MAX_TRANSIENT_RETRIES } from "./error-classifier.js";
+import { isFeatureLicensed } from "../license.js";
+import { evaluatePolicyGates } from "../policy/evaluate.js";
+import { evaluateCostGate } from "../policy/index.js";
+import { logAuditEvent, policyCostExceededEvent } from "../audit/index.js";
 
 // Module-level logger (no runId yet — used for pre-run messages)
 const log = createLogger({ component: "PipelineRunner" });
@@ -1487,11 +1491,120 @@ export class PipelineRunner {
 
       // Determine if PR should be draft based on unresolved issues.
       // Computed AFTER all loops (RALPH, review-fix, deep review) so it reflects final state.
-      const unresolvedBlockingFindings =
+      const unresolvedBlockingFindings: ReviewFinding[] =
         Array.isArray(handoff?.context?.reviewFindings)
           ? handoff!.context.reviewFindings.filter((f) => f.severity === "blocking")
           : [];
-      const shouldDraft = !ralphSatisfied || unresolvedBlockingFindings.length > 0;
+      let shouldDraft = !ralphSatisfied || unresolvedBlockingFindings.length > 0;
+
+      // Org-policy guardrails (Enterprise feature): path blocklist + per-issue
+      // cost cap. When a gate fires with no override label, the PR is forced
+      // to draft and blocking findings are surfaced in the draft PR comment.
+      if (isFeatureLicensed("org-policy") && config.policy) {
+        try {
+          const wtPathForPolicy = worktreePath!;
+          const changedFiles = await getChangedFiles(
+            wtPathForPolicy,
+            repoConfig.defaultBranch,
+          );
+          const tokensUsed = run.totalInputTokens + run.totalOutputTokens;
+          // The runner's sanitizedIssue uses a plain `labels: string[]`; wrap
+          // it to match the Linear-SDK shape that `hasOverrideLabel` expects.
+          const issueForGate = {
+            id: sanitizedIssue.id,
+            labels: async () => ({
+              nodes: sanitizedIssue.labels.map((name) => ({ name })),
+            }),
+          };
+          const gateResult = await evaluatePolicyGates({
+            db: this.db as AnyDb,
+            runId: run.id,
+            issue: issueForGate,
+            policy: config.policy,
+            changedFiles,
+            tokensUsed,
+            stage: "implement",
+          });
+          if (gateResult.shouldDraft) {
+            shouldDraft = true;
+            for (const v of gateResult.violations) {
+              unresolvedBlockingFindings.push({
+                severity: "blocking",
+                file: (v.payload.path as string | undefined) ?? "(policy)",
+                line: 0,
+                category: `policy-${v.gate}`,
+                description: v.detail,
+                fix:
+                  v.gate === "path"
+                    ? `Remove changes to this path, or add the \`${config.policy.overrideLabel}\` label to bypass.`
+                    : `Reduce token usage, or add the \`${config.policy.overrideLabel}\` label to bypass.`,
+              });
+            }
+            runLog.warn(
+              {
+                issueId: sanitizedIssue.id,
+                violations: gateResult.violations.length,
+              },
+              "org-policy: gate fired — forcing draft PR",
+            );
+          } else if (gateResult.overrideActive && gateResult.violations.length > 0) {
+            runLog.info(
+              {
+                issueId: sanitizedIssue.id,
+                violations: gateResult.violations.length,
+                overrideLabel: config.policy.overrideLabel,
+              },
+              "org-policy: gate fired but override label present — proceeding",
+            );
+          }
+
+          // Cost-only re-check framed as the "review" stage — mirrors the
+          // plan's intent of rechecking cumulative token usage after the
+          // test/review stages have run. Path is not re-checked here.
+          if (!gateResult.overrideActive && config.policy.maxTokensPerIssue) {
+            const cv = evaluateCostGate(
+              tokensUsed,
+              config.policy.maxTokensPerIssue,
+              "review",
+            );
+            if (cv) {
+              // Avoid double-emitting when the implement-stage cost gate
+              // already fired for the same run.
+              const alreadyFired = gateResult.violations.some(
+                (v) => v.gate === "cost",
+              );
+              if (!alreadyFired) {
+                void logAuditEvent(
+                  this.db as AnyDb,
+                  policyCostExceededEvent({
+                    runId: run.id,
+                    tokensUsed,
+                    limit: config.policy.maxTokensPerIssue,
+                    stage: "review",
+                    hadOverride: false,
+                  }),
+                );
+                shouldDraft = true;
+                unresolvedBlockingFindings.push({
+                  severity: "blocking",
+                  file: "(policy)",
+                  line: 0,
+                  category: "policy-cost",
+                  description: cv.detail,
+                  fix: `Reduce token usage, or add the \`${config.policy.overrideLabel}\` label to bypass.`,
+                });
+              }
+            }
+          }
+        } catch (policyErr) {
+          // Fail-open on unexpected errors — policy is advisory, not a hard
+          // block on the pipeline. Still log for operators.
+          runLog.warn(
+            { err: policyErr },
+            "org-policy: gate evaluation failed — skipping",
+          );
+        }
+      }
 
       // All stages complete — push branch and create PR.
       // The push queue (concurrency=1) serialises within this process.
