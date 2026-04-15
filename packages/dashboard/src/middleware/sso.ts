@@ -31,7 +31,13 @@ export function createSsoMiddleware(
 
     const session = await getSession(deps.db, cookie);
     if (!session) {
-      setCookie(c, deps.sso.cookieName, "", { maxAge: 0, path: "/" });
+      setCookie(c, deps.sso.cookieName, "", {
+        maxAge: 0,
+        path: "/",
+        httpOnly: true,
+        sameSite: "Lax",
+        secure: deps.sso.cookieSecure,
+      });
       return c.redirect(
         `/auth/login?next=${encodeURIComponent(path)}`,
         302,
@@ -41,7 +47,13 @@ export function createSsoMiddleware(
     const user = await getUserById(deps.db, session.userId);
     if (!user) {
       await deleteSession(deps.db, cookie);
-      setCookie(c, deps.sso.cookieName, "", { maxAge: 0, path: "/" });
+      setCookie(c, deps.sso.cookieName, "", {
+        maxAge: 0,
+        path: "/",
+        httpOnly: true,
+        sameSite: "Lax",
+        secure: deps.sso.cookieSecure,
+      });
       return c.redirect(`/auth/login`, 302);
     }
 

@@ -79,6 +79,11 @@ export async function touchSessionLastSeen(
       .set({ lastSeenAt: new Date() })
       .where(eq(dashboardSessions.id, id));
   } catch (err) {
-    log.warn({ err, id }, "touchSessionLastSeen failed");
+    // Session IDs are bearer credentials — never log them in full. Log a
+    // short prefix for correlation only.
+    log.warn(
+      { err, idPrefix: id.slice(0, 8) + "…" },
+      "touchSessionLastSeen failed",
+    );
   }
 }

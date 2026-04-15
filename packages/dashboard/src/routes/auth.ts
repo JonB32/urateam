@@ -129,7 +129,13 @@ export function createAuthRouter(deps: AuthRouterDeps): Hono {
         }
       }
     }
-    setCookie(c, deps.sso.cookieName, "", { maxAge: 0, path: "/" });
+    setCookie(c, deps.sso.cookieName, "", {
+      maxAge: 0,
+      path: "/",
+      httpOnly: true,
+      sameSite: "Lax",
+      secure: deps.sso.cookieSecure,
+    });
     return c.redirect("/auth/login", 302);
   });
 
