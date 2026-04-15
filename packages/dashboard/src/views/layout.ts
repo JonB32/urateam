@@ -37,9 +37,27 @@ function normalizeBasePath(basePath: string): string {
  *                   (sourced from `DashboardConfig.basePath`) to decouple
  *                   link rendering from the process environment.
  */
-export function layout(title: string, content: string, basePath?: string): string {
+/**
+ * Optional context propagated from the request handler. When `userEmail`
+ * is set the nav renders a Sign Out form (POST /auth/logout). Routes that
+ * have access to `c.get("user")` should pass it; others omit and get the
+ * existing layout unchanged.
+ */
+export interface LayoutContext {
+  userEmail?: string;
+}
+
+export function layout(
+  title: string,
+  content: string,
+  basePath?: string,
+  ctx?: LayoutContext,
+): string {
   // Explicit parameter takes priority; fall back to env var for backward compat.
   const bp = normalizeBasePath(basePath ?? getBasePath());
+  const signOut = ctx?.userEmail
+    ? `<form method="post" action="${bp}/auth/logout" class="signout-form"><button type="submit" class="link">Sign out (${escapeHtml(ctx.userEmail)})</button></form>`
+    : "";
   const cspContent =
     "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self'";
   return `<!DOCTYPE html>
@@ -67,6 +85,7 @@ export function layout(title: string, content: string, basePath?: string): strin
     <a href="${bp}/audit">Audit</a>
     <a href="${bp}/config">Config</a>
     <a href="${bp}/coordination">Coordination</a>
+    ${signOut}
   </nav>
   <main>
     <h1>${escapeHtml(title)}</h1>
