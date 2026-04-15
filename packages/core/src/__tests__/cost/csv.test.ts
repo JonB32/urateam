@@ -25,7 +25,7 @@ const config = {
 describe("streamCostCsv", () => {
   it("emits header then one row per run", async () => {
     const db = await createDb({ connectionString: ":memory:" });
-    await db.insert(pipelineRuns).values({
+    await (db as any).insert(pipelineRuns).values({
       id: "r1",
       issueId: "BEC-1",
       issueTitle: "t",
@@ -36,7 +36,7 @@ describe("streamCostCsv", () => {
       completedAt: new Date("2026-04-01T10:05:00Z"),
       linearTeamId: "T1",
     });
-    await db.insert(stageRuns).values({
+    await (db as any).insert(stageRuns).values({
       id: "s1",
       pipelineRunId: "r1",
       stage: "implement",
@@ -68,7 +68,7 @@ describe("streamCostCsv", () => {
 
   it("escapes formula-injection prefixes", async () => {
     const db = await createDb({ connectionString: ":memory:" });
-    await db.insert(pipelineRuns).values({
+    await (db as any).insert(pipelineRuns).values({
       id: "r1",
       issueId: "=HYPERLINK(evil)",
       issueTitle: "t",
