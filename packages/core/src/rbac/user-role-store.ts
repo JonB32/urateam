@@ -78,6 +78,63 @@ export async function getUserRole(db: AnyDb, userId: string): Promise<Role | nul
   return (rows[0] as any).role as Role;
 }
 
+/**
+ * If the user's email matches `envAdminList` (comma-separated, case-insensitive),
+ * promote them to admin. Idempotent — already-admin users are not re-promoted
+ * and no audit event is written. Emits a `dashboard.manual_action` event with
+ * `action: "bootstrap_admin"` on successful promotion.
+ *
+ * Returns true if the role was changed.
+ */
+export async function applyBootstrapAdmins(
+  db: AnyDb,
+  email: string,
+  userId: string,
+  envAdminList: string | undefined,
+): Promise<boolean> {
+  if (!envAdminList || envAdminList.trim() === "") return false;
+
+  const normalizedEmail = email.trim().toLowerCase();
+  const adminSet = new Set(
+    envAdminList
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  if (!adminSet.has(normalizedEmail)) return false;
+
+  // Already admin? No-op.
+  const currentRole = await getUserRole(db, userId);
+  if (currentRole === "admin") return false;
+
+  // Promote. Bypass setUserRole because the actor is "system", not a user, and
+  // the self-demote/last-admin guards don't apply.
+  await (db as any)
+    .update(dashboardUsers)
+    .set({ role: "admin" as Role })
+    .where(eq(dashboardUsers.id, userId));
+
+  await logAuditEvent(db, {
+    id: `evt_${randomUUID()}`,
+    timestamp: new Date(),
+    eventType: "dashboard.manual_action",
+    actor: "system",
+    actorType: "system",
+    scope: null,
+    runId: null,
+    issueId: null,
+    inputTokens: 0,
+    outputTokens: 0,
+    payload: {
+      action: "bootstrap_admin",
+      targetUserId: userId,
+      targetEmail: normalizedEmail,
+      envVarMatched: true,
+    },
+  });
+  return true;
+}
+
 export async function listUsers(db: AnyDb): Promise<
   Array<{
     id: string;
