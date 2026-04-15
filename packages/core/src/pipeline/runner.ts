@@ -1906,6 +1906,66 @@ export class PipelineRunner {
             shouldMerge = false;
           }
 
+          // Mandatory reviewer gate (enterprise feature 4.6).
+          //
+          // Known limitation: the reviewer check requires an Octokit API
+          // client (to call pulls.listReviews / teams.listMembersInOrg), so
+          // it only fires when the GitHub App is configured. The `gh` CLI
+          // fallback and GitLab paths skip this check — documented in the
+          // plan as acceptable because production deployments use the App.
+          if (shouldMerge && isFeatureLicensed("org-policy")) {
+            const policyReviewerRequest = buildReviewerRequest(config.policy);
+            if (policyReviewerRequest) {
+              if (!this.githubConfig) {
+                runLog.info(
+                  "org-policy reviewer gate: no GitHub App configured, skipping reviewer approval check on auto-merge (gh CLI path has no API client)",
+                );
+              } else {
+                const ownerRepoMatch = repoConfig.url.match(
+                  /github\.com[:/]([^/]+)\/([^/.]+)/,
+                );
+                const owner = ownerRepoMatch?.[1];
+                const repo = ownerRepoMatch?.[2];
+                const prNumberMatch = prUrl?.match(/\/pull\/(\d+)/);
+                const prNumber = prNumberMatch
+                  ? parseInt(prNumberMatch[1]!, 10)
+                  : undefined;
+
+                if (owner && repo && prNumber) {
+                  try {
+                    const octokit = await createGitHubClient(this.githubConfig);
+                    const check = await verifyApprovalsReceived(
+                      octokit as any,
+                      owner,
+                      repo,
+                      prNumber,
+                      policyReviewerRequest,
+                    );
+                    if (!check.satisfied) {
+                      shouldMerge = false;
+                      autoMergeReason = `mandatory reviewers pending: users=${check.missingUsers.join(",") || "none"} teams=${check.missingTeams.join(",") || "none"}`;
+                      runLog.info(
+                        {
+                          missingUsers: check.missingUsers,
+                          missingTeams: check.missingTeams,
+                        },
+                        "auto-merge skipped: mandatory reviewers not yet approved",
+                      );
+                    }
+                  } catch (err) {
+                    runLog.warn(
+                      { err },
+                      "org-policy reviewer gate: verifyApprovalsReceived failed — skipping auto-merge to be safe",
+                    );
+                    shouldMerge = false;
+                    autoMergeReason =
+                      "mandatory reviewers check failed — requires manual verification";
+                  }
+                }
+              }
+            }
+          }
+
           if (shouldMerge) {
             runLog.info({ diffLines, maxLines }, "auto-merge eligible, merging PR");
             autoMerged = await mergePRViaCli(wtPath, branch);
