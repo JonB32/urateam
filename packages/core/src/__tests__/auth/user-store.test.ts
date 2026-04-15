@@ -88,6 +88,30 @@ describe("user-store", () => {
     expect(fetched).toBeNull();
   });
 
+  it("is race-safe when two concurrent upserts arrive for the same email", async () => {
+    const db = await createDb({ connectionString: ":memory:" });
+    const [idA, idB] = await Promise.all([
+      upsertUser(db, {
+        email: "race@example.com",
+        name: "Race A",
+        workosUserId: "workos_race_a",
+      }),
+      upsertUser(db, {
+        email: "race@example.com",
+        name: "Race B",
+        workosUserId: "workos_race_b",
+      }),
+    ]);
+    expect(idA).toBe(idB);
+    const user = await getUserById(db, idA);
+    expect(user).not.toBeNull();
+    expect(user!.email).toBe("race@example.com");
+    // Exactly one row in the table — no UNIQUE violation, no duplicate.
+    const { dashboardUsers } = await import("../../db/schema.js");
+    const rows = await (db as any).select().from(dashboardUsers);
+    expect(rows).toHaveLength(1);
+  });
+
   it("upsertUser accepts null name and workosUserId", async () => {
     const db = await createDb({ connectionString: ":memory:" });
     const id = await upsertUser(db, {

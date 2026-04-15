@@ -24,8 +24,14 @@ function normalizeEmail(email: string): string {
 
 /**
  * Insert or update a dashboard user by normalized email. Returns the
- * user id. On update, `name`, `workosUserId`, and `lastLoginAt` are
- * refreshed; `id` and `createdAt` are preserved.
+ * canonical user id. On update, `name`, `workosUserId`, and `lastLoginAt`
+ * are refreshed; `id` and `createdAt` are preserved.
+ *
+ * Implemented as an atomic upsert (`onConflictDoUpdate` on the unique
+ * `email` column) so that two concurrent `/auth/callback` requests for the
+ * same email cannot both see `existing.length === 0` and race on INSERT.
+ * The generated `id` is only used if no row exists; on conflict we read
+ * back the canonical id from the surviving row.
  */
 export async function upsertUser(
   db: AnyDb,
@@ -33,37 +39,35 @@ export async function upsertUser(
 ): Promise<string> {
   const email = normalizeEmail(input.email);
   const now = new Date();
+  const id = `usr_${randomUUID()}`;
 
-  const existing = await db
+  await db
+    .insert(dashboardUsers)
+    .values({
+      id,
+      email,
+      name: input.name,
+      workosUserId: input.workosUserId,
+      createdAt: now,
+      lastLoginAt: now,
+    })
+    .onConflictDoUpdate({
+      target: dashboardUsers.email,
+      set: {
+        name: input.name,
+        workosUserId: input.workosUserId,
+        lastLoginAt: now,
+      },
+    });
+
+  // Read back the canonical id — it may be a pre-existing row's id, not
+  // the one we just generated above.
+  const rows = await db
     .select()
     .from(dashboardUsers)
     .where(eq(dashboardUsers.email, email))
     .limit(1);
-
-  if (existing.length > 0) {
-    const row = existing[0]!;
-    await db
-      .update(dashboardUsers)
-      .set({
-        name: input.name,
-        workosUserId: input.workosUserId,
-        lastLoginAt: now,
-      })
-      .where(eq(dashboardUsers.id, row.id));
-    return row.id;
-  }
-
-  const id = `usr_${randomUUID()}`;
-  await db.insert(dashboardUsers).values({
-    id,
-    email,
-    name: input.name,
-    workosUserId: input.workosUserId,
-    createdAt: now,
-    lastLoginAt: now,
-  });
-
-  return id;
+  return rows[0]!.id;
 }
 
 /**
