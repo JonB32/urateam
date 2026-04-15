@@ -1,4 +1,4 @@
-import { and, gte, lte, inArray } from "drizzle-orm";
+import { and, gte, lt, lte, inArray } from "drizzle-orm";
 import type { AnyDb } from "../db/client.js";
 import { pipelineRuns, stageRuns } from "../db/schema.js";
 import { computeRunCost } from "./per-run.js";
@@ -8,6 +8,15 @@ import type { AggregateResult, BreakdownRow, CostSummary } from "./types.js";
 const log = createLogger({ component: "cost.aggregate" });
 
 const DEFAULT_MAX_RUNS = 10_000;
+
+const UNASSIGNED_TEAM = "(unassigned)";
+
+export function normalizeTeamId(id: string | null | undefined): { key: string; label: string } {
+  if (id === null || id === undefined || id === "") {
+    return { key: "team:unassigned", label: UNASSIGNED_TEAM };
+  }
+  return { key: `team:${id}`, label: id };
+}
 
 export interface AggregateFilters {
   from: Date;
@@ -48,7 +57,8 @@ export async function aggregateAll(
   const runs = await db.select().from(pipelineRuns).where(
     and(
       gte(pipelineRuns.completedAt, filters.from),
-      lte(pipelineRuns.completedAt, filters.to),
+      // half-open [from, to) — matches rollup.ts convention and avoids double-counting at the boundary
+      lt(pipelineRuns.completedAt, filters.to),
     ),
   );
 
@@ -103,34 +113,34 @@ export async function aggregateAll(
     const runStages = stagesByRun.get(run.id) ?? [];
     const cost = computeRunCost(run as any, runStages as any, config);
 
+    const isMergedPr = run.status === "completed" && run.runType !== "review-feedback";
     summary.runs += 1;
     summary.inputTokens += cost.inputTokens;
     summary.outputTokens += cost.outputTokens;
     summary.dollars += cost.dollars;
     summary.timeSavedHours += cost.timeSavedHours;
-    if (run.status === "completed") summary.prsMerged += 1;
+    if (isMergedPr) summary.prsMerged += 1;
 
-    const teamKey = `team:${run.linearTeamId ?? "unassigned"}`;
-    const teamLabel = run.linearTeamId ?? "(unassigned)";
+    const { key: teamKey, label: teamLabel } = normalizeTeamId(run.linearTeamId);
     if (!byTeam.has(teamKey)) byTeam.set(teamKey, emptyBucket(teamKey, teamLabel));
     const tb = byTeam.get(teamKey)!;
     tb.runs += 1; tb.inputTokens += cost.inputTokens; tb.outputTokens += cost.outputTokens;
     tb.dollars += cost.dollars; tb.timeSavedHours += cost.timeSavedHours;
-    if (run.status === "completed") tb.prsMerged += 1;
+    if (isMergedPr) tb.prsMerged += 1;
 
     const repoKey = `repo:${run.repoUrl}`;
     if (!byRepo.has(repoKey)) byRepo.set(repoKey, emptyBucket(repoKey, run.repoUrl));
     const rb = byRepo.get(repoKey)!;
     rb.runs += 1; rb.inputTokens += cost.inputTokens; rb.outputTokens += cost.outputTokens;
     rb.dollars += cost.dollars; rb.timeSavedHours += cost.timeSavedHours;
-    if (run.status === "completed") rb.prsMerged += 1;
+    if (isMergedPr) rb.prsMerged += 1;
 
     const pipelineKey = `pipeline:${run.pipelineKey}`;
     if (!byPipeline.has(pipelineKey)) byPipeline.set(pipelineKey, emptyBucket(pipelineKey, run.pipelineKey));
     const pb = byPipeline.get(pipelineKey)!;
     pb.runs += 1; pb.inputTokens += cost.inputTokens; pb.outputTokens += cost.outputTokens;
     pb.dollars += cost.dollars; pb.timeSavedHours += cost.timeSavedHours;
-    if (run.status === "completed") pb.prsMerged += 1;
+    if (isMergedPr) pb.prsMerged += 1;
   }
 
   summary.roiMultiplier = finalizeRoi(summary, hourlyRate);

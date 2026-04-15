@@ -83,11 +83,45 @@ describe("streamCostCsv", () => {
         db,
         {
           from: new Date("2026-04-01"),
-          to: new Date("2026-04-30"),
+          to: new Date("2026-05-01"),
         },
         config,
       ),
     );
     expect(csv).toContain("'=HYPERLINK(evil)");
+  });
+
+  it("caps CSV export at maxRuns and emits a truncation footer", async () => {
+    const db = await createDb({ connectionString: ":memory:" });
+    // Seed 20 runs across April 2026.
+    for (let i = 1; i <= 20; i++) {
+      await (db as any).insert(pipelineRuns).values({
+        id: `r${i}`,
+        issueId: `BEC-${i}`,
+        issueTitle: "t",
+        pipelineKey: "quick-fix",
+        repoUrl: "https://github.com/acme/api",
+        status: "completed",
+        startedAt: new Date(`2026-04-${String(i).padStart(2, "0")}T10:00:00Z`),
+        completedAt: new Date(`2026-04-${String(i).padStart(2, "0")}T10:05:00Z`),
+        linearTeamId: "T1",
+      });
+    }
+
+    const csv = await collect(
+      streamCostCsv(
+        db,
+        { from: new Date("2026-04-01"), to: new Date("2026-05-01") },
+        config,
+        5,
+      ),
+    );
+
+    const lines = csv.split("\n").filter(Boolean);
+    // 1 header + 5 data rows + 1 truncation footer = 7 lines
+    expect(lines).toHaveLength(7);
+    expect(lines[0]).toContain("completed_at");
+    // Last line is the truncation comment
+    expect(lines[6]).toMatch(/^# truncated: 20 runs in window, exported most recent 5/);
   });
 });

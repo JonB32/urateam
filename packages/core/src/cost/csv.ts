@@ -1,5 +1,5 @@
 import type { AnyDb } from "../db/client.js";
-import { and, gte, lte, inArray } from "drizzle-orm";
+import { and, gte, lt, inArray } from "drizzle-orm";
 import { pipelineRuns, stageRuns } from "../db/schema.js";
 import { computeRunCost } from "./per-run.js";
 
@@ -28,10 +28,13 @@ interface CostConfig {
   pipelineConfigs?: Record<string, any>;
 }
 
+const DEFAULT_CSV_MAX_RUNS = 10_000;
+
 export async function* streamCostCsv(
   db: AnyDb,
   filters: CsvFilters,
   config: CostConfig,
+  maxRuns: number = DEFAULT_CSV_MAX_RUNS,
 ): AsyncIterable<string> {
   yield HEADER + "\n";
 
@@ -41,10 +44,24 @@ export async function* streamCostCsv(
     .where(
       and(
         gte(pipelineRuns.completedAt, filters.from),
-        lte(pipelineRuns.completedAt, filters.to),
+        // half-open [from, to) — matches rollup.ts convention and avoids double-counting at the boundary
+        lt(pipelineRuns.completedAt, filters.to),
       ),
     );
   if (runs.length === 0) return;
+
+  const totalRuns = runs.length;
+  let truncated = false;
+  if (runs.length > maxRuns) {
+    // Sort by completedAt DESC (nulls last) and keep only the most recent maxRuns.
+    runs.sort((a: any, b: any) => {
+      const ta = a.completedAt ? new Date(a.completedAt).getTime() : 0;
+      const tb = b.completedAt ? new Date(b.completedAt).getTime() : 0;
+      return tb - ta;
+    });
+    runs.splice(maxRuns);
+    truncated = true;
+  }
 
   const runIds = runs.map((r: any) => r.id);
   const stages = await db
@@ -74,5 +91,9 @@ export async function* streamCostCsv(
       cost.timeSavedHours,
     ].map(escapeCsvField);
     yield fields.join(",") + "\n";
+  }
+
+  if (truncated) {
+    yield `# truncated: ${totalRuns} runs in window, exported most recent ${maxRuns}. Narrow date range for complete export.\n`;
   }
 }

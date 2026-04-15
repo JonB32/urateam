@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createDb } from "../../db/client.js";
 import { pipelineRuns, stageRuns } from "../../db/schema.js";
-import { aggregateAll } from "../../cost/aggregate.js";
+import { aggregateAll, normalizeTeamId } from "../../cost/aggregate.js";
 
 let db: any;
 
@@ -32,7 +32,8 @@ beforeEach(async () => {
 
 async function seedRun(id: string, opts: {
   pipelineKey: string; teamId?: string; repoUrl: string;
-  status?: string; implementInputTokens?: number; implementOutputTokens?: number;
+  status?: string; runType?: string;
+  implementInputTokens?: number; implementOutputTokens?: number;
   completedAt: Date;
 }) {
   await db.insert(pipelineRuns).values({
@@ -40,6 +41,7 @@ async function seedRun(id: string, opts: {
     pipelineKey: opts.pipelineKey,
     repoUrl: opts.repoUrl,
     status: opts.status ?? "completed",
+    runType: opts.runType ?? "standard",
     startedAt: new Date(opts.completedAt.getTime() - 60000),
     completedAt: opts.completedAt,
     linearTeamId: opts.teamId,
@@ -118,7 +120,8 @@ describe("aggregateAll", () => {
     });
     const r = await aggregateAll(db, {
       from: new Date("2026-04-01T00:00:00Z"),
-      to: new Date("2026-04-30T23:59:59Z"),
+      // half-open upper bound: to is strictly after all seeded runs
+      to: new Date("2026-05-01T00:00:00Z"),
     }, config);
     expect(r.summary.runs).toBe(0);
   });
@@ -156,11 +159,48 @@ describe("aggregateAll", () => {
     });
     const r = await aggregateAll(db, {
       from: new Date("2026-04-01T00:00:00Z"),
-      to: new Date("2026-04-30T23:59:59Z"),
+      to: new Date("2026-05-01T00:00:00Z"),
     }, config);
     expect(r.summary.runs).toBe(1);
     expect(r.summary.prsMerged).toBe(0);
     expect(r.summary.timeSavedHours).toBe(0);
     expect(r.summary.dollars).toBeCloseTo(1.05, 2);
+  });
+
+  it("excludes review-feedback runs from prsMerged and timeSavedHours", async () => {
+    // Standard completed run
+    await seedRun("1", {
+      pipelineKey: "quick-fix", runType: "standard",
+      repoUrl: "https://github.com/acme/api",
+      implementInputTokens: 100_000, implementOutputTokens: 50_000,
+      completedAt: new Date("2026-04-01T10:00:00Z"),
+    });
+    // Review-feedback completed run (tokens cost money but not a new PR)
+    await seedRun("2", {
+      pipelineKey: "quick-fix", runType: "review-feedback",
+      repoUrl: "https://github.com/acme/api",
+      implementInputTokens: 50_000, implementOutputTokens: 20_000,
+      completedAt: new Date("2026-04-01T11:00:00Z"),
+    });
+
+    const r = await aggregateAll(db, {
+      from: new Date("2026-04-01T00:00:00Z"),
+      to: new Date("2026-05-01T00:00:00Z"),
+    }, config);
+
+    // Only the standard run counts as a merged PR
+    expect(r.summary.runs).toBe(2);
+    expect(r.summary.prsMerged).toBe(1);
+    // Only the standard run contributes time saved (4h default for quick-fix)
+    expect(r.summary.timeSavedHours).toBe(4);
+    // Both runs contribute to token cost: run1 = $1.05, run2 = 0.05M×$3 + 0.02M×$15 = $0.15+$0.30 = $0.45
+    expect(r.summary.dollars).toBeCloseTo(1.50, 2);
+  });
+
+  it("normalizeTeamId collapses null, undefined, and empty string to the same bucket", () => {
+    expect(normalizeTeamId(null)).toEqual({ key: "team:unassigned", label: "(unassigned)" });
+    expect(normalizeTeamId(undefined)).toEqual({ key: "team:unassigned", label: "(unassigned)" });
+    expect(normalizeTeamId("")).toEqual({ key: "team:unassigned", label: "(unassigned)" });
+    expect(normalizeTeamId("T1")).toEqual({ key: "team:T1", label: "T1" });
   });
 });

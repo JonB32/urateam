@@ -138,4 +138,69 @@ describe("recomputeCostRollups", () => {
     const rows = await readRollupWindow(db, from, to);
     expect(rows.length).toBeGreaterThan(0);
   });
+
+  it("backfills up to 30 days on first run when rollup table is empty", async () => {
+    // Seed runs on 3 different past days: 5, 10, and 20 days ago.
+    const days = [5, 10, 20];
+    for (const d of days) {
+      // Place completedAt at noon UTC on that day to ensure it falls in the day boundary.
+      const t = new Date(Date.now() - d * 86400_000);
+      t.setUTCHours(12, 0, 0, 0);
+      await seedCompletedRun(`r_back_${d}`, t);
+    }
+
+    const result = await recomputeCostRollups(db, config);
+    expect(result.rowsWritten).toBeGreaterThan(0);
+
+    const rows = await db.select().from(costRollupsDaily);
+    // There should be a rollup row for each of the 3 seeded days.
+    const dates = rows.map((r: any) => r.date);
+    for (const d of days) {
+      const t = new Date(Date.now() - d * 86400_000);
+      const expected = t.toISOString().slice(0, 10);
+      expect(dates).toContain(expected);
+    }
+  });
+
+  it("backfills only missing days when rollup table has some entries", async () => {
+    const now = new Date();
+    // Pre-seed a rollup row for 3 days ago (the "already rolled" base).
+    const day3 = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 3));
+    const day3Str = day3.toISOString().slice(0, 10);
+
+    await db.insert(costRollupsDaily).values({
+      id: "cr_pre",
+      date: day3Str,
+      pipelineKey: "quick-fix",
+      linearTeamId: "T1",
+      repoUrl: "https://github.com/acme/api",
+      runs: 99, // sentinel value — this row pre-exists from a prior run
+      prsMerged: 99,
+      inputTokens: 0, outputTokens: 0, dollars: 0, timeSavedHours: 0,
+      computedAt: new Date(),
+    });
+
+    // Seed actual pipeline runs for the 2 missing days (2 days ago and yesterday).
+    const day2 = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 2, 12));
+    const day1 = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1, 12));
+    await seedCompletedRun("r_n2", day2);
+    await seedCompletedRun("r_n1", day1);
+
+    await recomputeCostRollups(db, config);
+
+    const rows = await db.select().from(costRollupsDaily);
+    const dates = rows.map((r: any) => r.date);
+
+    const day2Str = day2.toISOString().slice(0, 10);
+    const day1Str = day1.toISOString().slice(0, 10);
+
+    // Rows for the two new days should have been backfilled.
+    expect(dates).toContain(day2Str);
+    expect(dates).toContain(day1Str);
+
+    // The pre-seeded day3 row should still exist (untouched, since latest+1 = day2).
+    expect(dates).toContain(day3Str);
+    const day3Row = rows.find((r: any) => r.date === day3Str);
+    expect(day3Row?.runs).toBe(99); // sentinel value preserved — not re-rolled
+  });
 });

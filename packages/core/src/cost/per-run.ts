@@ -4,6 +4,7 @@ import type { RunCost } from "./types.js";
 interface PipelineRunRow {
   pipelineKey: string;
   status: string;
+  runType?: string | null;
 }
 
 interface StageRunRow {
@@ -46,6 +47,8 @@ export function computeRunCost(
     outputTokens += s.outputTokens;
   }
   const timeSavedHours =
-    run.status === "completed" ? resolveTimeSavedPerPr(run.pipelineKey, config) : 0;
+    run.status === "completed" && run.runType !== "review-feedback"
+      ? resolveTimeSavedPerPr(run.pipelineKey, config)
+      : 0;
   return { inputTokens, outputTokens, dollars, timeSavedHours };
 }
