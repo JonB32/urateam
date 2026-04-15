@@ -379,6 +379,7 @@ export const AuditEventTypeSchema = z.enum([
   "budget.alert_fired", "budget.run_refused",
   "license.validation_failed", "config.loaded",
   "dashboard.manual_action",
+  "dashboard.login", "dashboard.logout", "dashboard.login_denied",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 
@@ -407,10 +408,24 @@ export type AuditEvent = z.infer<typeof AuditEventSchema>;
  * section introduced with the audit-log feature; additional sections can be
  * added here as the rest of the config is migrated to zod.
  */
+export const SsoConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  workosApiKey: z.string().min(1),
+  workosClientId: z.string().min(1),
+  redirectUri: z.string().url(),
+  allowedDomain: z.string().optional(),
+  sessionDurationHours: z.number().int().positive().default(24),
+  cookieName: z.string().default("urateam_session"),
+  cookieSecure: z.boolean().default(true),
+  stateSigningSecret: z.string().min(16),
+});
+export type SsoConfig = z.infer<typeof SsoConfigSchema>;
+
 export const AppConfigSchema = z.object({
   auditLog: z.object({
     enabled: z.boolean().optional(),
     retentionDays: z.number().int().positive().optional().default(365),
   }).optional(),
+  sso: SsoConfigSchema.optional(),
 });
 export type AppConfig = z.infer<typeof AppConfigSchema>;
