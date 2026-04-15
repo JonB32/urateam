@@ -89,8 +89,8 @@ import { createLogger, runWithLogContext } from "../logger.js";
 import { isTransientError, MAX_TRANSIENT_RETRIES } from "./error-classifier.js";
 import { isFeatureLicensed } from "../license.js";
 import { evaluatePolicyGates } from "../policy/evaluate.js";
-import { evaluateCostGate } from "../policy/index.js";
-import { logAuditEvent, policyCostExceededEvent } from "../audit/index.js";
+import { evaluateCostGate, buildReviewerRequest, verifyApprovalsReceived } from "../policy/index.js";
+import { logAuditEvent, policyCostExceededEvent, policyReviewersRequestedEvent } from "../audit/index.js";
 
 // Module-level logger (no runId yet — used for pre-run messages)
 const log = createLogger({ component: "PipelineRunner" });
@@ -1726,6 +1726,13 @@ export class PipelineRunner {
         });
         const isGitLab = repoConfig.provider === "gitlab";
 
+        // Mandatory reviewer request (enterprise feature 4.6). Only non-null
+        // when the org-policy feature is licensed and the pipeline config
+        // specifies mandatoryReviewers.
+        const reviewerRequest = isFeatureLicensed("org-policy")
+          ? buildReviewerRequest(config.policy)
+          : null;
+
         if (isGitLab && this.gitlabConfig) {
           // GitLab — create MR via REST API
           try {
@@ -1736,6 +1743,8 @@ export class PipelineRunner {
               targetBranch: repoConfig.defaultBranch,
               title: sanitizedIssue.title,
               description: prBody,
+              reviewers: reviewerRequest?.users,
+              teamReviewers: reviewerRequest?.teams,
             });
             run.prUrl = prUrl;
             runLog.info({ prUrl }, "MR created via GitLab API");
@@ -1755,6 +1764,8 @@ export class PipelineRunner {
               title: sanitizedIssue.title,
               body: prBody,
               draft: shouldDraft,
+              reviewers: reviewerRequest?.users,
+              teamReviewers: reviewerRequest?.teams,
             });
             run.prUrl = prUrl;
           } catch (prError) {
@@ -1763,6 +1774,13 @@ export class PipelineRunner {
         } else {
           // No provider-specific config — use gh CLI
           runLog.info("creating PR via gh CLI");
+          const { owner: ghOwner } = (() => {
+            try {
+              return parseRepoUrl(repoConfig.url);
+            } catch {
+              return { owner: undefined as string | undefined };
+            }
+          })();
           prUrl = await createPRViaCli({
             worktreePath: wtPath,
             branch,
@@ -1770,11 +1788,27 @@ export class PipelineRunner {
             title: sanitizedIssue.title,
             body: prBody,
             draft: shouldDraft,
+            reviewers: reviewerRequest?.users,
+            teamReviewers: reviewerRequest?.teams,
+            owner: ghOwner,
           });
           if (prUrl) {
             run.prUrl = prUrl;
             runLog.info({ prUrl }, "PR created");
           }
+        }
+
+        // Audit: reviewers requested (enterprise feature 4.6)
+        if (reviewerRequest && prUrl) {
+          void logAuditEvent(
+            this.db as any,
+            policyReviewersRequestedEvent({
+              runId: run.id,
+              prUrl,
+              users: reviewerRequest.users,
+              teams: reviewerRequest.teams,
+            }),
+          );
         }
 
         // 4. Flag for human review when conflicts could not be auto-resolved

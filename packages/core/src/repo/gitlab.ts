@@ -26,6 +26,10 @@ export interface CreateMROptions {
   targetBranch: string;
   title: string;
   description: string;
+  /** GitHub usernames — ignored on GitLab (warn-only). */
+  reviewers?: string[];
+  /** GitHub team slugs — ignored on GitLab (warn-only). */
+  teamReviewers?: string[];
 }
 
 /**
@@ -60,6 +64,19 @@ export async function createMR(
   config: GitLabConfig,
   options: CreateMROptions,
 ): Promise<string> {
+  if (
+    (options.reviewers && options.reviewers.length > 0) ||
+    (options.teamReviewers && options.teamReviewers.length > 0)
+  ) {
+    // Mandatory reviewers (enterprise feature 4.6) are not wired through to
+    // GitLab's assignee/reviewer API in v1 — warn and ignore.
+    const { createLogger } = await import("../logger.js");
+    createLogger({ module: "repo/gitlab" }).warn(
+      { reviewers: options.reviewers, teamReviewers: options.teamReviewers },
+      "GitLab path does not support mandatory reviewers; ignoring",
+    );
+  }
+
   const host = config.host ?? "https://gitlab.com";
   const encodedPath = encodeURIComponent(options.projectPath);
   const apiUrl = `${host}/api/v4/projects/${encodedPath}/merge_requests`;
