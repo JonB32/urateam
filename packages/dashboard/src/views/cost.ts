@@ -157,7 +157,7 @@ export function renderCostPage(args: RenderCostPageArgs): string {
          = ${fmtDollars(value)} value &divide; ${fmtDollars(summary.dollars)} cost
          = ${fmtRoi(summary.roiMultiplier)}</p>
     </div>
-    ${renderCostChart(byDay ?? [])}
+    ${summary.truncated ? "" : renderCostChart(byDay ?? [])}
     ${renderBreakdownTable("By team", byTeam)}
     ${renderBreakdownTable("By repo", byRepo)}
     ${renderBreakdownTable("By pipeline", byPipeline)}

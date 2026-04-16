@@ -122,9 +122,10 @@ export async function aggregateAll(
     summary.timeSavedHours += cost.timeSavedHours;
     if (isMergedPr) summary.prsMerged += 1;
 
-    // Bucket by UTC completion date (falls back to started date if completed is null).
-    const bucketTs = run.completedAt ?? run.startedAt;
-    const dateStr = new Date(bucketTs).toISOString().slice(0, 10);
+    // completedAt is guaranteed non-null here — the WHERE clause above filters
+    // on `gte(completedAt, from)` and `lt(completedAt, to)`, which excludes
+    // rows where completedAt IS NULL (SQL NULL comparisons are falsy).
+    const dateStr = new Date(run.completedAt!).toISOString().slice(0, 10);
     let dr = byDay.get(dateStr);
     if (!dr) {
       dr = { date: dateStr, runs: 0, prsMerged: 0, dollars: 0, timeSavedHours: 0 };
