@@ -199,6 +199,35 @@ describe("aggregateAll", () => {
     expect(r.summary.dollars).toBeCloseTo(1.50, 2);
   });
 
+  it("populates byDay with one entry per UTC completion date", async () => {
+    await seedRun("1", {
+      pipelineKey: "quick-fix", teamId: "T1",
+      repoUrl: "https://github.com/acme/api",
+      implementInputTokens: 100_000, implementOutputTokens: 50_000,
+      completedAt: new Date("2026-04-01T10:00:00Z"),
+    });
+    await seedRun("2", {
+      pipelineKey: "quick-fix", teamId: "T1",
+      repoUrl: "https://github.com/acme/api",
+      implementInputTokens: 100_000, implementOutputTokens: 50_000,
+      completedAt: new Date("2026-04-01T14:00:00Z"), // same UTC day as run 1
+    });
+    await seedRun("3", {
+      pipelineKey: "quick-fix", teamId: "T1",
+      repoUrl: "https://github.com/acme/api",
+      implementInputTokens: 100_000, implementOutputTokens: 50_000,
+      completedAt: new Date("2026-04-03T10:00:00Z"),
+    });
+    const r = await aggregateAll(db, {
+      from: new Date("2026-04-01T00:00:00Z"),
+      to: new Date("2026-04-30T23:59:59Z"),
+    }, config);
+    // Two distinct UTC dates; sorted ascending
+    expect(r.byDay.map((d) => d.date)).toEqual(["2026-04-01", "2026-04-03"]);
+    expect(r.byDay[0].runs).toBe(2);
+    expect(r.byDay[1].runs).toBe(1);
+  });
+
   it("normalizeTeamId collapses null, undefined, and empty string to the same bucket", () => {
     expect(normalizeTeamId(null)).toEqual({ key: "team:unassigned", label: "(unassigned)" });
     expect(normalizeTeamId(undefined)).toEqual({ key: "team:unassigned", label: "(unassigned)" });
@@ -298,6 +327,39 @@ describe("aggregateHybrid", () => {
     expect(r.byTeam).toHaveLength(1);
     expect(r.byRepo).toHaveLength(1);
     expect(r.byPipeline).toHaveLength(1);
+  });
+
+  it("populates byDay from rollup rows + live for today", async () => {
+    await seedRollup({
+      date: "2026-04-13", pipelineKey: "quick-fix", teamId: "T1",
+      repoUrl: "https://github.com/acme/api",
+      runs: 2, prsMerged: 2, inputTokens: 0, outputTokens: 0,
+      dollars: 5, timeSavedHours: 4,
+    });
+    await seedRollup({
+      date: "2026-04-14", pipelineKey: "quick-fix", teamId: "T1",
+      repoUrl: "https://github.com/acme/api",
+      runs: 3, prsMerged: 3, inputTokens: 0, outputTokens: 0,
+      dollars: 10, timeSavedHours: 6,
+    });
+    await seedRun("r-today", {
+      pipelineKey: "quick-fix", teamId: "T1",
+      repoUrl: "https://github.com/acme/api",
+      implementInputTokens: 100_000, implementOutputTokens: 50_000,
+      completedAt: new Date("2026-04-15T10:00:00Z"),
+    });
+    const r = await aggregateHybrid(
+      db,
+      { from: new Date("2026-04-13T00:00:00Z"), to: new Date("2026-04-15T23:59:59Z") },
+      config,
+      { enableRollups: true, now: new Date("2026-04-15T12:00:00Z") },
+    );
+    expect(r.byDay).toHaveLength(3);
+    expect(r.byDay.map((d) => d.date)).toEqual(["2026-04-13", "2026-04-14", "2026-04-15"]);
+    expect(r.byDay[0].dollars).toBeCloseTo(5, 2);
+    expect(r.byDay[1].dollars).toBeCloseTo(10, 2);
+    // today's live cost = 0.1M × $3 + 0.05M × $15 = $1.05
+    expect(r.byDay[2].dollars).toBeCloseTo(1.05, 2);
   });
 
   it("uses rollups only when window ends before today's UTC midnight", async () => {
