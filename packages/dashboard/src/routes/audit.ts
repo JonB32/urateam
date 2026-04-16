@@ -4,9 +4,10 @@ import {
   isFeatureLicensed,
   listAuditEvents,
   streamAuditCsv,
+  findAuditEventById,
 } from "@urateam/core";
 import { layout } from "../views/layout.js";
-import { renderAuditPage, type AuditFilters } from "../views/audit.js";
+import { renderAuditPage, renderEventDetailRow, type AuditFilters } from "../views/audit.js";
 import { requirePermission } from "../middleware/rbac.js";
 
 function parseFilters(query: Record<string, string | undefined>): AuditFilters & {
@@ -92,6 +93,16 @@ export function createAuditRouter(db: Db, basePath = ""): Hono {
     const readerFilters = buildReaderFilters(query);
     const { events, nextCursor } = await listAuditEvents(db as any, readerFilters);
     return c.html(renderAuditPage({ events, nextCursor, filters, partial: true }));
+  });
+
+  // HTMX detail expansion for a single event (expands the full payload).
+  router.get("/audit/event/:id", requirePermission("audit.view"), async (c) => {
+    const id = c.req.param("id");
+    const event = await findAuditEventById(db as any, id);
+    // Return 200 for not-found: HTMX 2.x drops 4xx responses by default so a 404
+    // would make the error message invisible to the user.
+    if (!event) return c.html('<tr class="audit-detail-row"><td></td><td colspan="8" style="color:#c33;padding:0.5rem 1rem;background:#fff4f4;">Event not found</td></tr>');
+    return c.html(renderEventDetailRow(event));
   });
 
   router.get("/audit/export.csv", requirePermission("audit.export"), async (c) => {

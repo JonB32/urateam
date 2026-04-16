@@ -39,6 +39,7 @@ function toRelativeTime(date: Date): string {
 }
 
 function renderRow(e: AuditEvent): string {
+  const basePath = getBasePath();
   const payloadJson = (() => {
     try {
       return JSON.stringify(e.payload ?? {});
@@ -46,7 +47,14 @@ function renderRow(e: AuditEvent): string {
       return "{}";
     }
   })();
+  const idEnc = encodeURIComponent(e.id);
   return `<tr>
+      <td><button type="button"
+        hx-get="${basePath}/audit/event/${escapeHtml(idEnc)}"
+        hx-target="closest tr"
+        hx-swap="afterend"
+        title="Show full payload"
+        style="background:none;border:none;cursor:pointer;font-size:0.9em;">+</button></td>
       <td title="${escapeHtml(e.timestamp.toISOString())}">${escapeHtml(toRelativeTime(e.timestamp))}</td>
       <td><code>${escapeHtml(e.eventType)}</code></td>
       <td>${escapeHtml(e.actor)}</td>
@@ -56,6 +64,33 @@ function renderRow(e: AuditEvent): string {
       <td>${escapeHtml(e.issueId ?? "")}</td>
       <td><code>${escapeHtml(truncate(payloadJson))}</code></td>
     </tr>`;
+}
+
+/**
+ * Render a detail row inserted via HTMX after a row. Shows the full formatted
+ * payload plus any fields truncated in the compact row (timestamp, tokens).
+ */
+export function renderEventDetailRow(e: AuditEvent): string {
+  const payloadFormatted = (() => {
+    try {
+      return JSON.stringify(e.payload ?? {}, null, 2);
+    } catch {
+      return "{}";
+    }
+  })();
+  return `<tr class="audit-detail-row">
+    <td></td>
+    <td colspan="8" style="background:#f8f9fa;padding:1rem;">
+      <div style="font-size:0.85em;color:#666;margin-bottom:0.5rem;">
+        <strong>Event ID:</strong> <code>${escapeHtml(e.id)}</code>
+        &nbsp;|&nbsp;
+        <strong>Timestamp:</strong> ${escapeHtml(e.timestamp.toISOString())}
+        &nbsp;|&nbsp;
+        <strong>Tokens:</strong> ${e.inputTokens} in / ${e.outputTokens} out
+      </div>
+      <pre style="background:#fff;border:1px solid #e0e0e0;padding:0.75rem;overflow:auto;margin:0;font-size:0.85em;">${escapeHtml(payloadFormatted)}</pre>
+    </td>
+  </tr>`;
 }
 
 function buildQueryString(filters: AuditFilters, extra: Record<string, string> = {}): string {
@@ -78,7 +113,7 @@ export function renderAuditPage(args: RenderAuditPageArgs): string {
   const rows = events.map(renderRow).join("\n");
 
   const loadMore = nextCursor
-    ? `<tr id="audit-load-more"><td colspan="8" style="text-align:center;padding:1rem;">
+    ? `<tr id="audit-load-more"><td colspan="9" style="text-align:center;padding:1rem;">
         <a href="${basePath}/audit${escapeHtml(buildQueryString(filters, { cursor: nextCursor }))}"
            hx-get="${basePath}/audit/page${escapeHtml(buildQueryString(filters, { cursor: nextCursor }))}"
            hx-target="#audit-load-more"
@@ -111,6 +146,7 @@ export function renderAuditPage(args: RenderAuditPageArgs): string {
     <table>
       <thead>
         <tr>
+          <th></th>
           <th>Time</th>
           <th>Event</th>
           <th>Actor</th>
@@ -122,7 +158,7 @@ export function renderAuditPage(args: RenderAuditPageArgs): string {
         </tr>
       </thead>
       <tbody id="audit-rows">
-        ${rows.length > 0 ? rows : '<tr><td colspan="8" style="text-align:center;color:#999;padding:2rem;">No audit events</td></tr>'}
+        ${rows.length > 0 ? rows : '<tr><td colspan="9" style="text-align:center;color:#999;padding:2rem;">No audit events</td></tr>'}
         ${loadMore}
       </tbody>
     </table>

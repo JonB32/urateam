@@ -181,3 +181,81 @@ export async function listAuditEvents(
 
   return { events: page, nextCursor };
 }
+
+/**
+ * Finds a single audit event by ID. Supports both native audit_events rows
+ * (looked up directly) and projected events (IDs with `proj_` prefix resolved
+ * by querying the source table and re-projecting).
+ *
+ * Returns null if no matching event is found.
+ *
+ * Projected ID formats:
+ * - `proj_run_started_<runId>`, `proj_run_completed_<runId>`, `proj_run_failed_<runId>`,
+ *   `proj_run_auto_merged_<runId>`, `proj_run_auto_merge_skipped_<runId>` → pipeline_runs
+ * - `proj_approval_requested_<approvalId>`, `proj_approval_resolved_<approvalId>` → pm_approvals
+ * - `proj_budget_alert_<alertId>` → budget_alerts
+ */
+export async function findAuditEventById(
+  db: AnyDb,
+  id: string,
+): Promise<AuditEvent | null> {
+  if (!id.startsWith("proj_")) {
+    const rows = await (db as any)
+      .select()
+      .from(auditEvents)
+      .where(eq(auditEvents.id, id))
+      .limit(1);
+    return rows.length > 0 ? parseNativeRow(rows[0]) : null;
+  }
+
+  // Parse projected ID prefixes. Listed in the order they appear in projection.ts;
+  // no prefix is a strict prefix of another, so matching order is defensive only.
+  const runPrefixes = [
+    "proj_run_auto_merge_skipped_",
+    "proj_run_auto_merged_",
+    "proj_run_started_",
+    "proj_run_completed_",
+    "proj_run_failed_",
+  ];
+  for (const prefix of runPrefixes) {
+    if (id.startsWith(prefix)) {
+      const runId = id.slice(prefix.length);
+      const rows = await (db as any)
+        .select()
+        .from(pipelineRuns)
+        .where(eq(pipelineRuns.id, runId))
+        .limit(1);
+      if (rows.length === 0) return null;
+      const projected = projectPipelineRun(rows[0]);
+      return projected.find((e) => e.id === id) ?? null;
+    }
+  }
+
+  const approvalPrefixes = ["proj_approval_requested_", "proj_approval_resolved_"];
+  for (const prefix of approvalPrefixes) {
+    if (id.startsWith(prefix)) {
+      const approvalId = id.slice(prefix.length);
+      const rows = await (db as any)
+        .select()
+        .from(pmApprovals)
+        .where(eq(pmApprovals.id, approvalId))
+        .limit(1);
+      if (rows.length === 0) return null;
+      const projected = projectPmApproval(rows[0]);
+      return projected.find((e) => e.id === id) ?? null;
+    }
+  }
+
+  if (id.startsWith("proj_budget_alert_")) {
+    const alertId = id.slice("proj_budget_alert_".length);
+    const rows = await (db as any)
+      .select()
+      .from(budgetAlerts)
+      .where(eq(budgetAlerts.id, alertId))
+      .limit(1);
+    if (rows.length === 0) return null;
+    return projectBudgetAlert(rows[0]);
+  }
+
+  return null;
+}

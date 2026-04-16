@@ -179,6 +179,66 @@ describe("audit route — licensed (enterprise)", () => {
     expect(html).toContain("Audit Log");
   });
 
+  it("GET /audit/event/:id returns detail row with full payload", async () => {
+    const db = await createDb({ connectionString: ":memory:" });
+    await seedAuditEvent(db);
+
+    const app = wrapWithAdminUser(
+      createDashboard({
+        db,
+        pipelineConfigs: {},
+        repoConfigs: {},
+        auth: { username: "admin", password: "secret" },
+      }),
+    );
+
+    const res = await app.request("/audit/event/evt-test-1", { headers: AUTH });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("audit-detail-row");
+    expect(html).toContain("evt-test-1");
+    // Full payload JSON must be present (formatted with 2-space indent).
+    expect(html).toContain("&quot;reason&quot;: &quot;ready&quot;");
+  });
+
+  it("GET /audit/event/:id returns 404 for missing event", async () => {
+    const db = await createDb({ connectionString: ":memory:" });
+
+    const app = wrapWithAdminUser(
+      createDashboard({
+        db,
+        pipelineConfigs: {},
+        repoConfigs: {},
+        auth: { username: "admin", password: "secret" },
+      }),
+    );
+
+    // Return 200 (not 404) so HTMX renders the error fragment in the DOM.
+    const res = await app.request("/audit/event/does-not-exist", { headers: AUTH });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("Event not found");
+  });
+
+  it("GET /audit includes expand button with hx-get pointing to /audit/event/:id", async () => {
+    const db = await createDb({ connectionString: ":memory:" });
+    await seedAuditEvent(db);
+
+    const app = wrapWithAdminUser(
+      createDashboard({
+        db,
+        pipelineConfigs: {},
+        repoConfigs: {},
+        auth: { username: "admin", password: "secret" },
+      }),
+    );
+
+    const res = await app.request("/audit", { headers: AUTH });
+    const html = await res.text();
+    expect(html).toContain('hx-get="/audit/event/evt-test-1"');
+    expect(html).toContain('hx-swap="afterend"');
+  });
+
   it("GET /audit/export.csv returns 200 text/csv with the header row", async () => {
     const db = await createDb({ connectionString: ":memory:" });
     await seedAuditEvent(db);
