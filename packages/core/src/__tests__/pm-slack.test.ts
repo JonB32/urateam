@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PmSlackNotifier } from "../pm/slack.js";
-import type { TickResult, BudgetGuardResult } from "../pm/types.js";
+import type { TickResult, BudgetGuardResult, ScopeBudget } from "../pm/types.js";
 
 const mockFetch = vi.fn().mockResolvedValue({
   ok: true,
@@ -46,6 +46,45 @@ describe("PmSlackNotifier", () => {
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.channel).toBe("C0123456789");
     expect(body.blocks).toBeDefined();
+  });
+
+  it("includes per-scope budget breakdown when scopes have warnings", async () => {
+    const scopes: ScopeBudget[] = [
+      { scope: { kind: "global" }, scopeLabel: "global", limit: 1_000_000, used: 800_000, percent: 80, tier: "warn-80" },
+      { scope: { kind: "team", teamId: "TEAM-1" }, scopeLabel: "team TEAM-1", limit: 500_000, used: 450_000, percent: 90, tier: "warn-80" },
+      { scope: { kind: "repo", repoUrl: "https://github.com/test/repo" }, scopeLabel: "repo https://github.com/test/repo", limit: 200_000, used: 100_000, percent: 50, tier: "warn-50" },
+    ];
+    const tick: TickResult = {
+      ...emptyTick(),
+      triaged: [{ issueId: "BEC-1", priority: 2, labels: ["bug"], complexity: "small", rationale: "test", acceptanceCriteria: [] }],
+      budgetGuard: { ...emptyBudget(), activeCount: 1, tokenSpendPercent: 80 },
+      budgetScopes: scopes,
+    };
+    await notifier.postDigest(tick, 3);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    const text = body.blocks[0].text.text;
+    expect(text).toContain("Budget by scope");
+    expect(text).toContain("team TEAM-1");
+    expect(text).toContain("90%");
+    expect(text).not.toContain("global");
+  });
+
+  it("omits scope breakdown when all scopes are ok", async () => {
+    const scopes: ScopeBudget[] = [
+      { scope: { kind: "global" }, scopeLabel: "global", limit: 1_000_000, used: 100_000, percent: 10, tier: "ok" },
+      { scope: { kind: "team", teamId: "TEAM-1" }, scopeLabel: "team TEAM-1", limit: 500_000, used: 50_000, percent: 10, tier: "ok" },
+    ];
+    const tick: TickResult = {
+      ...emptyTick(),
+      triaged: [{ issueId: "BEC-2", priority: 2, labels: ["bug"], complexity: "small", rationale: "test", acceptanceCriteria: [] }],
+      budgetGuard: { ...emptyBudget(), activeCount: 1, tokenSpendPercent: 10 },
+      budgetScopes: scopes,
+    };
+    await notifier.postDigest(tick, 3);
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    const text = body.blocks[0].text.text;
+    expect(text).not.toContain("Budget by scope");
   });
 
   it("skips digest for empty tick", async () => {

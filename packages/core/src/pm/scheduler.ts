@@ -161,6 +161,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           tokenSpendPercent: globalScope?.percent ?? 0,
           dailyTokensUsed: globalScope?.used ?? 0,
         };
+        tick.budgetScopes = evaluation.scopes;
 
         // Emit budget.run_refused audit events for every scope at blocked-100.
         // Recovers the per-scope breakdown that is otherwise dropped when we

@@ -96,6 +96,8 @@ export interface TickResult {
   cancelRequested: string[];
   errors: string[];
   budgetGuard: BudgetGuardResult;
+  /** Per-scope budget breakdown from the evaluation (team/repo/global). */
+  budgetScopes?: ScopeBudget[];
   /** True when the PM Agent is paused — promote/deprioritize/cancel were skipped. */
   paused?: boolean;
   /** Issue identifiers auto-recovered from stuck "In Progress" state. */
