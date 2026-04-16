@@ -7,6 +7,7 @@ import {
 } from "@urateam/core";
 import { layout } from "../views/layout.js";
 import { renderAuditPage, type AuditFilters } from "../views/audit.js";
+import { requirePermission } from "../middleware/rbac.js";
 
 function parseFilters(query: Record<string, string | undefined>): AuditFilters & {
   cursor?: string;
@@ -71,7 +72,7 @@ export function createAuditRouter(db: Db, basePath = ""): Hono {
     await next();
   });
 
-  router.get("/audit", async (c) => {
+  router.get("/audit", requirePermission("audit.view"), async (c) => {
     const query = c.req.query();
     const filters = parseFilters(query);
     const readerFilters = buildReaderFilters(query);
@@ -85,7 +86,7 @@ export function createAuditRouter(db: Db, basePath = ""): Hono {
   });
 
   // HTMX partial used by the "Load more" link to append rows.
-  router.get("/audit/page", async (c) => {
+  router.get("/audit/page", requirePermission("audit.view"), async (c) => {
     const query = c.req.query();
     const filters = parseFilters(query);
     const readerFilters = buildReaderFilters(query);
@@ -93,7 +94,7 @@ export function createAuditRouter(db: Db, basePath = ""): Hono {
     return c.html(renderAuditPage({ events, nextCursor, filters, partial: true }));
   });
 
-  router.get("/audit/export.csv", async (c) => {
+  router.get("/audit/export.csv", requirePermission("audit.export"), async (c) => {
     const query = c.req.query();
     const readerFilters = buildReaderFilters(query);
     // Export ignores the paginated limit; streamAuditCsv walks its own cursor.

@@ -56,6 +56,13 @@ const MIGRATION_COLUMNS: MigrationColumn[] = [
   // BEC-94: auto-commit quality metric
   { table: "pipeline_runs", column: "auto_committed", sqliteType: "INTEGER", pgType: "BOOLEAN" },
   { table: "pipeline_runs", column: "linear_team_id", sqliteType: "TEXT", pgType: "TEXT" },
+  // Feature 4.4: RBAC
+  {
+    table: "dashboard_users",
+    column: "role",
+    sqliteType: "TEXT NOT NULL DEFAULT 'viewer'",
+    pgType: "TEXT NOT NULL DEFAULT 'viewer'",
+  },
 ];
 
 /**
@@ -190,7 +197,8 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
     name TEXT,
     workos_user_id TEXT,
     created_at ${ts} NOT NULL,
-    last_login_at ${ts}
+    last_login_at ${ts},
+    role TEXT NOT NULL DEFAULT 'viewer'
   );
 
   CREATE TABLE IF NOT EXISTS dashboard_sessions (

@@ -4,6 +4,7 @@ import type { Db } from "@urateam/core";
 import { sqlDateGroup, sqlDaysAgoFilter, stageRuns, pipelineRuns } from "@urateam/core";
 import { layout } from "../views/layout.js";
 import { tokensView } from "../views/tokens.js";
+import { requirePermission } from "../middleware/rbac.js";
 
 type AnyDb = any;
 
@@ -15,7 +16,7 @@ export function createTokensRouter(db: Db, basePath = ""): Hono {
   const dateExpr = sqlDateGroup(db, stageRuns.startedAt);
   const thirtyDaysAgo = sqlDaysAgoFilter(db, stageRuns.startedAt, 30);
 
-  router.get("/tokens", async (c) => {
+  router.get("/tokens", requirePermission("tokens.view"), async (c) => {
     const daily = await d
       .select({
         date: dateExpr.as("date"),

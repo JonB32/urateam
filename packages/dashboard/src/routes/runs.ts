@@ -1,18 +1,58 @@
 import { Hono } from "hono";
 import { desc, eq, inArray, count } from "drizzle-orm";
 import type { Db } from "@urateam/core";
-import { pipelineRuns, stageRuns, agentLogs } from "@urateam/core";
+import {
+  pipelineRuns,
+  stageRuns,
+  agentLogs,
+  logAuditEvent,
+  dashboardRetryRunEvent,
+  isFeatureLicensed,
+  canAccess,
+  type Role,
+} from "@urateam/core";
 import { layout } from "../views/layout.js";
 import { runFeedView, type RunRow } from "../views/run-feed.js";
 import { runDetailView, type RunInfo, type StageInfo, type LogEntry } from "../views/run-detail.js";
+import { requirePermission } from "../middleware/rbac.js";
 
 type AnyDb = any;
 
-export function createRunsRouter(db: Db, basePath = ""): Hono {
+export interface RunsRouterDeps {
+  db: Db;
+  runner?: {
+    resume: (runOrIssueId: string) => Promise<void>;
+    start: (...args: any[]) => Promise<void>;
+  };
+  basePath?: string;
+}
+
+export function createRunsRouter(
+  dbOrDeps: Db | RunsRouterDeps,
+  basePath = "",
+): Hono {
+  // Backwards-compatible: accept either (db, basePath) or a deps object.
+  let db: Db;
+  let runner: RunsRouterDeps["runner"];
+  let effectiveBasePath: string;
+  if (
+    dbOrDeps &&
+    typeof dbOrDeps === "object" &&
+    "db" in (dbOrDeps as any)
+  ) {
+    const deps = dbOrDeps as RunsRouterDeps;
+    db = deps.db;
+    runner = deps.runner;
+    effectiveBasePath = deps.basePath ?? "";
+  } else {
+    db = dbOrDeps as Db;
+    effectiveBasePath = basePath;
+  }
+
   const router = new Hono();
   const d = db as AnyDb;
 
-  router.get("/", async (c) => {
+  router.get("/", requirePermission("runs.view"), async (c) => {
     const runs = await d
       .select()
       .from(pipelineRuns)
@@ -25,11 +65,11 @@ export function createRunsRouter(db: Db, basePath = ""): Hono {
       return c.html(content);
     }
 
-    return c.html(layout("Pipeline Runs", content, basePath));
+    return c.html(layout("Pipeline Runs", content, effectiveBasePath));
   });
 
   // HTMX partial: feed of latest pipeline runs (polled every 5s)
-  router.get("/runs/feed", async (c) => {
+  router.get("/runs/feed", requirePermission("runs.view"), async (c) => {
     const runs = await d
       .select()
       .from(pipelineRuns)
@@ -39,7 +79,7 @@ export function createRunsRouter(db: Db, basePath = ""): Hono {
     return c.html(runFeedView(runs));
   });
 
-  router.get("/runs/:id", async (c) => {
+  router.get("/runs/:id", requirePermission("runs.view"), async (c) => {
     const id = c.req.param("id");
     const page = Math.max(1, parseInt(c.req.query("page") || "1", 10));
     const logsPerPage = 50;
@@ -51,7 +91,7 @@ export function createRunsRouter(db: Db, basePath = ""): Hono {
       .limit(1) as (RunInfo | undefined)[];
 
     if (!run) {
-      return c.html(layout("Not Found", "<p>Run not found</p>", basePath), 404);
+      return c.html(layout("Not Found", "<p>Run not found</p>", effectiveBasePath), 404);
     }
 
     const stages = await d
@@ -83,9 +123,77 @@ export function createRunsRouter(db: Db, basePath = ""): Hono {
         .offset(offset) as LogEntry[];
     }
 
-    const content = runDetailView(run, stages, logs, page, totalLogs);
-    return c.html(layout(`Run ${id}`, content, basePath));
+    const user = c.get("user" as never) as
+      | { id: string; email: string; role?: Role }
+      | undefined;
+    const canRetry = isFeatureLicensed("rbac")
+      ? canAccess((user?.role ?? "viewer") as Role, "runs.retry")
+      : true;
+    const content = runDetailView(run, stages, logs, page, totalLogs, canRetry);
+    return c.html(layout(`Run ${id}`, content, effectiveBasePath));
   });
+
+  router.post(
+    "/runs/:id/retry",
+    async (c, next) => {
+      // Per spec §10: retry endpoint returns 404 when RBAC is unlicensed.
+      // Without this gate the endpoint would be wide-open in unlicensed
+      // deployments because requirePermission is a no-op then.
+      if (!isFeatureLicensed("rbac")) return c.notFound();
+      return next();
+    },
+    requirePermission("runs.retry"),
+    async (c) => {
+      const id = c.req.param("id");
+      const rows = await d
+        .select()
+        .from(pipelineRuns)
+        .where(eq(pipelineRuns.id, id))
+        .limit(1);
+      if (rows.length === 0) {
+        return c.text("Run not found", 404);
+      }
+      const run = rows[0] as any;
+      if (run.status !== "failed" && run.status !== "retriable") {
+        return c.text(`Cannot retry a run in status ${run.status}`, 409);
+      }
+
+      if (!runner) {
+        return c.text("Runner not configured", 500);
+      }
+
+      try {
+        if (run.resumePayload) {
+          await runner.resume(id);
+        } else {
+          await runner.start({
+            issueId: run.issueId,
+            issueTitle: run.issueTitle,
+            repoUrl: run.repoUrl,
+          });
+        }
+      } catch (err) {
+        return c.text(`Retry failed: ${(err as Error).message}`, 500);
+      }
+
+      const user = c.get("user" as never) as
+        | { id: string; email: string }
+        | undefined;
+      if (user) {
+        void logAuditEvent(
+          db as any,
+          dashboardRetryRunEvent({
+            runId: id,
+            issueId: run.issueId,
+            previousStatus: run.status,
+            actorUserId: user.id,
+            actorEmail: user.email,
+          }),
+        );
+      }
+      return c.redirect(`${effectiveBasePath}/runs/${id}`, 302);
+    },
+  );
 
   return router;
 }

@@ -27,6 +27,7 @@ import { startCommand } from "./commands/start.js";
 import { migrateCommand } from "./commands/migrate.js";
 import { getPackageVersion } from "./version.js";
 import { licenseCommand } from "./commands/license.js";
+import { adminCommand } from "./commands/admin.js";
 
 const program = new Command();
 
@@ -42,5 +43,6 @@ program.addCommand(configCommand);
 program.addCommand(startCommand);
 program.addCommand(migrateCommand);
 program.addCommand(licenseCommand, { hidden: true });
+program.addCommand(adminCommand);
 
 program.parse();

@@ -45,6 +45,7 @@ function normalizeBasePath(basePath: string): string {
  */
 export interface LayoutContext {
   userEmail?: string;
+  userRole?: string;
 }
 
 export function layout(
@@ -90,6 +91,7 @@ export function layout(
     <a href="${bp}/cost">Cost</a>
     <a href="${bp}/config">Config</a>
     <a href="${bp}/coordination">Coordination</a>
+    ${ctx?.userRole === "admin" ? `<a href="${bp}/users">Users</a>` : ""}
     ${signOut}
   </nav>
   <main>

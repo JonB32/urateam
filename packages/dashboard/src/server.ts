@@ -17,6 +17,7 @@ import { createErrorsRouter } from "./routes/errors.js";
 import { createConfigRouter } from "./routes/config.js";
 import { createCoordinationRouter } from "./routes/coordination.js";
 import { createAuditRouter } from "./routes/audit.js";
+import { createUsersRouter } from "./routes/users.js";
 import { createAuthRouter } from "./routes/auth.js";
 import { createSsoMiddleware } from "./middleware/sso.js";
 import { createCostRouter } from "./routes/cost.js";
@@ -230,6 +231,9 @@ export function createDashboard(config: DashboardConfig): Hono {
     basePath,
   });
   app.route("/", costRouter);
+
+  const usersRouter = createUsersRouter({ db: config.db, basePath });
+  app.route("/", usersRouter);
 
   return app;
 }
