@@ -1896,9 +1896,6 @@ export class PipelineRunner {
                 if (owner && repo && prNumber) {
                   try {
                     const octokit = await createGitHubClient(this.githubConfig);
-                    // TODO(perf): cache listMembersInOrg results per (org, team) for ~5min to
-                    // avoid secondary rate limit exhaustion on high-frequency CI webhooks.
-                    // See spec §13 deferred items.
                     const check = await verifyApprovalsReceived(
                       octokit as any,
                       owner,
