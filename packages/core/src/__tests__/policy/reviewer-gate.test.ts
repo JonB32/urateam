@@ -1,5 +1,13 @@
-import { describe, it, expect, vi } from "vitest";
-import { buildReviewerRequest, verifyApprovalsReceived } from "../../policy/reviewer-gate.js";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import {
+  buildReviewerRequest,
+  verifyApprovalsReceived,
+  _clearTeamMembershipCache,
+} from "../../policy/reviewer-gate.js";
+
+beforeEach(() => {
+  _clearTeamMembershipCache();
+});
 
 describe("buildReviewerRequest", () => {
   it("returns null when policy undefined", () => {
@@ -90,6 +98,35 @@ describe("verifyApprovalsReceived", () => {
       { users: [], teams: ["security"] },
     );
     expect(r.satisfied).toBe(true);
+  });
+
+  it("caches team membership across repeated calls with same (org, team)", async () => {
+    const octokit = stubOctokit(["alice"], { security: ["alice", "carol"] });
+    // First call — fetches and caches
+    await verifyApprovalsReceived(octokit, "owner", "repo", 1, { users: [], teams: ["security"] });
+    expect(octokit.teams.listMembersInOrg).toHaveBeenCalledTimes(1);
+    // Second call on same PR — cache hit, no new fetch
+    await verifyApprovalsReceived(octokit, "owner", "repo", 1, { users: [], teams: ["security"] });
+    expect(octokit.teams.listMembersInOrg).toHaveBeenCalledTimes(1);
+    // Different PR, same team — still cached
+    await verifyApprovalsReceived(octokit, "owner", "repo", 2, { users: [], teams: ["security"] });
+    expect(octokit.teams.listMembersInOrg).toHaveBeenCalledTimes(1);
+  });
+
+  it("cache is keyed on (org, team) — different orgs don't share cache", async () => {
+    const octokit = stubOctokit(["alice"], { security: ["alice"] });
+    await verifyApprovalsReceived(octokit, "org1", "repo", 1, { users: [], teams: ["security"] });
+    await verifyApprovalsReceived(octokit, "org2", "repo", 1, { users: [], teams: ["security"] });
+    expect(octokit.teams.listMembersInOrg).toHaveBeenCalledTimes(2);
+  });
+
+  it("cache is cleared by _clearTeamMembershipCache", async () => {
+    const octokit = stubOctokit(["alice"], { security: ["alice"] });
+    await verifyApprovalsReceived(octokit, "owner", "repo", 1, { users: [], teams: ["security"] });
+    expect(octokit.teams.listMembersInOrg).toHaveBeenCalledTimes(1);
+    _clearTeamMembershipCache();
+    await verifyApprovalsReceived(octokit, "owner", "repo", 1, { users: [], teams: ["security"] });
+    expect(octokit.teams.listMembersInOrg).toHaveBeenCalledTimes(2);
   });
 
   it("not satisfied when no member of a required team has approved", async () => {

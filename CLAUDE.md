@@ -185,7 +185,7 @@ It is a pnpm monorepo with 3 packages:
 - Violations set `run.shouldDraft = true` and push `ReviewFinding` entries (`category: "policy-path" | "policy-cost"`) into `unresolvedBlockingFindings` — flows through the existing draft-PR renderer
 - Audit events: `policy.path_blocked`, `policy.cost_exceeded`, `policy.override_used`, `policy.reviewers_requested`
 - License gate: `isFeatureLicensed("org-policy")` required at every call site
-- **Known perf follow-up**: `verifyApprovalsReceived` calls `listMembersInOrg` per team per check with no cache — high-frequency CI webhooks on a PR with 5+ required teams can exhaust GitHub's secondary rate limit. Documented TODO in the auto-merge gate block
+- **Team membership cache**: `verifyApprovalsReceived` caches `listMembersInOrg` results in a module-level TTL map keyed by `(org, team_slug)`. Default TTL is 15 minutes. Tests can clear via `_clearTeamMembershipCache()`. Previously uncached — high-frequency CI webhooks on a PR with 5+ required teams could exhaust GitHub's secondary rate limit.
 
 ### Cost & ROI dashboard (Enterprise feature 4.5)
 - Module: `packages/core/src/cost/` — `rates.ts` (model-rate + time-saved resolution), `per-run.ts` (`computeRunCost`), `aggregate.ts` (`aggregateAll` over runs+stages with 10k row cap + `truncated` flag), `rollup.ts` (`recomputeCostRollups`, `readRollupWindow`), `csv.ts` (`streamCostCsv` with formula-injection guard)
