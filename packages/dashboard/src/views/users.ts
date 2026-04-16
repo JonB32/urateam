@@ -14,6 +14,7 @@ export function renderUsersPage(args: {
   currentUserId: string;
   basePath: string;
   userEmail?: string;
+  userRole?: string;
 }): string {
   const bp = args.basePath;
   const rows = args.users
@@ -55,6 +56,6 @@ export function renderUsersPage(args: {
 
   return layout("Users", content, bp, {
     userEmail: args.userEmail,
-    userRole: "admin",
+    userRole: args.userRole,
   });
 }

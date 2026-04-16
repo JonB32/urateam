@@ -37,7 +37,7 @@ export function createUsersRouter(deps: UsersRouterDeps): Hono {
 
   app.get("/users", requirePermission("users.view"), async (c) => {
     const user = c.get("user" as never) as
-      | { id: string; email: string }
+      | { id: string; email: string; role?: string }
       | undefined;
     const users = await listUsers(deps.db as any);
     return c.html(
@@ -46,6 +46,7 @@ export function createUsersRouter(deps: UsersRouterDeps): Hono {
         currentUserId: user?.id ?? "",
         basePath: deps.basePath,
         userEmail: user?.email,
+        userRole: user?.role,
       }),
     );
   });
