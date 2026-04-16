@@ -6,6 +6,8 @@ import {
   verifyState,
   validateNextPath,
   upsertUser,
+  applyBootstrapAdmins,
+  isFeatureLicensed,
   createSession,
   deleteSession,
   getSession,
@@ -89,6 +91,21 @@ export function createAuthRouter(deps: AuthRouterDeps): Hono {
       name: fullName,
       workosUserId: result.user.id,
     });
+
+    if (isFeatureLicensed("rbac")) {
+      try {
+        await applyBootstrapAdmins(
+          deps.db,
+          email,
+          userId,
+          process.env.URATEAM_ADMIN_EMAILS,
+        );
+      } catch (err) {
+        // bootstrap must never block login
+        log.warn({ err }, "bootstrap admin failed");
+      }
+    }
+
     const sessionId = await createSession(deps.db, {
       userId,
       durationHours: deps.sso.sessionDurationHours,
