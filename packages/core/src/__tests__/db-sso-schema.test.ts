@@ -15,6 +15,7 @@ describe("sso schema", () => {
       "id",
       "last_login_at",
       "name",
+      "role",
       "workos_user_id",
     ]);
     const sessionCols = (db as any).all(
