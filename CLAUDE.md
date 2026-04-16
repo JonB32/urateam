@@ -187,6 +187,17 @@ It is a pnpm monorepo with 3 packages:
 - License gate: `isFeatureLicensed("org-policy")` required at every call site
 - **Known perf follow-up**: `verifyApprovalsReceived` calls `listMembersInOrg` per team per check with no cache — high-frequency CI webhooks on a PR with 5+ required teams can exhaust GitHub's secondary rate limit. Documented TODO in the auto-merge gate block
 
+### Cost & ROI dashboard (Enterprise feature 4.5)
+- Module: `packages/core/src/cost/` — `rates.ts` (model-rate + time-saved resolution), `per-run.ts` (`computeRunCost`), `aggregate.ts` (`aggregateAll` over runs+stages with 10k row cap + `truncated` flag), `rollup.ts` (`recomputeCostRollups`, `readRollupWindow`), `csv.ts` (`streamCostCsv` with formula-injection guard)
+- Config: `AppConfig.costs = { modelPricing, hourlyEngRate, timeSavedPerPrDefault }`. Per-pipeline `PipelineConfig.timeSavedPerPr` override. Defaults: $50/h eng rate, 4h per PR, Anthropic list pricing
+- Per-run cost = Σ(stage_runs.input/output tokens × model rate). Model per stage = `pipelineConfig.stageModels[stage] ?? pipelineConfig.profile.model ?? "claude-sonnet-4-6"`
+- Time saved = `count(completed runs) × resolveTimeSavedPerPr(pipelineKey)`. ROI = `(timeSavedHours × hourlyEngRate) / dollars`
+- New table: `cost_rollups_daily` — rebuilt nightly in PM tick via `recomputeCostRollups`. **Uses `""` empty-string sentinel instead of NULL for `linear_team_id`** so composite UNIQUE `(date, pipeline_key, linear_team_id, repo_url)` fires correctly with `onConflictDoUpdate` on both SQLite and Postgres
+- Day boundary: half-open `[start, end)` with `lt` (not `lte`) to avoid sub-millisecond precision drops on Postgres `TIMESTAMPTZ`
+- Dashboard route `/cost` — summary card + 3 breakdown tables (team/repo/pipeline) + collapsible formula footer + CSV export at `/cost/export.csv`. All 3 routes 404 unless `isFeatureLicensed("cost-roi")`
+- **10k run cap on `aggregateAll`**: when exceeded, results are truncated to the 10k most recent and `summary.truncated = true`; dashboard shows a warning banner
+- Preset windows (7d/30d/90d/365d) currently go through `aggregateAll` live; `readRollupWindow` exists but is deferred to v2 for rollup-backed reads
+
 ### Coordination (`packages/core/src/pm/coordination.ts`)
 - DB-backed `active_work` table tracks files modified by in-flight pipeline runs
 - `upsertActiveWork` uses atomic `onConflictDoUpdate` (requires UNIQUE on `run_id`)

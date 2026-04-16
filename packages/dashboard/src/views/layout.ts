@@ -87,6 +87,7 @@ export function layout(
     <a href="${bp}/tokens">Tokens</a>
     <a href="${bp}/errors">Errors</a>
     <a href="${bp}/audit">Audit</a>
+    <a href="${bp}/cost">Cost</a>
     <a href="${bp}/config">Config</a>
     <a href="${bp}/coordination">Coordination</a>
     ${signOut}

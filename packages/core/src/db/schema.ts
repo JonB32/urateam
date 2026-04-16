@@ -1,4 +1,4 @@
-import { customType, sqliteTable, text, integer, unique } from "drizzle-orm/sqlite-core";
+import { customType, sqliteTable, text, integer, real, unique } from "drizzle-orm/sqlite-core";
 
 /**
  * Active driver mode for cross-database timestamp serialization.
@@ -203,3 +203,23 @@ export const dashboardSessions = sqliteTable("dashboard_sessions", {
     .notNull()
     .$defaultFn(() => new Date()),
 });
+
+/** Enterprise feature 4.5: pre-aggregated daily cost rollups for the /cost dashboard. */
+export const costRollupsDaily = sqliteTable("cost_rollups_daily", {
+  id: text("id").primaryKey(),
+  date: text("date").notNull(),
+  pipelineKey: text("pipeline_key").notNull(),
+  linearTeamId: text("linear_team_id"),
+  repoUrl: text("repo_url").notNull(),
+  runs: integer("runs").notNull().default(0),
+  prsMerged: integer("prs_merged").notNull().default(0),
+  inputTokens: integer("input_tokens").notNull().default(0),
+  outputTokens: integer("output_tokens").notNull().default(0),
+  dollars: real("dollars").notNull().default(0),
+  timeSavedHours: real("time_saved_hours").notNull().default(0),
+  computedAt: crossTimestamp("computed_at")
+    .notNull()
+    .$defaultFn(() => new Date()),
+}, (t) => [
+  unique().on(t.date, t.pipelineKey, t.linearTeamId, t.repoUrl),
+]);

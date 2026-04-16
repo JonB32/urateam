@@ -3,6 +3,7 @@ export { checkLicense, isFeatureLicensed, type LicenseStatus } from "./license.j
 export * from "./audit/index.js";
 export * from "./auth/index.js";
 export * from "./policy/index.js";
+export * from "./cost/index.js";
 export { computeConfigFingerprint } from "./audit/config-fingerprint.js";
 export { rootLogger, createLogger, addLogStream } from "./logger.js";
 export { createDb, isPostgres, sqlDateGroup, sqlDaysAgoFilter, type Db } from "./db/index.js";

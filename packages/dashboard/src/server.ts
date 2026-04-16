@@ -8,6 +8,7 @@ import type {
   RepoConfig,
   SsoConfig,
   WorkosClient,
+  CostsConfig,
 } from "@urateam/core";
 import { createRunsRouter } from "./routes/runs.js";
 import { createTokensRouter } from "./routes/tokens.js";
@@ -17,6 +18,7 @@ import { createCoordinationRouter } from "./routes/coordination.js";
 import { createAuditRouter } from "./routes/audit.js";
 import { createAuthRouter } from "./routes/auth.js";
 import { createSsoMiddleware } from "./middleware/sso.js";
+import { createCostRouter } from "./routes/cost.js";
 
 const logger = createLogger({ component: "dashboard" });
 
@@ -24,6 +26,8 @@ export interface DashboardConfig {
   db: Db;
   pipelineConfigs: Record<string, PipelineConfig>;
   repoConfigs: Record<string, RepoConfig>;
+  /** Optional costs config for the Cost & ROI dashboard (enterprise). */
+  costs?: CostsConfig;
   auth?: { username: string; password: string };
   /**
    * Optional SSO configuration. When the `sso` feature is licensed AND
@@ -217,6 +221,14 @@ export function createDashboard(config: DashboardConfig): Hono {
 
   const auditRouter = createAuditRouter(config.db, basePath);
   app.route("/", auditRouter);
+
+  const costRouter = createCostRouter({
+    db: config.db,
+    costs: config.costs,
+    pipelineConfigs: config.pipelineConfigs,
+    basePath,
+  });
+  app.route("/", costRouter);
 
   return app;
 }

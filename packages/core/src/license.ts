@@ -40,6 +40,7 @@ const ENTERPRISE_FEATURES = [
   "spend-caps",
   "rbac",
   "cost-dashboard",
+  "cost-roi",
   "org-policy",
   "pm-agent-governance",
 ];
