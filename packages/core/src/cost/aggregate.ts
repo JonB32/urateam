@@ -315,9 +315,11 @@ export async function aggregateHybrid(
   const rollupPart = await aggregateFromRollups(
     db,
     rollupFromDateStr,
-    // Make the rollup-date bound inclusive of the last full UTC day in the
-    // window by adding one day — aggregateFromRollups uses lt on the date
-    // string, which would otherwise exclude the last completed day.
+    // Upper bound is exclusive (lt on date string). `rollupEndDateStr` is
+    // today's date, so lt excludes today and includes through yesterday.
+    // When the window ends before today (rollup-only path), the upper bound
+    // is the window's `to` date so lt(date, windowTo) includes everything
+    // strictly before windowTo's UTC date.
     rollupOnlyCutoff < todayUtcStart ? rollupToDateStr : rollupEndDateStr,
     { from: filters.from, to: filters.to },
     hourlyRate,

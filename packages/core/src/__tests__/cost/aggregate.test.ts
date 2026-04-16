@@ -290,6 +290,10 @@ describe("aggregateHybrid", () => {
     expect(r.summary.prsMerged).toBe(3);
     // rollup dollars + live dollars (run2 = 0.1M×$3 + 0.05M×$15 = $1.05)
     expect(r.summary.dollars).toBeCloseTo(10 + 1.05, 2);
+    // ROI re-computed post-merge: timeSaved = 8 (rollup) + 4 (live quick-fix default) = 12h
+    // ROI = (12 × $50) / $11.05 ≈ 54.3×
+    expect(r.summary.timeSavedHours).toBe(12);
+    expect(r.summary.roiMultiplier).toBeCloseTo((12 * 50) / (10 + 1.05), 1);
     // Single team, single repo, single pipeline — breakdowns should have 1 row each
     expect(r.byTeam).toHaveLength(1);
     expect(r.byRepo).toHaveLength(1);
