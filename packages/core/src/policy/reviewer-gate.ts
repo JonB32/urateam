@@ -91,7 +91,10 @@ export async function verifyApprovalsReceived(
   const missingTeams: string[] = [];
   const now = Date.now();
   for (const team of required.teams) {
-    const cacheKey = `${owner}/${team}`;
+    // Null byte separator: unambiguous even if a future API allows "/" in
+    // org or team slugs. GitHub today forbids "/" in both, so this is
+    // defensive rather than strictly necessary.
+    const cacheKey = `${owner}\x00${team}`;
     let memberLogins: string[];
     const cached = teamCache.get(cacheKey);
     if (cached && cached.expiresAt > now) {
