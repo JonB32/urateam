@@ -36,6 +36,14 @@ export class PmSlackNotifier {
     const lines: string[] = [];
     lines.push(`*PM Agent Run* — ${new Date().toUTCString()}`);
     lines.push(`In-flight: ${bg.activeCount}/${maxInFlight} | Token budget: ${bg.tokenSpendPercent}% used`);
+    const warnScopes = (tick.budgetScopes ?? []).filter((s) => s.tier !== "ok" && s.scope.kind !== "global");
+    if (warnScopes.length > 0) {
+      const scopeLines = warnScopes.map((s) => {
+        const icon = s.tier === "blocked-100" ? "🔴" : s.tier === "warn-80" ? "🟠" : "🟡";
+        return `${icon} ${s.scopeLabel}: ${s.percent}% (${s.used.toLocaleString()}/${s.limit.toLocaleString()})`;
+      });
+      lines.push(`*Budget by scope:* ${scopeLines.join(" | ")}`);
+    }
     if (tick.paused) {
       lines.push("⏸ *Paused* — skipping promote/deprioritize/cancel");
     }
