@@ -126,6 +126,7 @@ export async function listAuditEvents(
   const alertConditions: any[] = [];
   if (filters.from) alertConditions.push(gte(budgetAlerts.firedAt, filters.from));
   if (filters.to) alertConditions.push(lte(budgetAlerts.firedAt, filters.to));
+  if (filters.scope) alertConditions.push(eq(budgetAlerts.scope, filters.scope));
   if (cursorTs) alertConditions.push(lte(budgetAlerts.firedAt, cursorTs));
   const alertRows = await (db as any)
     .select()

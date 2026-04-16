@@ -53,7 +53,6 @@ describe("audit_events immutability", () => {
     const repoRoot = path.resolve(__dirname, "../../../..");
     const allowed = [
       "packages/core/src/audit/writer.ts",
-      "packages/core/src/audit/index.ts",
       "packages/core/src/license.ts",
       "packages/core/src/__tests__/audit-immutability.test.ts",
     ];
