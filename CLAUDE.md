@@ -198,6 +198,20 @@ It is a pnpm monorepo with 3 packages:
 - **10k run cap on `aggregateAll`**: when exceeded, results are truncated to the 10k most recent and `summary.truncated = true`; dashboard shows a warning banner
 - Preset windows (7d/30d/90d/365d) currently go through `aggregateAll` live; `readRollupWindow` exists but is deferred to v2 for rollup-backed reads
 
+### RBAC / multi-user (Enterprise feature 4.4)
+- Module: `packages/core/src/rbac/` — `matrix.ts` (PERMISSION_MATRIX + canAccess), `user-role-store.ts` (setUserRole, getUserRole, listUsers, applyBootstrapAdmins), `errors.ts` (SelfDemoteError, LastAdminError)
+- Schema: added `role TEXT NOT NULL DEFAULT 'viewer'` to `dashboard_users` via MIGRATION_COLUMNS
+- Three roles: `admin`, `operator`, `viewer`. Global-only in v1 — scoped roles (per team/repo) deferred to v2 via a new `user_scope_roles` table
+- Middleware: `packages/dashboard/src/middleware/rbac.ts` — `requirePermission(action)` decorates routes, returns 403 on insufficient role, no-op when feature unlicensed
+- **`getUserById` MUST include `role`** — the SSO middleware reads it from the returned `DashboardUser` and the RBAC middleware reads `user.role`. Dropping it silently makes every user 403
+- Bootstrap: `URATEAM_ADMIN_EMAILS` env var — comma-separated list, case-insensitive. Fire-and-forget from `/auth/callback` via `applyBootstrapAdmins`
+- Admin UI: `/users` dashboard page (admin-only) with role dropdown per user. CSRF via `HX-Request` header
+- CLI: `ura admin list/grant/revoke` — for emergency recovery and scripted management
+- Audit: four `dashboard.manual_action` subtypes — `grant_role`, `revoke_role`, `bootstrap_admin`, `retry_run`. No new `AuditEventTypeSchema` entries
+- Write actions in v1: only `POST /runs/:id/retry` (operator+admin, license-gated to 404 when unlicensed). Others (abort, approve, cancel) deferred
+- Guardrails: `setUserRole` wraps SELECT+COUNT+UPDATE in a transaction (SQLite `BEGIN IMMEDIATE`; Postgres `db.transaction()`) to prevent the TOCTOU race on last-admin demotion
+- Setup doc: `deploy/RBAC_SETUP.md`
+
 ### Coordination (`packages/core/src/pm/coordination.ts`)
 - DB-backed `active_work` table tracks files modified by in-flight pipeline runs
 - `upsertActiveWork` uses atomic `onConflictDoUpdate` (requires UNIQUE on `run_id`)
