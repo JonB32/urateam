@@ -1,4 +1,4 @@
-import type { AggregateResult, BreakdownRow, CostsConfig } from "@urateam/core";
+import type { AggregateResult, BreakdownRow, CostsConfig, DailyRow } from "@urateam/core";
 import { escapeHtml } from "./layout.js";
 
 export interface CostFilters {
@@ -34,6 +34,52 @@ function fmtDollars(n: number): string {
 function fmtRoi(n: number): string {
   if (!isFinite(n)) return "∞";
   return n.toFixed(1) + "×";
+}
+
+/**
+ * Render a simple SVG trend chart of daily dollars over the window.
+ * Inline SVG avoids any external script/dep — CSP-safe.
+ *
+ * Returns an empty string when there are fewer than 2 data points (a single
+ * dot isn't meaningful and tiny polylines collapse to invisible).
+ */
+export function renderCostChart(byDay: DailyRow[]): string {
+  if (byDay.length < 2) return "";
+
+  const width = 600;
+  const height = 80;
+  const padX = 8;
+  const padY = 8;
+  const usableW = width - padX * 2;
+  const usableH = height - padY * 2;
+
+  const maxDollars = Math.max(...byDay.map((d) => d.dollars));
+  // When the max is zero, avoid divide-by-zero and render a flat baseline.
+  const effMax = maxDollars > 0 ? maxDollars : 1;
+
+  const n = byDay.length;
+  const points = byDay
+    .map((d, i) => {
+      const x = padX + (i / (n - 1)) * usableW;
+      const y = padY + usableH - (d.dollars / effMax) * usableH;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+
+  // Simple axis labels: first and last date, max dollars on Y axis.
+  const firstDate = byDay[0].date;
+  const lastDate = byDay[byDay.length - 1].date;
+  const totalDollars = byDay.reduce((sum, d) => sum + d.dollars, 0);
+
+  return `<div class="cost-chart" style="margin:1rem 0;">
+    <div style="display:flex;justify-content:space-between;font-size:0.85em;color:#666;margin-bottom:0.25rem;">
+      <span>Daily cost — ${escapeHtml(firstDate)} to ${escapeHtml(lastDate)}</span>
+      <span>Total: ${fmtDollars(totalDollars)} · peak: ${fmtDollars(maxDollars)}</span>
+    </div>
+    <svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" xmlns="http://www.w3.org/2000/svg" style="border:1px solid #e0e0e0;background:#fafbfc;">
+      <polyline fill="none" stroke="#3a7afe" stroke-width="2" points="${points}" />
+    </svg>
+  </div>`;
 }
 
 function renderBreakdownTable(title: string, rows: BreakdownRow[]): string {
@@ -96,7 +142,7 @@ function buildExportHref(
 export function renderCostPage(args: RenderCostPageArgs): string {
   const { result, filters, costs, partial } = args;
   const basePath = args.basePath ?? "";
-  const { summary, byTeam, byRepo, byPipeline } = result;
+  const { summary, byTeam, byRepo, byPipeline, byDay } = result;
   const hourlyRate = costs.hourlyEngRate ?? 50;
   const value = summary.timeSavedHours * hourlyRate;
 
@@ -111,6 +157,7 @@ export function renderCostPage(args: RenderCostPageArgs): string {
          = ${fmtDollars(value)} value &divide; ${fmtDollars(summary.dollars)} cost
          = ${fmtRoi(summary.roiMultiplier)}</p>
     </div>
+    ${renderCostChart(byDay ?? [])}
     ${renderBreakdownTable("By team", byTeam)}
     ${renderBreakdownTable("By repo", byRepo)}
     ${renderBreakdownTable("By pipeline", byPipeline)}

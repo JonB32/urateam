@@ -37,9 +37,20 @@ export interface BreakdownRow {
   roiMultiplier: number;
 }
 
+export interface DailyRow {
+  /** UTC date, formatted YYYY-MM-DD. */
+  date: string;
+  runs: number;
+  prsMerged: number;
+  dollars: number;
+  timeSavedHours: number;
+}
+
 export interface AggregateResult {
   summary: CostSummary;
   byTeam: BreakdownRow[];
   byRepo: BreakdownRow[];
   byPipeline: BreakdownRow[];
+  /** Per-UTC-day time series sorted ascending by date. Used for sparkline rendering. */
+  byDay: DailyRow[];
 }

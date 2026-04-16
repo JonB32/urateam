@@ -3,7 +3,7 @@ import type { AnyDb } from "../db/client.js";
 import { pipelineRuns, stageRuns, costRollupsDaily } from "../db/schema.js";
 import { computeRunCost } from "./per-run.js";
 import { createLogger } from "../logger.js";
-import type { AggregateResult, BreakdownRow, CostSummary } from "./types.js";
+import type { AggregateResult, BreakdownRow, CostSummary, DailyRow } from "./types.js";
 
 const log = createLogger({ component: "cost.aggregate" });
 
@@ -85,7 +85,7 @@ export async function aggregateAll(
         runs: 0, prsMerged: 0, inputTokens: 0, outputTokens: 0,
         dollars: 0, timeSavedHours: 0, roiMultiplier: 0,
       },
-      byTeam: [], byRepo: [], byPipeline: [],
+      byTeam: [], byRepo: [], byPipeline: [], byDay: [],
     };
   }
 
@@ -108,6 +108,7 @@ export async function aggregateAll(
   const byTeam = new Map<string, BreakdownRow>();
   const byRepo = new Map<string, BreakdownRow>();
   const byPipeline = new Map<string, BreakdownRow>();
+  const byDay = new Map<string, DailyRow>();
 
   for (const run of runs) {
     const runStages = stagesByRun.get(run.id) ?? [];
@@ -120,6 +121,19 @@ export async function aggregateAll(
     summary.dollars += cost.dollars;
     summary.timeSavedHours += cost.timeSavedHours;
     if (isMergedPr) summary.prsMerged += 1;
+
+    // Bucket by UTC completion date (falls back to started date if completed is null).
+    const bucketTs = run.completedAt ?? run.startedAt;
+    const dateStr = new Date(bucketTs).toISOString().slice(0, 10);
+    let dr = byDay.get(dateStr);
+    if (!dr) {
+      dr = { date: dateStr, runs: 0, prsMerged: 0, dollars: 0, timeSavedHours: 0 };
+      byDay.set(dateStr, dr);
+    }
+    dr.runs += 1;
+    dr.dollars += cost.dollars;
+    dr.timeSavedHours += cost.timeSavedHours;
+    if (isMergedPr) dr.prsMerged += 1;
 
     const { key: teamKey, label: teamLabel } = normalizeTeamId(run.linearTeamId);
     if (!byTeam.has(teamKey)) byTeam.set(teamKey, emptyBucket(teamKey, teamLabel));
@@ -155,6 +169,7 @@ export async function aggregateAll(
     byTeam: finalize(Array.from(byTeam.values())),
     byRepo: finalize(Array.from(byRepo.values())),
     byPipeline: finalize(Array.from(byPipeline.values())),
+    byDay: Array.from(byDay.values()).sort((a, b) => a.date.localeCompare(b.date)),
   };
 }
 
@@ -196,6 +211,7 @@ async function aggregateFromRollups(
   const byTeam = new Map<string, BreakdownRow>();
   const byRepo = new Map<string, BreakdownRow>();
   const byPipeline = new Map<string, BreakdownRow>();
+  const byDay = new Map<string, DailyRow>();
 
   for (const r of rows) {
     summary.runs += r.runs;
@@ -204,6 +220,18 @@ async function aggregateFromRollups(
     summary.outputTokens += r.outputTokens;
     summary.dollars += r.dollars;
     summary.timeSavedHours += r.timeSavedHours;
+
+    // Rollup rows are already bucketed by date × pipeline × team × repo,
+    // so multiple rollup rows can share the same date.
+    let dr = byDay.get(r.date);
+    if (!dr) {
+      dr = { date: r.date, runs: 0, prsMerged: 0, dollars: 0, timeSavedHours: 0 };
+      byDay.set(r.date, dr);
+    }
+    dr.runs += r.runs;
+    dr.prsMerged += r.prsMerged;
+    dr.dollars += r.dollars;
+    dr.timeSavedHours += r.timeSavedHours;
 
     // rollup stores linearTeamId as "" sentinel for unassigned (see rollup.ts)
     const teamId = r.linearTeamId === "" ? null : r.linearTeamId;
@@ -241,7 +269,24 @@ async function aggregateFromRollups(
     byTeam: finalize(Array.from(byTeam.values())),
     byRepo: finalize(Array.from(byRepo.values())),
     byPipeline: finalize(Array.from(byPipeline.values())),
+    byDay: Array.from(byDay.values()).sort((a, b) => a.date.localeCompare(b.date)),
   };
+}
+
+function mergeDailyRows(a: DailyRow[], b: DailyRow[]): DailyRow[] {
+  const byDate = new Map<string, DailyRow>();
+  for (const row of [...a, ...b]) {
+    const existing = byDate.get(row.date);
+    if (!existing) {
+      byDate.set(row.date, { ...row });
+    } else {
+      existing.runs += row.runs;
+      existing.prsMerged += row.prsMerged;
+      existing.dollars += row.dollars;
+      existing.timeSavedHours += row.timeSavedHours;
+    }
+  }
+  return Array.from(byDate.values()).sort((x, y) => x.date.localeCompare(y.date));
 }
 
 function mergeBreakdowns(
@@ -363,6 +408,7 @@ export async function aggregateHybrid(
     byTeam: mergeBreakdowns(rollupPart.byTeam, livePart.byTeam, hourlyRate),
     byRepo: mergeBreakdowns(rollupPart.byRepo, livePart.byRepo, hourlyRate),
     byPipeline: mergeBreakdowns(rollupPart.byPipeline, livePart.byPipeline, hourlyRate),
+    byDay: mergeDailyRows(rollupPart.byDay, livePart.byDay),
   };
 }
 
