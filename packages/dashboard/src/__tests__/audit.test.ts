@@ -213,8 +213,9 @@ describe("audit route — licensed (enterprise)", () => {
       }),
     );
 
+    // Return 200 (not 404) so HTMX renders the error fragment in the DOM.
     const res = await app.request("/audit/event/does-not-exist", { headers: AUTH });
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain("Event not found");
   });

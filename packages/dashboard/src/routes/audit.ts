@@ -99,7 +99,9 @@ export function createAuditRouter(db: Db, basePath = ""): Hono {
   router.get("/audit/event/:id", requirePermission("audit.view"), async (c) => {
     const id = c.req.param("id");
     const event = await findAuditEventById(db as any, id);
-    if (!event) return c.html('<tr><td colspan="9" style="color:#c33;padding:0.5rem 1rem;">Event not found</td></tr>', 404);
+    // Return 200 for not-found: HTMX 2.x drops 4xx responses by default so a 404
+    // would make the error message invisible to the user.
+    if (!event) return c.html('<tr class="audit-detail-row"><td></td><td colspan="8" style="color:#c33;padding:0.5rem 1rem;background:#fff4f4;">Event not found</td></tr>');
     return c.html(renderEventDetailRow(event));
   });
 

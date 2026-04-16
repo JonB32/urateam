@@ -208,7 +208,8 @@ export async function findAuditEventById(
     return rows.length > 0 ? parseNativeRow(rows[0]) : null;
   }
 
-  // Parse projected ID prefixes. Order matters — longer prefixes first.
+  // Parse projected ID prefixes. Listed in the order they appear in projection.ts;
+  // no prefix is a strict prefix of another, so matching order is defensive only.
   const runPrefixes = [
     "proj_run_auto_merge_skipped_",
     "proj_run_auto_merged_",
