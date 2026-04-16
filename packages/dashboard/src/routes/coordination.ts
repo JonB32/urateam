@@ -3,11 +3,12 @@ import type { Db } from "@urateam/core";
 import { getActiveWork } from "@urateam/core";
 import { layout } from "../views/layout.js";
 import { coordinationView } from "../views/coordination.js";
+import { requirePermission } from "../middleware/rbac.js";
 
 export function createCoordinationRouter(db: Db, basePath = ""): Hono {
   const router = new Hono();
 
-  router.get("/coordination", async (c) => {
+  router.get("/coordination", requirePermission("coordination.view"), async (c) => {
     const entries = await getActiveWork(db as any);
     const content = coordinationView(entries);
 
@@ -19,7 +20,7 @@ export function createCoordinationRouter(db: Db, basePath = ""): Hono {
   });
 
   // HTMX partial: active coordination feed (polled every 10s)
-  router.get("/coordination/feed", async (c) => {
+  router.get("/coordination/feed", requirePermission("coordination.view"), async (c) => {
     const entries = await getActiveWork(db as any);
     return c.html(coordinationView(entries));
   });

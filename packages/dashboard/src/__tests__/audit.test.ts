@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { generateKeyPairSync, type KeyObject, sign } from "node:crypto";
+import { Hono } from "hono";
 import { createDashboard } from "../server.js";
 import { createDb } from "@urateam/core";
 import type { Db } from "@urateam/core";
@@ -141,16 +142,35 @@ describe("audit route — licensed (enterprise)", () => {
     await restoreLicense();
   });
 
+  // Enterprise tier enables `rbac`, so `requirePermission("audit.view")`
+  // requires a `user` in context. Wrap the dashboard in an outer Hono and
+  // inject a stub admin user so tests that run in enterprise mode pass.
+  function wrapWithAdminUser(inner: Hono): Hono {
+    const outer = new Hono();
+    outer.use("*", async (c, next) => {
+      c.set("user" as never, {
+        id: "u_admin",
+        email: "admin@b.com",
+        role: "admin",
+      } as any);
+      await next();
+    });
+    outer.route("/", inner);
+    return outer;
+  }
+
   it("GET /audit returns 200 and renders a seeded event", async () => {
     const db = await createDb({ connectionString: ":memory:" });
     await seedAuditEvent(db);
 
-    const app = createDashboard({
-      db,
-      pipelineConfigs: {},
-      repoConfigs: {},
-      auth: { username: "admin", password: "secret" },
-    });
+    const app = wrapWithAdminUser(
+      createDashboard({
+        db,
+        pipelineConfigs: {},
+        repoConfigs: {},
+        auth: { username: "admin", password: "secret" },
+      }),
+    );
 
     const res = await app.request("/audit", { headers: AUTH });
     expect(res.status).toBe(200);
@@ -163,12 +183,14 @@ describe("audit route — licensed (enterprise)", () => {
     const db = await createDb({ connectionString: ":memory:" });
     await seedAuditEvent(db);
 
-    const app = createDashboard({
-      db,
-      pipelineConfigs: {},
-      repoConfigs: {},
-      auth: { username: "admin", password: "secret" },
-    });
+    const app = wrapWithAdminUser(
+      createDashboard({
+        db,
+        pipelineConfigs: {},
+        repoConfigs: {},
+        auth: { username: "admin", password: "secret" },
+      }),
+    );
 
     const res = await app.request("/audit/export.csv", { headers: AUTH });
     expect(res.status).toBe(200);

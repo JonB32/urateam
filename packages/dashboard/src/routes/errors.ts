@@ -4,6 +4,7 @@ import type { Db } from "@urateam/core";
 import { stageRuns } from "@urateam/core";
 import { layout } from "../views/layout.js";
 import { errorsView } from "../views/errors.js";
+import { requirePermission } from "../middleware/rbac.js";
 
 type AnyDb = any;
 
@@ -11,7 +12,7 @@ export function createErrorsRouter(db: Db, basePath = ""): Hono {
   const router = new Hono();
   const d = db as AnyDb;
 
-  router.get("/errors", async (c) => {
+  router.get("/errors", requirePermission("errors.view"), async (c) => {
     const stageFailures = await d
       .select({
         stage: stageRuns.stage,

@@ -49,7 +49,7 @@ export function createRunsRouter(
   const router = new Hono();
   const d = db as AnyDb;
 
-  router.get("/", async (c) => {
+  router.get("/", requirePermission("runs.view"), async (c) => {
     const runs = await d
       .select()
       .from(pipelineRuns)
@@ -66,7 +66,7 @@ export function createRunsRouter(
   });
 
   // HTMX partial: feed of latest pipeline runs (polled every 5s)
-  router.get("/runs/feed", async (c) => {
+  router.get("/runs/feed", requirePermission("runs.view"), async (c) => {
     const runs = await d
       .select()
       .from(pipelineRuns)
@@ -76,7 +76,7 @@ export function createRunsRouter(
     return c.html(runFeedView(runs));
   });
 
-  router.get("/runs/:id", async (c) => {
+  router.get("/runs/:id", requirePermission("runs.view"), async (c) => {
     const id = c.req.param("id");
     const page = Math.max(1, parseInt(c.req.query("page") || "1", 10));
     const logsPerPage = 50;
