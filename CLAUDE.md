@@ -196,7 +196,9 @@ It is a pnpm monorepo with 3 packages:
 - Day boundary: half-open `[start, end)` with `lt` (not `lte`) to avoid sub-millisecond precision drops on Postgres `TIMESTAMPTZ`
 - Dashboard route `/cost` — summary card + 3 breakdown tables (team/repo/pipeline) + collapsible formula footer + CSV export at `/cost/export.csv`. All 3 routes 404 unless `isFeatureLicensed("cost-roi")`
 - **10k run cap on `aggregateAll`**: when exceeded, results are truncated to the 10k most recent and `summary.truncated = true`; dashboard shows a warning banner
-- Preset windows (7d/30d/90d/365d) currently go through `aggregateAll` live; `readRollupWindow` exists but is deferred to v2 for rollup-backed reads
+- Preset windows (7d/30d/90d/365d) use `aggregateHybrid` — pre-computed rollup rows for whole UTC days before today, plus live `aggregateAll` for today's partial data, merged into one `AggregateResult`. Custom ranges bypass rollups via `opts.enableRollups = false` since arbitrary `from` times don't align to UTC day boundaries. Preset `from` is snapped to UTC midnight via `snapToUtcDayStart`.
+- **Rollup rows are immutable snapshots**: `dollars` and `timeSavedHours` are baked in at rollup compute time using the `modelPricing` and `timeSavedPerPr` config in effect then. Changing those config values later affects only future rollup recomputations, not historical rows. The dashboard's historical view will not backfill pricing changes.
+- **Fresh deployment caveat**: on a fresh deployment (before the first PM tick runs `recomputeCostRollups`), preset windows show only today's live data. Rollup rows populate after the first nightly tick.
 
 ### RBAC / multi-user (Enterprise feature 4.4)
 - Module: `packages/core/src/rbac/` — `matrix.ts` (PERMISSION_MATRIX + canAccess), `user-role-store.ts` (setUserRole, getUserRole, listUsers, applyBootstrapAdmins), `errors.ts` (SelfDemoteError, LastAdminError)

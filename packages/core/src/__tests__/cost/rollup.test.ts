@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createDb } from "../../db/client.js";
 import { pipelineRuns, stageRuns, costRollupsDaily } from "../../db/schema.js";
-import { recomputeCostRollups, readRollupWindow } from "../../cost/rollup.js";
+import { recomputeCostRollups } from "../../cost/rollup.js";
 
 let db: any;
 
@@ -127,16 +127,6 @@ describe("recomputeCostRollups", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].linearTeamId).toBe("");
     expect(rows[0].runs).toBe(2);
-  });
-
-  it("readRollupWindow returns rows inside the window", async () => {
-    const yesterday = new Date(Date.now() - 86400_000);
-    await seedCompletedRun("r1", yesterday);
-    await recomputeCostRollups(db, config);
-    const from = new Date(Date.now() - 7 * 86400_000);
-    const to = new Date();
-    const rows = await readRollupWindow(db, from, to);
-    expect(rows.length).toBeGreaterThan(0);
   });
 
   it("backfills up to 30 days on first run when rollup table is empty", async () => {

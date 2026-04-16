@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, gte, lt, lte, inArray, max } from "drizzle-orm";
+import { and, gte, lt, inArray, max } from "drizzle-orm";
 import type { AnyDb } from "../db/client.js";
 import { pipelineRuns, stageRuns, costRollupsDaily } from "../db/schema.js";
 import { computeRunCost } from "./per-run.js";
@@ -203,17 +203,3 @@ export async function recomputeCostRollups(
   return { rowsWritten: totalRowsWritten };
 }
 
-export async function readRollupWindow(
-  db: AnyDb,
-  from: Date,
-  to: Date,
-): Promise<any[]> {
-  const fromDate = utcDateStr(from);
-  const toDate = utcDateStr(to);
-  return await db.select().from(costRollupsDaily).where(
-    and(
-      gte(costRollupsDaily.date, fromDate),
-      lte(costRollupsDaily.date, toDate),
-    ),
-  );
-}

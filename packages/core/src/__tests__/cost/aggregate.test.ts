@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createDb } from "../../db/client.js";
 import { pipelineRuns, stageRuns } from "../../db/schema.js";
-import { aggregateAll, normalizeTeamId } from "../../cost/aggregate.js";
+import { randomUUID } from "node:crypto";
+import { aggregateAll, aggregateHybrid, normalizeTeamId, snapToUtcDayStart } from "../../cost/aggregate.js";
+import { costRollupsDaily } from "../../db/schema.js";
 
 let db: any;
 
@@ -202,5 +204,147 @@ describe("aggregateAll", () => {
     expect(normalizeTeamId(undefined)).toEqual({ key: "team:unassigned", label: "(unassigned)" });
     expect(normalizeTeamId("")).toEqual({ key: "team:unassigned", label: "(unassigned)" });
     expect(normalizeTeamId("T1")).toEqual({ key: "team:T1", label: "T1" });
+  });
+});
+
+async function seedRollup(opts: {
+  date: string; pipelineKey: string; teamId: string; repoUrl: string;
+  runs: number; prsMerged: number; inputTokens: number; outputTokens: number;
+  dollars: number; timeSavedHours: number;
+}) {
+  await db.insert(costRollupsDaily).values({
+    id: `cr_${randomUUID()}`,
+    date: opts.date,
+    pipelineKey: opts.pipelineKey,
+    linearTeamId: opts.teamId,
+    repoUrl: opts.repoUrl,
+    runs: opts.runs,
+    prsMerged: opts.prsMerged,
+    inputTokens: opts.inputTokens,
+    outputTokens: opts.outputTokens,
+    dollars: opts.dollars,
+    timeSavedHours: opts.timeSavedHours,
+    computedAt: new Date(),
+  });
+}
+
+describe("snapToUtcDayStart", () => {
+  it("snaps mid-day UTC to start-of-day UTC", () => {
+    const d = new Date("2026-04-15T14:30:45.123Z");
+    expect(snapToUtcDayStart(d).toISOString()).toBe("2026-04-15T00:00:00.000Z");
+  });
+  it("is idempotent on midnight UTC", () => {
+    const d = new Date("2026-04-15T00:00:00.000Z");
+    expect(snapToUtcDayStart(d).toISOString()).toBe("2026-04-15T00:00:00.000Z");
+  });
+});
+
+describe("aggregateHybrid", () => {
+  it("falls back to pure live when enableRollups is false", async () => {
+    await seedRun("r1", {
+      pipelineKey: "quick-fix", teamId: "T1",
+      repoUrl: "https://github.com/acme/api",
+      implementInputTokens: 100_000, implementOutputTokens: 50_000,
+      completedAt: new Date("2026-04-10T10:00:00Z"),
+    });
+    // Also seed a rollup that should NOT be read because enableRollups is false.
+    await seedRollup({
+      date: "2026-04-10", pipelineKey: "quick-fix", teamId: "T1",
+      repoUrl: "https://github.com/acme/api",
+      runs: 999, prsMerged: 999, inputTokens: 0, outputTokens: 0,
+      dollars: 0, timeSavedHours: 0,
+    });
+    const r = await aggregateHybrid(
+      db,
+      { from: new Date("2026-04-01T00:00:00Z"), to: new Date("2026-04-30T23:59:59Z") },
+      config,
+      { enableRollups: false, now: new Date("2026-04-15T12:00:00Z") },
+    );
+    // Should see only the live run, not the poisoned rollup row
+    expect(r.summary.runs).toBe(1);
+  });
+
+  it("uses rollups for historical days + live for today", async () => {
+    // Historical rollup: 2 runs, 2 PRs, $10, 8h
+    await seedRollup({
+      date: "2026-04-14", pipelineKey: "quick-fix", teamId: "T1",
+      repoUrl: "https://github.com/acme/api",
+      runs: 2, prsMerged: 2, inputTokens: 200_000, outputTokens: 100_000,
+      dollars: 10, timeSavedHours: 8,
+    });
+    // Today's live run: 1 run at T+10h
+    await seedRun("r-today", {
+      pipelineKey: "quick-fix", teamId: "T1",
+      repoUrl: "https://github.com/acme/api",
+      implementInputTokens: 100_000, implementOutputTokens: 50_000,
+      completedAt: new Date("2026-04-15T10:00:00Z"),
+    });
+    const r = await aggregateHybrid(
+      db,
+      { from: new Date("2026-04-10T00:00:00Z"), to: new Date("2026-04-15T23:59:59Z") },
+      config,
+      { enableRollups: true, now: new Date("2026-04-15T12:00:00Z") },
+    );
+    // rollup contributes 2 runs; live contributes 1 run
+    expect(r.summary.runs).toBe(3);
+    expect(r.summary.prsMerged).toBe(3);
+    // rollup dollars + live dollars (run2 = 0.1M×$3 + 0.05M×$15 = $1.05)
+    expect(r.summary.dollars).toBeCloseTo(10 + 1.05, 2);
+    // ROI re-computed post-merge: timeSaved = 8 (rollup) + 4 (live quick-fix default) = 12h
+    // ROI = (12 × $50) / $11.05 ≈ 54.3×
+    expect(r.summary.timeSavedHours).toBe(12);
+    expect(r.summary.roiMultiplier).toBeCloseTo((12 * 50) / (10 + 1.05), 1);
+    // Single team, single repo, single pipeline — breakdowns should have 1 row each
+    expect(r.byTeam).toHaveLength(1);
+    expect(r.byRepo).toHaveLength(1);
+    expect(r.byPipeline).toHaveLength(1);
+  });
+
+  it("uses rollups only when window ends before today's UTC midnight", async () => {
+    await seedRollup({
+      date: "2026-04-13", pipelineKey: "quick-fix", teamId: "T1",
+      repoUrl: "https://github.com/acme/api",
+      runs: 5, prsMerged: 5, inputTokens: 0, outputTokens: 0,
+      dollars: 20, timeSavedHours: 20,
+    });
+    // Also a live run from today that should NOT be included (window ends before today)
+    await seedRun("r-today", {
+      pipelineKey: "quick-fix", teamId: "T1",
+      repoUrl: "https://github.com/acme/api",
+      implementInputTokens: 100_000, implementOutputTokens: 50_000,
+      completedAt: new Date("2026-04-15T10:00:00Z"),
+    });
+    const r = await aggregateHybrid(
+      db,
+      // Window: 2026-04-13 00:00Z to 2026-04-14 00:00Z — entirely historical
+      { from: new Date("2026-04-13T00:00:00Z"), to: new Date("2026-04-14T00:00:00Z") },
+      config,
+      { enableRollups: true, now: new Date("2026-04-15T12:00:00Z") },
+    );
+    expect(r.summary.runs).toBe(5);
+    expect(r.summary.dollars).toBeCloseTo(20, 2);
+  });
+
+  it("routes to live-only when window is entirely today", async () => {
+    await seedRun("r-today", {
+      pipelineKey: "quick-fix", teamId: "T1",
+      repoUrl: "https://github.com/acme/api",
+      implementInputTokens: 100_000, implementOutputTokens: 50_000,
+      completedAt: new Date("2026-04-15T10:00:00Z"),
+    });
+    // Stale rollup for yesterday — should NOT be read when window is today-only.
+    await seedRollup({
+      date: "2026-04-14", pipelineKey: "quick-fix", teamId: "T1",
+      repoUrl: "https://github.com/acme/api",
+      runs: 999, prsMerged: 999, inputTokens: 0, outputTokens: 0,
+      dollars: 0, timeSavedHours: 0,
+    });
+    const r = await aggregateHybrid(
+      db,
+      { from: new Date("2026-04-15T00:00:00Z"), to: new Date("2026-04-15T23:59:59Z") },
+      config,
+      { enableRollups: true, now: new Date("2026-04-15T12:00:00Z") },
+    );
+    expect(r.summary.runs).toBe(1);
   });
 });

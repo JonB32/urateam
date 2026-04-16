@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Db, CostsConfig, PipelineConfig } from "@urateam/core";
-import { isFeatureLicensed, aggregateAll, streamCostCsv } from "@urateam/core";
+import { isFeatureLicensed, aggregateHybrid, snapToUtcDayStart, streamCostCsv } from "@urateam/core";
 import { layout } from "../views/layout.js";
 import { renderCostPage } from "../views/cost.js";
 
@@ -28,8 +28,11 @@ function parseWindow(url: URL): { from: Date; to: Date; preset: string } {
     if (isNaN(from.getTime())) from = new Date(now.getTime() - 30 * 86_400_000);
     if (isNaN(to.getTime())) to = now;
   } else {
+    // For preset windows: snap `from` to UTC day start so `aggregateHybrid`
+    // can read pre-computed rollup rows without boundary slicing. The window
+    // effectively becomes "last N complete UTC days + today-so-far".
     const days = preset === "7d" ? 7 : preset === "90d" ? 90 : preset === "365d" ? 365 : 30;
-    from = new Date(now.getTime() - days * 86_400_000);
+    from = new Date(snapToUtcDayStart(now).getTime() - days * 86_400_000);
   }
   return { from, to, preset };
 }
@@ -57,10 +60,13 @@ export function createCostRouter(deps: CostRouterDeps): Hono {
   router.get("/cost", async (c) => {
     const url = new URL(c.req.url);
     const filters = parseWindow(url);
-    const result = await aggregateAll(
+    const result = await aggregateHybrid(
       deps.db as any,
       { from: filters.from, to: filters.to },
       { costs, pipelineConfigs },
+      // Rollup-backed reads only for preset windows (where `from` is snapped
+      // to UTC midnight). Custom ranges go through live aggregation.
+      { enableRollups: filters.preset !== "custom" },
     );
     const content = renderCostPage({ result, filters, costs, basePath });
     if (c.req.header("HX-Request")) return c.html(content);
@@ -71,10 +77,11 @@ export function createCostRouter(deps: CostRouterDeps): Hono {
   router.get("/cost/page", async (c) => {
     const url = new URL(c.req.url);
     const filters = parseWindow(url);
-    const result = await aggregateAll(
+    const result = await aggregateHybrid(
       deps.db as any,
       { from: filters.from, to: filters.to },
       { costs, pipelineConfigs },
+      { enableRollups: filters.preset !== "custom" },
     );
     return c.html(renderCostPage({ result, filters, costs, basePath, partial: true }));
   });
