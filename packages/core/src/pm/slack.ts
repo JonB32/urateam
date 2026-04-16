@@ -38,11 +38,14 @@ export class PmSlackNotifier {
     lines.push(`In-flight: ${bg.activeCount}/${maxInFlight} | Token budget: ${bg.tokenSpendPercent}% used`);
     const warnScopes = (tick.budgetScopes ?? []).filter((s) => s.tier !== "ok" && s.scope.kind !== "global");
     if (warnScopes.length > 0) {
-      const scopeLines = warnScopes.map((s) => {
+      const maxDisplay = 10;
+      const display = warnScopes.slice(0, maxDisplay);
+      const scopeLines = display.map((s) => {
         const icon = s.tier === "blocked-100" ? "🔴" : s.tier === "warn-80" ? "🟠" : "🟡";
         return `${icon} ${s.scopeLabel}: ${s.percent}% (${s.used.toLocaleString()}/${s.limit.toLocaleString()})`;
       });
-      lines.push(`*Budget by scope:* ${scopeLines.join(" | ")}`);
+      const suffix = warnScopes.length > maxDisplay ? ` +${warnScopes.length - maxDisplay} more` : "";
+      lines.push(`*Budget by scope:* ${scopeLines.join(" | ")}${suffix}`);
     }
     if (tick.paused) {
       lines.push("⏸ *Paused* — skipping promote/deprioritize/cancel");
