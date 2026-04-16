@@ -7,10 +7,13 @@ Licensed Work:        urateam
                       The Licensed Work is (c) 2026 Jon Becker.
 Additional Use Grant: You may make use of the Licensed Work, provided that
                       you do not use the Licensed Work for a Managed Service.
+
                       A "Managed Service" is a commercial offering that allows
                       third parties to access the functionality of the Licensed
-                      Work by performing an action directly or indirectly that
-                      would otherwise violate the licensor's rights.
+                      Work as part of a hosted or managed product or service.
+                      For clarity, self-hosting the Licensed Work for your own
+                      organization's internal use is always permitted regardless
+                      of organization size.
 Change Date:          2030-04-11
 Change License:       Apache License, Version 2.0
 

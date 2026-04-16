@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 #!/usr/bin/env node
 // Auto-load .env file from the current working directory before any command
 // imports read process.env. Uses Node 22's built-in loadEnvFile (no deps).

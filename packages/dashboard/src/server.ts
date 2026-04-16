@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 import { Hono } from "hono";
 import { basicAuth } from "hono/basic-auth";
 import { serveStatic } from "@hono/node-server/serve-static";

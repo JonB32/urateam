@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 export * from "./types.js";
 export { checkLicense, isFeatureLicensed, type LicenseStatus } from "./license.js";
 export * from "./audit/index.js";
