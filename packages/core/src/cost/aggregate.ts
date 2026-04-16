@@ -1,6 +1,6 @@
 import { and, gte, lt, inArray } from "drizzle-orm";
 import type { AnyDb } from "../db/client.js";
-import { pipelineRuns, stageRuns } from "../db/schema.js";
+import { pipelineRuns, stageRuns, costRollupsDaily } from "../db/schema.js";
 import { computeRunCost } from "./per-run.js";
 import { createLogger } from "../logger.js";
 import type { AggregateResult, BreakdownRow, CostSummary } from "./types.js";
@@ -157,3 +157,210 @@ export async function aggregateAll(
     byPipeline: finalize(Array.from(byPipeline.values())),
   };
 }
+
+/** Snap a Date down to the start of its UTC day (00:00:00.000 UTC). */
+export function snapToUtcDayStart(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+function utcDateStr(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Aggregate pre-computed rollup rows for UTC dates in [fromDate, toDate).
+ * Both bounds are YYYY-MM-DD strings. Returns an AggregateResult whose
+ * window.from/to reflect the caller-supplied Date objects (not the date
+ * strings), so the summary is consistent with the caller's framing.
+ */
+async function aggregateFromRollups(
+  db: AnyDb,
+  fromDate: string,
+  toDate: string,
+  window: { from: Date; to: Date },
+  hourlyRate: number,
+): Promise<AggregateResult> {
+  // Half-open [fromDate, toDate) — use gte(date) + lt(date) on the date string.
+  const rows: any[] = await db.select().from(costRollupsDaily).where(
+    and(
+      gte(costRollupsDaily.date, fromDate),
+      lt(costRollupsDaily.date, toDate),
+    ),
+  );
+
+  const summary: CostSummary = {
+    window,
+    runs: 0, prsMerged: 0, inputTokens: 0, outputTokens: 0,
+    dollars: 0, timeSavedHours: 0, roiMultiplier: 0,
+  };
+  const byTeam = new Map<string, BreakdownRow>();
+  const byRepo = new Map<string, BreakdownRow>();
+  const byPipeline = new Map<string, BreakdownRow>();
+
+  for (const r of rows) {
+    summary.runs += r.runs;
+    summary.prsMerged += r.prsMerged;
+    summary.inputTokens += r.inputTokens;
+    summary.outputTokens += r.outputTokens;
+    summary.dollars += r.dollars;
+    summary.timeSavedHours += r.timeSavedHours;
+
+    // rollup stores linearTeamId as "" sentinel for unassigned (see rollup.ts)
+    const teamId = r.linearTeamId === "" ? null : r.linearTeamId;
+    const { key: teamKey, label: teamLabel } = normalizeTeamId(teamId);
+    if (!byTeam.has(teamKey)) byTeam.set(teamKey, emptyBucket(teamKey, teamLabel));
+    const tb = byTeam.get(teamKey)!;
+    tb.runs += r.runs; tb.prsMerged += r.prsMerged;
+    tb.inputTokens += r.inputTokens; tb.outputTokens += r.outputTokens;
+    tb.dollars += r.dollars; tb.timeSavedHours += r.timeSavedHours;
+
+    const repoKey = `repo:${r.repoUrl}`;
+    if (!byRepo.has(repoKey)) byRepo.set(repoKey, emptyBucket(repoKey, r.repoUrl));
+    const rb = byRepo.get(repoKey)!;
+    rb.runs += r.runs; rb.prsMerged += r.prsMerged;
+    rb.inputTokens += r.inputTokens; rb.outputTokens += r.outputTokens;
+    rb.dollars += r.dollars; rb.timeSavedHours += r.timeSavedHours;
+
+    const pipelineKey = `pipeline:${r.pipelineKey}`;
+    if (!byPipeline.has(pipelineKey)) byPipeline.set(pipelineKey, emptyBucket(pipelineKey, r.pipelineKey));
+    const pb = byPipeline.get(pipelineKey)!;
+    pb.runs += r.runs; pb.prsMerged += r.prsMerged;
+    pb.inputTokens += r.inputTokens; pb.outputTokens += r.outputTokens;
+    pb.dollars += r.dollars; pb.timeSavedHours += r.timeSavedHours;
+  }
+
+  summary.roiMultiplier = finalizeRoi(summary, hourlyRate);
+  const sort = (a: BreakdownRow, b: BreakdownRow) => b.dollars - a.dollars;
+  const finalize = (rows: BreakdownRow[]) => {
+    for (const r of rows) r.roiMultiplier = finalizeRoi(r, hourlyRate);
+    return rows.sort(sort);
+  };
+
+  return {
+    summary,
+    byTeam: finalize(Array.from(byTeam.values())),
+    byRepo: finalize(Array.from(byRepo.values())),
+    byPipeline: finalize(Array.from(byPipeline.values())),
+  };
+}
+
+function mergeBreakdowns(
+  a: BreakdownRow[],
+  b: BreakdownRow[],
+  hourlyRate: number,
+): BreakdownRow[] {
+  const byKey = new Map<string, BreakdownRow>();
+  for (const row of [...a, ...b]) {
+    const existing = byKey.get(row.key);
+    if (!existing) {
+      byKey.set(row.key, { ...row });
+    } else {
+      existing.runs += row.runs;
+      existing.prsMerged += row.prsMerged;
+      existing.inputTokens += row.inputTokens;
+      existing.outputTokens += row.outputTokens;
+      existing.dollars += row.dollars;
+      existing.timeSavedHours += row.timeSavedHours;
+    }
+  }
+  const merged = Array.from(byKey.values());
+  for (const r of merged) r.roiMultiplier = finalizeRoi(r, hourlyRate);
+  return merged.sort((x, y) => y.dollars - x.dollars);
+}
+
+/**
+ * Hybrid aggregate: uses pre-computed rollup rows for whole UTC days before
+ * today, and live `aggregateAll` for today's partial data. The two halves are
+ * summed into a single `AggregateResult`.
+ *
+ * When `opts.enableRollups` is false (the default for arbitrary custom
+ * windows), falls back to pure live aggregation.
+ *
+ * IMPORTANT: `filters.from` must be at a UTC day boundary (00:00 UTC) for
+ * rollup-backed reads to be exact — the rollup table stores per-day totals.
+ * For preset windows (7d/30d/90d/365d) the caller is expected to snap `from`
+ * via `snapToUtcDayStart`. For non-aligned `from`, this function still routes
+ * through rollups but will slightly over-count by including the full first
+ * UTC day — acceptable for preset usage, unsuitable for arbitrary windows
+ * (hence the opt-in `enableRollups` flag).
+ */
+export async function aggregateHybrid(
+  db: AnyDb,
+  filters: AggregateFilters,
+  config: CostConfig,
+  opts: { maxRuns?: number; now?: Date; enableRollups?: boolean } = {},
+): Promise<AggregateResult> {
+  const enableRollups = opts.enableRollups ?? false;
+  if (!enableRollups) {
+    return aggregateAll(db, filters, config, opts);
+  }
+
+  const hourlyRate = config.costs?.hourlyEngRate ?? 50;
+  const now = opts.now ?? new Date();
+  const todayUtcStart = snapToUtcDayStart(now);
+
+  // If the window doesn't span any completed UTC days, fall through to pure live.
+  if (filters.from >= todayUtcStart) {
+    return aggregateAll(db, filters, config, opts);
+  }
+
+  // Compute the rollup window (whole UTC days) and the live remainder (today).
+  const rollupEndDateStr = utcDateStr(todayUtcStart);
+  const rollupFromDateStr = utcDateStr(filters.from);
+  // If the user's window ends before today's UTC midnight, rollup covers the
+  // full window and there's no live component.
+  const rollupOnlyCutoff = filters.to <= todayUtcStart ? filters.to : todayUtcStart;
+  const rollupToDateStr = utcDateStr(rollupOnlyCutoff);
+
+  const rollupPart = await aggregateFromRollups(
+    db,
+    rollupFromDateStr,
+    // Make the rollup-date bound inclusive of the last full UTC day in the
+    // window by adding one day — aggregateFromRollups uses lt on the date
+    // string, which would otherwise exclude the last completed day.
+    rollupOnlyCutoff < todayUtcStart ? rollupToDateStr : rollupEndDateStr,
+    { from: filters.from, to: filters.to },
+    hourlyRate,
+  );
+
+  // If the window ends before today's midnight, we're done.
+  if (filters.to <= todayUtcStart) {
+    log.debug({ from: rollupFromDateStr, to: rollupToDateStr }, "aggregateHybrid: rollup-only path");
+    return rollupPart;
+  }
+
+  // Live query for today's partial data [todayUtcStart, filters.to).
+  const livePart = await aggregateAll(
+    db,
+    { from: todayUtcStart, to: filters.to },
+    config,
+    opts,
+  );
+
+  log.debug(
+    { rollupDays: rollupFromDateStr + "..." + rollupEndDateStr, liveFrom: todayUtcStart.toISOString() },
+    "aggregateHybrid: rollup + live merge",
+  );
+
+  // Merge summary
+  const mergedSummary: CostSummary = {
+    window: { from: filters.from, to: filters.to },
+    runs: rollupPart.summary.runs + livePart.summary.runs,
+    prsMerged: rollupPart.summary.prsMerged + livePart.summary.prsMerged,
+    inputTokens: rollupPart.summary.inputTokens + livePart.summary.inputTokens,
+    outputTokens: rollupPart.summary.outputTokens + livePart.summary.outputTokens,
+    dollars: rollupPart.summary.dollars + livePart.summary.dollars,
+    timeSavedHours: rollupPart.summary.timeSavedHours + livePart.summary.timeSavedHours,
+    roiMultiplier: 0,
+    ...(livePart.summary.truncated ? { truncated: true } : {}),
+  };
+  mergedSummary.roiMultiplier = finalizeRoi(mergedSummary, hourlyRate);
+
+  return {
+    summary: mergedSummary,
+    byTeam: mergeBreakdowns(rollupPart.byTeam, livePart.byTeam, hourlyRate),
+    byRepo: mergeBreakdowns(rollupPart.byRepo, livePart.byRepo, hourlyRate),
+    byPipeline: mergeBreakdowns(rollupPart.byPipeline, livePart.byPipeline, hourlyRate),
+  };
+}
+
