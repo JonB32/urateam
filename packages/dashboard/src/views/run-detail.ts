@@ -85,7 +85,8 @@ export function runDetailView(
   stages: StageInfo[],
   logs: LogEntry[],
   page: number,
-  totalLogs: number
+  totalLogs: number,
+  canRetry: boolean = false,
 ): string {
   const basePath = getBasePath();
   const logsPerPage = 50;
@@ -99,6 +100,13 @@ export function runDetailView(
       ${statusBadge(run.status)}
       <span class="duration-badge" title="Total run duration">⏱ ${duration}${isInFlight ? " (running)" : ""}</span>
       ${run.prUrl ? `<a href="${escapeHtml(run.prUrl)}" target="_blank" rel="noopener" style="font-size:0.875rem;">↗ Pull Request</a>` : ""}
+      ${
+        canRetry && (run.status === "failed" || run.status === "retriable")
+          ? `<form method="post" action="${basePath}/runs/${encodeURIComponent(run.id)}/retry" hx-post="${basePath}/runs/${encodeURIComponent(run.id)}/retry" hx-headers='{"HX-Request":"true"}' style="display:inline;margin:0;">
+          <button type="submit" class="button-primary">Retry</button>
+        </form>`
+          : ""
+      }
     </div>
     <dl class="meta">
       <div><dt>Issue</dt><dd>${escapeHtml(run.issueId)}: ${escapeHtml(run.issueTitle)}</dd></div>

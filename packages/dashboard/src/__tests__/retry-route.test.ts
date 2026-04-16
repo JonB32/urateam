@@ -47,10 +47,13 @@ function appWith(
 }
 
 describe("POST /runs/:id/retry", () => {
-  it("unlicensed → middleware is no-op and endpoint redirects", async () => {
-    const app = appWith("viewer");
+  it("unlicensed → 404 even for valid retry requests", async () => {
+    // Do NOT install enterprise license
+    const runner = { resume: vi.fn(), start: vi.fn() };
+    const app = appWith("operator", runner); // operator role set but feature off
     const res = await app.request("/runs/run_1/retry", { method: "POST" });
-    expect([200, 302]).toContain(res.status);
+    expect(res.status).toBe(404);
+    expect(runner.resume).not.toHaveBeenCalled();
   });
 
   describe("licensed", () => {

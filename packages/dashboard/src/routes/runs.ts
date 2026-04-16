@@ -7,6 +7,9 @@ import {
   agentLogs,
   logAuditEvent,
   dashboardRetryRunEvent,
+  isFeatureLicensed,
+  canAccess,
+  type Role,
 } from "@urateam/core";
 import { layout } from "../views/layout.js";
 import { runFeedView, type RunRow } from "../views/run-feed.js";
@@ -120,12 +123,25 @@ export function createRunsRouter(
         .offset(offset) as LogEntry[];
     }
 
-    const content = runDetailView(run, stages, logs, page, totalLogs);
+    const user = c.get("user" as never) as
+      | { id: string; email: string; role?: Role }
+      | undefined;
+    const canRetry = isFeatureLicensed("rbac")
+      ? canAccess((user?.role ?? "viewer") as Role, "runs.retry")
+      : true;
+    const content = runDetailView(run, stages, logs, page, totalLogs, canRetry);
     return c.html(layout(`Run ${id}`, content, effectiveBasePath));
   });
 
   router.post(
     "/runs/:id/retry",
+    async (c, next) => {
+      // Per spec §10: retry endpoint returns 404 when RBAC is unlicensed.
+      // Without this gate the endpoint would be wide-open in unlicensed
+      // deployments because requirePermission is a no-op then.
+      if (!isFeatureLicensed("rbac")) return c.notFound();
+      return next();
+    },
     requirePermission("runs.retry"),
     async (c) => {
       const id = c.req.param("id");

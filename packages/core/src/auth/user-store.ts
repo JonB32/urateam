@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import type { AnyDb } from "../db/client.js";
 import { dashboardUsers } from "../db/schema.js";
+import type { Role } from "../rbac/types.js";
 
 export interface DashboardUser {
   id: string;
@@ -10,6 +11,7 @@ export interface DashboardUser {
   workosUserId: string | null;
   createdAt: Date;
   lastLoginAt: Date | null;
+  role: Role;
 }
 
 export interface UpsertUserInput {
@@ -91,5 +93,6 @@ export async function getUserById(
     workosUserId: row.workosUserId ?? null,
     createdAt: row.createdAt,
     lastLoginAt: row.lastLoginAt ?? null,
+    role: ((row as { role?: string | null }).role ?? "viewer") as Role,
   };
 }

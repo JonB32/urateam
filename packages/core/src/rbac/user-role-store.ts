@@ -1,5 +1,6 @@
-import { and, eq, ne, count } from "drizzle-orm";
+import { and, eq, ne, count, sql } from "drizzle-orm";
 import type { AnyDb } from "../db/client.js";
+import { isPostgres } from "../db/client.js";
 import { dashboardUsers } from "../db/schema.js";
 import {
   logAuditEvent,
@@ -18,50 +19,95 @@ export interface SetUserRoleArgs {
 }
 
 export async function setUserRole(db: AnyDb, args: SetUserRoleArgs): Promise<void> {
-  const currentRows = await (db as any)
-    .select()
-    .from(dashboardUsers)
-    .where(eq(dashboardUsers.id, args.userId));
-  if (currentRows.length === 0) throw new Error(`user not found: ${args.userId}`);
-  const current = currentRows[0] as { id: string; email: string; role: Role };
-  const oldRole = current.role;
+  // The SELECT current / SELECT COUNT / UPDATE sequence MUST share a
+  // transaction to close the TOCTOU race on the last-admin guard. Two
+  // concurrent demotions must not both see `otherAdmins > 0`.
+  //
+  // Driver note: drizzle's `db.transaction(async ...)` is NOT supported on
+  // better-sqlite3 (it throws "Transaction function cannot return a
+  // promise"). For SQLite we issue `BEGIN IMMEDIATE` / `COMMIT` manually,
+  // which acquires a RESERVED lock and serializes concurrent writers.
+  // For Postgres we use the native drizzle transaction API.
+  // `logAuditEvent` is fire-and-forget and runs outside the transaction.
+  let oldRole: Role;
+  let actorEmail = "unknown";
+  let targetEmail: string;
 
-  // Idempotent no-op
-  if (oldRole === args.newRole) return;
-
-  // Self-lockout
-  if (args.userId === args.actorUserId && args.newRole !== "admin") {
-    throw new SelfDemoteError();
-  }
-
-  // Last-admin guard: if target is currently admin and we're demoting, count other admins
-  if (oldRole === "admin" && args.newRole !== "admin") {
-    const [row] = await (db as any)
-      .select({ n: count() })
+  const body = async (handle: any): Promise<void> => {
+    const currentRows = await handle
+      .select()
       .from(dashboardUsers)
-      .where(and(eq(dashboardUsers.role, "admin"), ne(dashboardUsers.id, args.userId)));
-    const otherAdmins = Number((row as any)?.n ?? 0);
-    if (otherAdmins === 0) throw new LastAdminError();
+      .where(eq(dashboardUsers.id, args.userId));
+    if (currentRows.length === 0)
+      throw new Error(`user not found: ${args.userId}`);
+    const current = currentRows[0] as { id: string; email: string; role: Role };
+    oldRole = current.role;
+    targetEmail = current.email;
+
+    // Idempotent no-op
+    if (oldRole === args.newRole) return;
+
+    // Self-lockout
+    if (args.userId === args.actorUserId && args.newRole !== "admin") {
+      throw new SelfDemoteError();
+    }
+
+    // Last-admin guard: if target is currently admin and we're demoting, count other admins
+    if (oldRole === "admin" && args.newRole !== "admin") {
+      const [row] = await handle
+        .select({ n: count() })
+        .from(dashboardUsers)
+        .where(
+          and(eq(dashboardUsers.role, "admin"), ne(dashboardUsers.id, args.userId)),
+        );
+      const otherAdmins = Number((row as any)?.n ?? 0);
+      if (otherAdmins === 0) throw new LastAdminError();
+    }
+
+    await handle
+      .update(dashboardUsers)
+      .set({ role: args.newRole })
+      .where(eq(dashboardUsers.id, args.userId));
+
+    const actorRows = await handle
+      .select()
+      .from(dashboardUsers)
+      .where(eq(dashboardUsers.id, args.actorUserId));
+    actorEmail = (actorRows[0] as any)?.email ?? "unknown";
+  };
+
+  if (isPostgres(db as any)) {
+    await (db as any).transaction(async (tx: any) => {
+      await body(tx);
+    });
+  } else {
+    // SQLite path — manual transaction. Use BEGIN IMMEDIATE to grab the
+    // RESERVED lock up front, avoiding SQLITE_BUSY under contention.
+    await (db as any).run(sql`BEGIN IMMEDIATE`);
+    try {
+      await body(db);
+      await (db as any).run(sql`COMMIT`);
+    } catch (err) {
+      try {
+        await (db as any).run(sql`ROLLBACK`);
+      } catch {
+        // ignore rollback errors
+      }
+      throw err;
+    }
   }
 
-  await (db as any)
-    .update(dashboardUsers)
-    .set({ role: args.newRole })
-    .where(eq(dashboardUsers.id, args.userId));
+  // Early-exit idempotent no-op: skip audit write.
+  if (oldRole! === args.newRole) return;
 
   const isRevoke = args.newRole === "viewer";
-  const actorRows = await (db as any)
-    .select()
-    .from(dashboardUsers)
-    .where(eq(dashboardUsers.id, args.actorUserId));
-  const actorEmail = (actorRows[0] as any)?.email ?? "unknown";
   const builder = isRevoke ? dashboardRevokeRoleEvent : dashboardGrantRoleEvent;
   await logAuditEvent(
     db,
     builder({
       targetUserId: args.userId,
-      targetEmail: current.email,
-      oldRole,
+      targetEmail: targetEmail!,
+      oldRole: oldRole!,
       newRole: args.newRole,
       actorUserId: args.actorUserId,
       actorEmail,
