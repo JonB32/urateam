@@ -13,6 +13,10 @@ interface SsoMiddlewareDeps {
   sso: SsoConfig;
 }
 
+// CSRF note: the session cookie uses SameSite=Lax. This prevents
+// cross-origin POST from third-party sites (CSRF), but allows top-level
+// navigations (GET). The dashboard CSRF middleware separately rejects
+// state-changing requests without the HX-Request header.
 export function createSsoMiddleware(
   deps: SsoMiddlewareDeps,
 ): MiddlewareHandler {

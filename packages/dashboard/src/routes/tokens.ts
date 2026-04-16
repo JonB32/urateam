@@ -50,7 +50,8 @@ export function createTokensRouter(db: Db, basePath = ""): Hono {
       .orderBy(sql`(COALESCE(SUM(${stageRuns.inputTokens}), 0) + COALESCE(SUM(${stageRuns.outputTokens}), 0)) DESC`);
 
     const content = tokensView(daily, byPipeline, byStage);
-    return c.html(layout("Token Usage", content, basePath));
+    const user = c.get("user" as never) as { email?: string } | undefined;
+    return c.html(layout("Token Usage", content, basePath, { userEmail: user?.email }));
   });
 
   return router;

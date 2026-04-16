@@ -64,7 +64,8 @@ export function createCostRouter(deps: CostRouterDeps): Hono {
     );
     const content = renderCostPage({ result, filters, costs, basePath });
     if (c.req.header("HX-Request")) return c.html(content);
-    return c.html(layout("Cost & ROI", content, basePath));
+    const user = c.get("user" as never) as { email?: string } | undefined;
+    return c.html(layout("Cost & ROI", content, basePath, { userEmail: user?.email }));
   });
 
   router.get("/cost/page", async (c) => {

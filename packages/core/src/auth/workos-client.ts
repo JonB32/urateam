@@ -34,6 +34,9 @@ let cached: WorkosClient | null = null;
 /**
  * Default WorkOS client. Lazily instantiates the SDK on first use so test
  * environments that never call this never need the SDK installed.
+ *
+ * NOTE: The singleton cache is not keyed on apiKey. If the API key is
+ * rotated, the process must be restarted to pick up the new key.
  */
 export async function getDefaultWorkosClient(apiKey: string): Promise<WorkosClient> {
   if (cached) return cached;

@@ -16,7 +16,8 @@ export function createCoordinationRouter(db: Db, basePath = ""): Hono {
       return c.html(content);
     }
 
-    return c.html(layout("Coordination", content, basePath));
+    const user = c.get("user" as never) as { email?: string } | undefined;
+    return c.html(layout("Coordination", content, basePath, { userEmail: user?.email }));
   });
 
   // HTMX partial: active coordination feed (polled every 10s)

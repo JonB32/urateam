@@ -157,7 +157,7 @@ It is a pnpm monorepo with 3 packages:
 - Reader merges native rows + projected rows by `(timestamp DESC, id DESC)` and supports cursor-based SQL filtering on all 4 sources to avoid pagination truncation
 - Dashboard route: `/audit` (filter bar, HTMX pagination), `/audit/page` (partial), `/audit/export.csv` (streamed). All return 404 unless `isFeatureLicensed("audit-log")`. View: `packages/dashboard/src/views/audit.ts` — all user-controlled fields go through `escapeHtml`
 - Retention sweep runs in PM tick after `digest`, default 365 days, configurable via `auditLog.retentionDays`. Tick step is gated on `isFeatureLicensed("audit-log")`
-- **`config.loaded` event currently only fires from `ura run`** — `ura dev` / `ura start` (production paths) build config from env vars and have no file path to fingerprint. Follow-up to wire those when needed.
+- **`config.loaded` event fires from all CLI paths** — `ura run` fingerprints the config file; `ura dev` / `ura start` emit with `path: "(env-vars)"` and a hash of pipeline config keys.
 - `/audit/event/:id` HTMX detail expansion route is in the spec but deferred — table shows truncated payload inline
 
 ### SSO via WorkOS (Enterprise feature 4.1)
@@ -171,7 +171,7 @@ It is a pnpm monorepo with 3 packages:
 - Audit events: `dashboard.login`, `dashboard.logout`, `dashboard.login_denied` flow through the existing license-gated `logAuditEvent`
 - Retention: PM tick calls `pruneExpiredSessions` after `pruneAuditLog`, gated on the SSO feature
 - Setup doc: `deploy/SSO_SETUP.md`
-- **Sign Out link is currently only on the Audit page**; threading user context through `runs`/`tokens`/`errors`/`config` views is a follow-up
+- **Sign Out link** renders on all dashboard pages when SSO is active (user context threaded through all route handlers)
 - **Session id MUST NOT be logged** — they're credentials. The `touchSessionLastSeen` warn logs only `idPrefix: id.slice(0,8) + "…"`
 
 ### Org policy / guardrails (Enterprise feature 4.6)

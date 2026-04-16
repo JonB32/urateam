@@ -37,7 +37,8 @@ export function createErrorsRouter(db: Db, basePath = ""): Hono {
       .limit(50);
 
     const content = errorsView(stageFailures, errorPatterns);
-    return c.html(layout("Errors", content, basePath));
+    const user = c.get("user" as never) as { email?: string } | undefined;
+    return c.html(layout("Errors", content, basePath, { userEmail: user?.email }));
   });
 
   return router;
