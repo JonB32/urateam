@@ -4,9 +4,10 @@ import {
   isFeatureLicensed,
   listAuditEvents,
   streamAuditCsv,
+  findAuditEventById,
 } from "@urateam/core";
 import { layout } from "../views/layout.js";
-import { renderAuditPage, type AuditFilters } from "../views/audit.js";
+import { renderAuditPage, renderEventDetailRow, type AuditFilters } from "../views/audit.js";
 import { requirePermission } from "../middleware/rbac.js";
 
 function parseFilters(query: Record<string, string | undefined>): AuditFilters & {
@@ -92,6 +93,14 @@ export function createAuditRouter(db: Db, basePath = ""): Hono {
     const readerFilters = buildReaderFilters(query);
     const { events, nextCursor } = await listAuditEvents(db as any, readerFilters);
     return c.html(renderAuditPage({ events, nextCursor, filters, partial: true }));
+  });
+
+  // HTMX detail expansion for a single event (expands the full payload).
+  router.get("/audit/event/:id", requirePermission("audit.view"), async (c) => {
+    const id = c.req.param("id");
+    const event = await findAuditEventById(db as any, id);
+    if (!event) return c.html('<tr><td colspan="9" style="color:#c33;padding:0.5rem 1rem;">Event not found</td></tr>', 404);
+    return c.html(renderEventDetailRow(event));
   });
 
   router.get("/audit/export.csv", requirePermission("audit.export"), async (c) => {

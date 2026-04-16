@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createDb } from "../../db/client.js";
-import { auditEvents, pipelineRuns, pmApprovals, budgetAlerts } from "../../db/schema.js";
+import { pipelineRuns, pmApprovals, budgetAlerts } from "../../db/schema.js";
 import { logAuditEvent } from "../../audit/writer.js";
 import { pmPromotedEvent, budgetRefusedEvent } from "../../audit/events.js";
-import { listAuditEvents } from "../../audit/reader.js";
+import { listAuditEvents, findAuditEventById } from "../../audit/reader.js";
 import { installTestProLicense, restoreLicense } from "../helpers/license.js";
 
 let db: any;
@@ -73,6 +73,60 @@ describe("listAuditEvents", () => {
     const { events } = await listAuditEvents(db, { runId: "run_1", limit: 100 });
     expect(events.length).toBeGreaterThan(0);
     for (const e of events) expect(e.runId).toBe("run_1");
+  });
+
+  it("findAuditEventById finds native audit_events rows", async () => {
+    await seed();
+    const { events } = await listAuditEvents(db, { eventTypes: ["pm.issue_promoted"], limit: 10 });
+    expect(events.length).toBeGreaterThan(0);
+    const nativeId = events[0].id;
+    const found = await findAuditEventById(db, nativeId);
+    expect(found).not.toBeNull();
+    expect(found!.id).toBe(nativeId);
+    expect(found!.eventType).toBe("pm.issue_promoted");
+  });
+
+  it("findAuditEventById resolves projected pipeline_run events", async () => {
+    await seed();
+    const found = await findAuditEventById(db, "proj_run_started_run_1");
+    expect(found).not.toBeNull();
+    expect(found!.eventType).toBe("run.started");
+    expect(found!.runId).toBe("run_1");
+
+    const completed = await findAuditEventById(db, "proj_run_completed_run_1");
+    expect(completed).not.toBeNull();
+    expect(completed!.eventType).toBe("run.completed");
+  });
+
+  it("findAuditEventById resolves projected pm_approval events", async () => {
+    await db.insert(pmApprovals).values({
+      id: "appr_1", issueId: "BEC-2", action: "deprioritize", reason: "stale",
+      slackMessageTs: "1234.5678", status: "pending",
+      createdAt: new Date("2026-04-01T10:00:00Z"),
+      resolvedAt: null,
+    });
+    const found = await findAuditEventById(db, "proj_approval_requested_appr_1");
+    expect(found).not.toBeNull();
+    expect(found!.eventType).toBe("pm.approval_requested");
+  });
+
+  it("findAuditEventById resolves projected budget_alert events", async () => {
+    await db.insert(budgetAlerts).values({
+      id: "alert_1", date: "2026-04-01", scope: "team:T1", threshold: 80,
+      firedAt: new Date("2026-04-01T10:00:00Z"),
+    });
+    const found = await findAuditEventById(db, "proj_budget_alert_alert_1");
+    expect(found).not.toBeNull();
+    expect(found!.eventType).toBe("budget.alert_fired");
+    expect(found!.scope).toBe("team:T1");
+  });
+
+  it("findAuditEventById returns null for missing events", async () => {
+    await seed();
+    expect(await findAuditEventById(db, "nonexistent")).toBeNull();
+    expect(await findAuditEventById(db, "proj_run_started_missing")).toBeNull();
+    expect(await findAuditEventById(db, "proj_approval_requested_missing")).toBeNull();
+    expect(await findAuditEventById(db, "proj_budget_alert_missing")).toBeNull();
   });
 
   it("paginates via cursor", async () => {

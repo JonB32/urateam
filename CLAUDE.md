@@ -158,7 +158,7 @@ It is a pnpm monorepo with 3 packages:
 - Dashboard route: `/audit` (filter bar, HTMX pagination), `/audit/page` (partial), `/audit/export.csv` (streamed). All return 404 unless `isFeatureLicensed("audit-log")`. View: `packages/dashboard/src/views/audit.ts` — all user-controlled fields go through `escapeHtml`
 - Retention sweep runs in PM tick after `digest`, default 365 days, configurable via `auditLog.retentionDays`. Tick step is gated on `isFeatureLicensed("audit-log")`
 - **`config.loaded` event fires from all CLI paths** — `ura run` fingerprints the config file; `ura dev` / `ura start` emit with `path: "(env-vars)"` and a hash of pipeline config keys.
-- `/audit/event/:id` HTMX detail expansion route is in the spec but deferred — table shows truncated payload inline
+- `/audit/event/:id` HTMX detail expansion: each row has a `+` button that hx-gets this route; server resolves the ID (native audit_events or projected `proj_*` synthetic IDs) via `findAuditEventById()` and returns a detail `<tr>` with the full formatted payload. Projected ID prefixes routed to source tables: `proj_run_*_<runId>` → pipeline_runs, `proj_approval_*_<approvalId>` → pm_approvals, `proj_budget_alert_<alertId>` → budget_alerts.
 
 ### SSO via WorkOS (Enterprise feature 4.1)
 - Module: `packages/core/src/auth/` — `sso-config.ts` (zod schema, `signState`/`verifyState`/`validateNextPath` HMAC helpers), `user-store.ts` (`upsertUser` via atomic `onConflictDoUpdate`, `getUserById`), `session-store.ts` (`createSession`, `getSession`, `deleteSession`, `pruneExpiredSessions`, `touchSessionLastSeen`), `workos-client.ts` (DI seam over `@workos-inc/node`)
