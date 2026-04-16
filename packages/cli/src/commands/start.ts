@@ -158,6 +158,16 @@ export const startCommand = new Command("start")
     // --- Start servers ---
     const { app, runner, db } = await createApp(config);
 
+    try {
+      const { checkLicense, logAuditEvent, configLoadedEvent } = await import("@urateam/core");
+      const { createHash } = await import("node:crypto");
+      const status = checkLicense(db);
+      const sha = createHash("sha256").update(JSON.stringify(config.pipelineConfigs, null, 0)).digest("hex");
+      void logAuditEvent(db, configLoadedEvent({ path: "(env-vars)", sha256: sha, tier: status.tier }));
+    } catch {
+      // audit must never crash startup
+    }
+
     // --- Recover runs interrupted by a previous restart ---
     await runner.recoverStuckRuns();
     const port = parseInt(process.env.PORT ?? options.port, 10);

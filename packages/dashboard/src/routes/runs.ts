@@ -65,7 +65,8 @@ export function createRunsRouter(
       return c.html(content);
     }
 
-    return c.html(layout("Pipeline Runs", content, effectiveBasePath));
+    const user = c.get("user" as never) as { email?: string } | undefined;
+    return c.html(layout("Pipeline Runs", content, effectiveBasePath, { userEmail: user?.email }));
   });
 
   // HTMX partial: feed of latest pipeline runs (polled every 5s)
@@ -83,6 +84,9 @@ export function createRunsRouter(
     const id = c.req.param("id");
     const page = Math.max(1, parseInt(c.req.query("page") || "1", 10));
     const logsPerPage = 50;
+    const user = c.get("user" as never) as
+      | { id: string; email: string; role?: Role }
+      | undefined;
 
     const [run] = await d
       .select()
@@ -91,7 +95,7 @@ export function createRunsRouter(
       .limit(1) as (RunInfo | undefined)[];
 
     if (!run) {
-      return c.html(layout("Not Found", "<p>Run not found</p>", effectiveBasePath), 404);
+      return c.html(layout("Not Found", "<p>Run not found</p>", effectiveBasePath, { userEmail: user?.email }), 404);
     }
 
     const stages = await d
@@ -123,14 +127,11 @@ export function createRunsRouter(
         .offset(offset) as LogEntry[];
     }
 
-    const user = c.get("user" as never) as
-      | { id: string; email: string; role?: Role }
-      | undefined;
     const canRetry = isFeatureLicensed("rbac")
       ? canAccess((user?.role ?? "viewer") as Role, "runs.retry")
       : true;
     const content = runDetailView(run, stages, logs, page, totalLogs, canRetry);
-    return c.html(layout(`Run ${id}`, content, effectiveBasePath));
+    return c.html(layout(`Run ${id}`, content, effectiveBasePath, { userEmail: user?.email }));
   });
 
   router.post(

@@ -48,4 +48,34 @@ describe("audit_events immutability", () => {
       `Unauthorized audit_events mutation in:\n${offenders.join("\n")}`,
     ).toEqual([]);
   });
+
+  it("logAuditEventUnchecked is only called from license.ts", () => {
+    const repoRoot = path.resolve(__dirname, "../../../..");
+    const allowed = [
+      "packages/core/src/audit/writer.ts",
+      "packages/core/src/license.ts",
+      "packages/core/src/__tests__/audit-immutability.test.ts",
+    ];
+
+    let matches: string[] = [];
+    try {
+      const out = execFileSync(
+        "git",
+        ["grep", "-nE", "logAuditEventUnchecked", "--", "packages/**/*.ts"],
+        { cwd: repoRoot, encoding: "utf8" },
+      );
+      matches = out.trim().split("\n").filter(Boolean);
+    } catch {
+      // no matches
+    }
+
+    const offenders = matches
+      .map((line) => line.split(":")[0]!)
+      .filter((file) => !allowed.some((a) => file.endsWith(a) || file === a));
+
+    expect(
+      offenders,
+      `Unauthorized logAuditEventUnchecked usage in:\n${offenders.join("\n")}`,
+    ).toEqual([]);
+  });
 });

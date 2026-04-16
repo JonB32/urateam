@@ -106,21 +106,27 @@ export async function listAuditEvents(
     .limit(limit * 4);
 
   // Projected: pm_approvals (filter by createdAt)
-  const apprConditions: any[] = [];
-  if (filters.from) apprConditions.push(gte(pmApprovals.createdAt, filters.from));
-  if (filters.to) apprConditions.push(lte(pmApprovals.createdAt, filters.to));
-  if (cursorTs) apprConditions.push(lte(pmApprovals.createdAt, cursorTs));
-  const apprRows = await (db as any)
-    .select()
-    .from(pmApprovals)
-    .where(apprConditions.length ? and(...apprConditions) : undefined)
-    .orderBy(desc(pmApprovals.createdAt))
-    .limit(limit * 4);
+  // Projected pm_approvals always have scope=null, so skip the query entirely
+  // when a scope filter is set — avoids an unbounded fetch.
+  let apprRows: any[] = [];
+  if (!filters.scope) {
+    const apprConditions: any[] = [];
+    if (filters.from) apprConditions.push(gte(pmApprovals.createdAt, filters.from));
+    if (filters.to) apprConditions.push(lte(pmApprovals.createdAt, filters.to));
+    if (cursorTs) apprConditions.push(lte(pmApprovals.createdAt, cursorTs));
+    apprRows = await (db as any)
+      .select()
+      .from(pmApprovals)
+      .where(apprConditions.length ? and(...apprConditions) : undefined)
+      .orderBy(desc(pmApprovals.createdAt))
+      .limit(limit * 4);
+  }
 
   // Projected: budget_alerts (filter by firedAt)
   const alertConditions: any[] = [];
   if (filters.from) alertConditions.push(gte(budgetAlerts.firedAt, filters.from));
   if (filters.to) alertConditions.push(lte(budgetAlerts.firedAt, filters.to));
+  if (filters.scope) alertConditions.push(eq(budgetAlerts.scope, filters.scope));
   if (cursorTs) alertConditions.push(lte(budgetAlerts.firedAt, cursorTs));
   const alertRows = await (db as any)
     .select()

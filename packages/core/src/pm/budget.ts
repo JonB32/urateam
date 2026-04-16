@@ -112,12 +112,14 @@ export async function evaluateBudget(
   scopes.push(makeScope({ kind: "global" }, globalUsed, globalLimit));
 
   for (const [teamId, used] of teamUsed) {
-    const limit = config.budgets?.perTeam?.[teamId] ?? defaultLimit;
+    const perTeam = config.budgets?.perTeam;
+    const limit = (perTeam && Object.hasOwn(perTeam, teamId)) ? perTeam[teamId] : defaultLimit;
     scopes.push(makeScope({ kind: "team", teamId }, used, limit));
   }
 
   for (const [repoUrl, used] of repoUsed) {
-    const limit = config.budgets?.perRepo?.[repoUrl] ?? defaultLimit;
+    const perRepo = config.budgets?.perRepo;
+    const limit = (perRepo && Object.hasOwn(perRepo, repoUrl)) ? perRepo[repoUrl] : defaultLimit;
     scopes.push(makeScope({ kind: "repo", repoUrl }, used, limit));
   }
 

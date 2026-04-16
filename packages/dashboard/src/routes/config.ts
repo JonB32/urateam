@@ -13,7 +13,8 @@ export function createConfigRouter(
 
   router.get("/config", requirePermission("config.view"), (c) => {
     const content = configView(pipelineConfigs, repoConfigs);
-    return c.html(layout("Configuration", content, basePath));
+    const user = c.get("user" as never) as { email?: string } | undefined;
+    return c.html(layout("Configuration", content, basePath, { userEmail: user?.email }));
   });
 
   return router;
