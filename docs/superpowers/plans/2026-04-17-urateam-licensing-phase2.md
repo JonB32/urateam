@@ -38,13 +38,17 @@ urateam-licensing/                        (new private GitHub repo)
 │   ├── test/
 │   │   ├── jwt.test.ts
 │   │   ├── stripe-webhook.test.ts
+│   │   ├── checkout-completed.test.ts  # webhook handler: JWT mint + KV write
+│   │   ├── invoice-paid.test.ts        # renewal handler
+│   │   ├── subscription-deleted.test.ts # lapse handler
 │   │   ├── magic-link.test.ts
 │   │   ├── email-templates.test.ts
-│   │   ├── checkout.test.ts
-│   │   ├── recover.test.ts
+│   │   ├── checkout.test.ts            # POST /checkout route
+│   │   ├── recover-post.test.ts        # POST /recover
+│   │   ├── recover-get.test.ts         # GET /recover/:token
 │   │   ├── admin.test.ts
 │   │   ├── scheduled.test.ts
-│   │   └── setup.ts                 # test keypair + Miniflare KV harness
+│   │   └── setup.ts                    # test keypair + Miniflare KV harness
 │   ├── wrangler.toml
 │   ├── vitest.config.ts
 │   ├── tsconfig.json
@@ -1852,15 +1856,15 @@ describe("magic-link", () => {
 ```ts
 const TTL_SECONDS = 15 * 60;
 
-function hexEncode(buf: ArrayBuffer): string {
-  return Array.from(new Uint8Array(buf), b => b.toString(16).padStart(2, "0")).join("");
+function hexEncode(bytes: Uint8Array): string {
+  return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
 }
 
 async function hmacHex(secretHex: string, data: string): Promise<string> {
   const keyBytes = new Uint8Array(secretHex.match(/.{2}/g)!.map(b => parseInt(b, 16)));
   const key = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
-  return hexEncode(sig);
+  return hexEncode(new Uint8Array(sig));
 }
 
 export async function mintMagicLink(
@@ -1869,7 +1873,10 @@ export async function mintMagicLink(
   customerId: string,
 ): Promise<{ token: string }> {
   const rand = crypto.getRandomValues(new Uint8Array(32));
-  const raw = hexEncode(rand.buffer);
+  // Pass the Uint8Array directly. DO NOT use rand.buffer: in some runtimes the
+  // backing ArrayBuffer can be larger than the view's byteLength, which would
+  // silently leak unrequested bytes into the token and break HMAC verification.
+  const raw = hexEncode(rand);
   const mac = await hmacHex(hmacSecretHex, raw);
   const token = `${raw}.${mac.slice(0, 16)}`;
   await kv.put(raw, JSON.stringify({ customerId }), { expirationTtl: TTL_SECONDS });
@@ -2510,10 +2517,12 @@ Invoke `review` skill. Land fixes. Merge. **Phase 2 complete.**
 
 ## Post-implementation follow-ups (tracked as GitHub issues on urateam-licensing)
 
-- Upgrade `/admin/audit` from `plain:` SHA-256 to argon2 via WebCrypto
+- Upgrade `/admin/audit` from `plain:` to argon2 via WebCrypto
 - Add welcome/renewal-email retry queue via Cloudflare Queues
 - Add annual pricing (second Stripe price id, cadence hint in metadata)
 - Add React Email templates (replace hand-rolled HTML)
 - Axiom/Logtail log forwarding
 - Add tests for KV list pagination in the cron sweep (>1000 customers)
 - Cross-repo PR on urateam itself: multi-key verify in `@urateam/core/license.ts` before first signing-key rotation
+- **Replace Tailwind CDN (`https://cdn.tailwindcss.com`) with a local build** for `pages/pricing.html` and the recover success page. The CDN script is intended for dev/prototyping, requires a permissive script-src CSP, and introduces a third-party runtime dependency. Fine for v1 launch; not for scale.
+- **Bump Stripe SDK `apiVersion`** (currently pinned to `"2024-06-20"`) to the newest GA version before Task 17 live smoke test and again whenever the SDK rev ships a deprecation notice.

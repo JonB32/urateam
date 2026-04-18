@@ -105,7 +105,7 @@ Scheduled handler: daily cron at 06:00 UTC scans `LICENSES` for keys expiring �
   ```
   No TTL. Cleared manually if/when a customer requests deletion.
 
-- **`MAGIC_LINKS`** — key: 32-byte hex token. Value: `{ customerId, expiresAt }`. TTL 900s via KV native expiration. Deleted on first use.
+- **`MAGIC_LINKS`** — key: 32-byte hex token. Value: `{ customerId }`. TTL 900s via KV native expiration (`expirationTtl: 900` at write time; no redundant `expiresAt` field inside the value). Deleted on first use.
 
 - **`AUDIT`** — key: `{customerId}:{ts-micros}`. Value: `{ action, ip, userAgent }` where action ∈ `issued | renewed | recovered | lapsed | portal-opened`. TTL 1 year.
 
@@ -116,7 +116,7 @@ Scheduled handler: daily cron at 06:00 UTC scans `LICENSES` for keys expiring �
 - `STRIPE_WEBHOOK_SECRET` — for verifying `POST /stripe/webhook` signatures.
 - `RESEND_API_KEY` — Resend transactional email.
 - `MAGIC_LINK_HMAC_SECRET` — signs magic-link tokens to prevent forgery.
-- `ADMIN_BASIC_AUTH` — `user:bcrypt-hash` for the `/admin/audit` route.
+- `ADMIN_BASIC_AUTH` — `plain:<user>:<password>` for the `/admin/audit` route at MVP. Workers lack native bcrypt; upgrading to argon2/scrypt via WebCrypto is a post-launch follow-up (see `docs/OPERATIONS.md`). Use a long random password (e.g. `openssl rand -base64 32`).
 
 ### 2.6 JWT shape (unchanged from tier design spec § 5.2)
 
@@ -183,7 +183,7 @@ This honor-system behavior is intentional per the strategy spec: revocation arri
 
 The portal URL is embedded directly in the recover success page. There is no separate `/portal` Worker route — Stripe handles the rest of the billing UX once the user clicks through. If the user sits on the page long enough for the portal session to expire, clicking the link surfaces Stripe's "session expired" page and they can re-run `/recover`.
 
-### 3.6 A note on identity
+### 3.5 A note on identity
 
 The `organization` custom field lives in Stripe customer metadata, not in the JWT. The JWT's `sub` is `cus_xxx` only. Organization name is for support and invoicing context.
 
@@ -191,14 +191,14 @@ The `organization` custom field lives in Stripe customer metadata, not in the JW
 
 ### 4.1 Stripe webhook validation
 
-Every `POST /stripe/webhook` request verifies via `stripe.webhooks.constructEvent(rawBody, sigHeader, STRIPE_WEBHOOK_SECRET)`. Signature failure returns 400 with no body; Stripe retries. The payload is never trusted before verification.
+Every `POST /stripe/webhook` request verifies via `stripe.webhooks.constructEventAsync(rawBody, sigHeader, STRIPE_WEBHOOK_SECRET)`. The **async** variant is required because Cloudflare Workers use WebCrypto, and the Stripe SDK's sync `constructEvent` uses `node:crypto` which is unavailable. Signature failure returns 400 with no body; Stripe retries. The payload is never trusted before verification.
 
 `checkout.session.completed` wraps mint+email in try/catch. If Resend throws, the handler still returns 200 to Stripe (the key is in KV, customer can recover it) and logs the failure. **Never return 5xx after a successful mint** — that triggers Stripe retry and spuriously fires the idempotency guard.
 
 ### 4.2 Resend failures
 
-- **Welcome email retry**: on Resend 5xx, enqueue to a Cloudflare Queue (or a simpler KV-backed retry list the cron drains). Three retries with 5 min / 1 hr / 6 hr backoff.
-- **Renewal email failure**: the cron sees the key still un-renewed on the next daily run and retries. The user's existing key still works.
+- **Welcome email at MVP**: on Resend failure, the handler logs `welcome_email_failed` and returns 200 to Stripe anyway (the JWT is in KV). The customer can self-recover via `/recover`. A retry queue (Cloudflare Queues, 3 attempts, 5 min / 1 hr / 6 hr backoff) is a **post-launch follow-up** — not implemented at v1.
+- **Renewal email failure**: tolerated at v1 — the customer's existing key still works until `expiresAt`, and a second dispatch attempt rides on the next day's cron sweep if the new key's `expiresAt` is still ≤30 days out. After re-mint, the new key has ~13 months `exp`, so a failed renewal email is effectively a silent drop until next year's cron — documented in `OPERATIONS.md` as a known MVP limitation, same Queues-based fix planned.
 - **Magic-link email failure**: return 500 to the user with "couldn't send, try again in a minute". No retry queue — the user will re-click.
 
 ### 4.3 KV consistency
