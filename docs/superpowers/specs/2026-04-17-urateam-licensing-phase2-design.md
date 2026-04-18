@@ -31,9 +31,9 @@ This is an implementation spec. It follows the meta-spec's strategy decisions (o
 
 ### 2.1 Deployment topology
 
-One Cloudflare Worker at `billing.urateam.dev`, plus a static pricing page at `urateam.dev/pricing` served from Cloudflare Pages. Both deploy from the same monorepo. The pricing page is ~40 lines of HTML + Tailwind via CDN, no build step.
+One Cloudflare Worker at `billing.urateams.com`, plus a static pricing page at `urateams.com/pricing` served from Cloudflare Pages. Both deploy from the same monorepo. The pricing page is ~40 lines of HTML + Tailwind via CDN, no build step.
 
-**Marketing domain**: `urateam.dev` does not currently host a pricing page. Phase 2 scope includes a minimal one-page `/pricing` route. Full marketing site build-out is out of scope.
+**Marketing domain**: `urateams.com` does not currently host a pricing page. Phase 2 scope includes a minimal one-page `/pricing` route. Full marketing site build-out is out of scope.
 
 ### 2.2 Repo structure
 
@@ -63,8 +63,8 @@ urateam-licensing/                        (private GitHub repo)
 │   ├── vitest.config.ts
 │   └── package.json
 ├── pages/
-│   ├── index.html                # urateam.dev landing (minimal)
-│   └── pricing.html              # urateam.dev/pricing
+│   ├── index.html                # urateams.com landing (minimal)
+│   └── pricing.html              # urateams.com/pricing
 ├── .github/workflows/
 │   ├── ci.yml                    # lint + test + dry-run deploy on PR
 │   └── deploy.yml                # prod deploy on main
@@ -122,7 +122,7 @@ Scheduled handler: daily cron at 06:00 UTC scans `LICENSES` for keys expiring �
 
 ```jsonc
 {
-  "iss": "urateam.dev",
+  "iss": "urateams.com",
   "sub": "cus_xxx",           // Stripe customer id
   "tier": "pro",
   "seats": 25,                // informational; not enforced in v1
@@ -133,12 +133,14 @@ Scheduled handler: daily cron at 06:00 UTC scans `LICENSES` for keys expiring �
 
 Signature: EdDSA / Ed25519. Public key is the same one already embedded in `@urateam/core`.
 
+**Cross-repo coordination**: `packages/core/src/license.ts` in the urateam repo currently has `const ISSUER = "urateam.dev"`. Phase 2 changes the canonical domain to `urateams.com`. A companion PR in the urateam repo is a prerequisite to Phase 2 deployment — it must merge and release before the billing Worker starts minting JWTs with `iss: "urateams.com"`. Since no paying customers exist at Phase 2 launch, this is a clean cutover with no back-compat burden.
+
 ## 3. Data flow
 
 ### 3.1 First-time purchase
 
-1. Visitor lands on `urateam.dev/pricing`, clicks **Buy Pro**.
-2. Browser `POST`s to `billing.urateam.dev/checkout`.
+1. Visitor lands on `urateams.com/pricing`, clicks **Buy Pro**.
+2. Browser `POST`s to `billing.urateams.com/checkout`.
 3. Worker calls `stripe.checkout.sessions.create` with: `mode: "subscription"`, the monthly Pro price id (read from Workers env var `STRIPE_PRO_PRICE_ID`), `customer_email` if provided, `custom_fields: [{ key: "organization", label: "Organization name", type: "text" }]`, and a freshly generated `client_reference_id` UUID.
 4. Browser follows the 303 redirect to Stripe's hosted checkout. User pays.
 5. Stripe fires `checkout.session.completed` → Worker verifies signature and extracts `customer`, `subscription`, `custom_fields.organization`, `customer_email`.
@@ -148,7 +150,7 @@ Signature: EdDSA / Ed25519. Public key is the same one already embedded in `@ura
 9. Sends welcome email via Resend: JWT in code block, `.jwt` file attachment, env-var instructions.
 10. Appends `AUDIT[customerId:ts] = { action: "issued", ... }`.
 11. Returns 200 to Stripe.
-12. Stripe's success URL → `urateam.dev/thanks?session_id={CHECKOUT_SESSION_ID}` renders "Check your email — sent to ops@acme.com."
+12. Stripe's success URL → `urateams.com/thanks?session_id={CHECKOUT_SESSION_ID}` renders "Check your email — sent to ops@acme.com."
 
 ### 3.2 Monthly renewal (happy path)
 
@@ -164,18 +166,18 @@ Separately, the **daily cron handler** scans `LICENSES` for keys where `expiresA
 
 1. Stripe's smart_retries attempts payment for ~3 weeks. No Worker action during retries (Stripe handles the customer dunning emails).
 2. If all retries exhaust, Stripe fires `customer.subscription.deleted`.
-3. Worker reads `LICENSES[customerId]`, sends lapsed email with the current key's expiry date and a link to `billing.urateam.dev/recover` to resubscribe. Does **not** invalidate the current JWT.
+3. Worker reads `LICENSES[customerId]`, sends lapsed email with the current key's expiry date and a link to `billing.urateams.com/recover` to resubscribe. Does **not** invalidate the current JWT.
 4. Appends `AUDIT` entry with `action: "lapsed"`.
 
 This honor-system behavior is intentional per the strategy spec: revocation arrives with Phase 3 telemetry.
 
 ### 3.4 Lost key recovery
 
-1. User visits `billing.urateam.dev/recover`, enters email.
+1. User visits `billing.urateams.com/recover`, enters email.
 2. Worker calls `stripe.customers.list({ email })`. If zero matches, returns a generic "if an account exists, we've sent a link" response (prevents email enumeration).
 3. If matched, generates token `t = random(32)`, HMAC-signs with `MAGIC_LINK_HMAC_SECRET`, writes `MAGIC_LINKS[t] = { customerId, expiresAt: now + 900 }` with KV TTL 900.
-4. Sends recover email: `billing.urateam.dev/recover/{t}`.
-5. `GET /recover/:token`: verify HMAC → look up in `MAGIC_LINKS` (410 if absent / expired) → read `LICENSES[customerId]` → **pre-generate a Stripe Billing Portal URL** via `stripe.billingPortal.sessions.create({ customer, return_url: "billing.urateam.dev/thanks" })` → render page with JWT in a code block, `.jwt` file download, and a **Manage billing** link pointing at the pre-generated portal URL.
+4. Sends recover email: `billing.urateams.com/recover/{t}`.
+5. `GET /recover/:token`: verify HMAC → look up in `MAGIC_LINKS` (410 if absent / expired) → read `LICENSES[customerId]` → **pre-generate a Stripe Billing Portal URL** via `stripe.billingPortal.sessions.create({ customer, return_url: "billing.urateams.com/thanks" })` → render page with JWT in a code block, `.jwt` file download, and a **Manage billing** link pointing at the pre-generated portal URL.
 6. **Delete** `MAGIC_LINKS[t]` after render (single-use).
 7. Append `AUDIT` entries: `action: "recovered"` and `action: "portal-opened"`.
 
@@ -270,7 +272,7 @@ Single workflow on every PR: lint → typecheck → unit tests → integration t
 
 ### 5.5 Deploy & smoke test
 
-`deploy.yml` on push to `main` runs `wrangler deploy` and then `curl billing.urateam.dev/health`. First real-world test: one $1 test product, assert welcome email arrives. No automated end-to-end "real purchase" test in prod.
+`deploy.yml` on push to `main` runs `wrangler deploy` and then `curl billing.urateams.com/health`. First real-world test: one $1 test product, assert welcome email arrives. No automated end-to-end "real purchase" test in prod.
 
 ### 5.6 Coverage targets
 
@@ -288,10 +290,10 @@ Enforced in CI:
 
 This spec covers a single service. Build order within the `urateam-licensing` repo:
 
-1. **Scaffold** (day 1) — Wrangler project, KV namespaces, secrets wired, `GET /health` live at `billing.urateam.dev`. Empty pricing page deployed to Cloudflare Pages.
+1. **Scaffold** (day 1) — Wrangler project, KV namespaces, secrets wired, `GET /health` live at `billing.urateams.com`. Empty pricing page deployed to Cloudflare Pages.
 2. **JWT minter + Stripe webhook happy path** (days 2–3) — `/stripe/webhook` handles `checkout.session.completed`, mints JWT, writes KV. Unit + integration tests. No email yet.
 3. **Resend wiring + welcome email** (day 4) — welcome template, Resend client, end-to-end with Stripe CLI test mode.
-4. **Checkout endpoint + pricing page** (day 5) — `POST /checkout` + Buy Pro button on `urateam.dev/pricing`. First stranger-can-buy-Pro milestone.
+4. **Checkout endpoint + pricing page** (day 5) — `POST /checkout` + Buy Pro button on `urateams.com/pricing`. First stranger-can-buy-Pro milestone.
 5. **Renewals: `invoice.paid` + daily cron** (days 6–7) — re-mint logic, renewal email, scheduled handler.
 6. **Lapse handling: `customer.subscription.deleted`** (day 8) — lapsed email, audit entry.
 7. **Recovery flow + magic links** (days 9–10) — `/recover` POST + GET, magic-link generation/verification, recover email template, single-use KV.
@@ -307,7 +309,7 @@ Deferred to build-time or to go-to-market work, not blockers:
 
 - **Pro price point in dollars** — GTM decision. The Stripe price id is the only code dependency; can be swapped post-launch via Wrangler secret update.
 - **Annual plan** — add post-launch. Requires a second price id and a `plan` hint in the Stripe metadata so renewal cadence logic knows whether to compare to 12-month or 1-month cycles.
-- **`urateam.dev` marketing site beyond `/pricing`** — out of scope; adding a richer landing page is a separate project.
+- **`urateams.com` marketing site beyond `/pricing`** — out of scope; adding a richer landing page is a separate project.
 - **Receipts / tax handling** — Stripe Checkout handles receipts automatically and Stripe Tax can be enabled later without code changes.
 
 ## 8. Out of scope (explicitly deferred)

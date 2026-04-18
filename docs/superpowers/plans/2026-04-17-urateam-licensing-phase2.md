@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Stand up the standalone `urateam-licensing` service — a Cloudflare Worker at `billing.urateam.dev` that mints, emails, and re-delivers Pro-tier license JWTs in response to Stripe subscription events, with a minimal static pricing page at `urateam.dev/pricing`.
+**Goal:** Stand up the standalone `urateam-licensing` service — a Cloudflare Worker at `billing.urateams.com` that mints, emails, and re-delivers Pro-tier license JWTs in response to Stripe subscription events, with a minimal static pricing page at `urateams.com/pricing`.
 
 **Architecture:** Single Cloudflare Worker + Cloudflare Pages (both deployed from the same private GitHub repo), three KV namespaces (`LICENSES`, `MAGIC_LINKS`, `AUDIT`), offline Ed25519 JWT signing. Spec: `docs/superpowers/specs/2026-04-17-urateam-licensing-phase2-design.md`.
 
@@ -71,16 +71,98 @@ urateam-licensing/                        (new private GitHub repo)
 
 ## PR grouping
 
-| PR | Tasks | Outcome |
-|---|---|---|
-| **PR 1 — Bootstrap** | 0 | Repo + Wrangler + /health + CI + Pages scaffold |
-| **PR 2 — JWT + webhook happy path** | 1–4 | `checkout.session.completed` mints a JWT, writes KV, idempotent |
-| **PR 3 — Email + checkout + pricing page** | 5–8 | Stranger can buy Pro and receive a working key |
-| **PR 4 — Renewals + lapse** | 9–11 | Monthly renewal, 14-day-out cron, lapsed email |
-| **PR 5 — Recovery + portal** | 12–14 | Lost-key flow + Stripe Customer Portal integration |
-| **PR 6 — Admin + docs + smoke test** | 15–17 | `/admin/audit`, operations docs, first real-world $1 test |
+| PR | Repo | Tasks | Outcome |
+|---|---|---|---|
+| **PR 0 — Issuer cutover** | urateam | -1 | `ISSUER = "urateams.com"` in `packages/core/src/license.ts`; test + release. Prerequisite for minting real JWTs. |
+| **PR 1 — Bootstrap** | urateam-licensing | 0 | Repo + Wrangler + /health + CI + Pages scaffold |
+| **PR 2 — JWT + webhook happy path** | urateam-licensing | 1–4 | `checkout.session.completed` mints a JWT, writes KV, idempotent |
+| **PR 3 — Email + checkout + pricing page** | urateam-licensing | 5–8 | Stranger can buy Pro and receive a working key |
+| **PR 4 — Renewals + lapse** | urateam-licensing | 9–11 | Monthly renewal, 14-day-out cron, lapsed email |
+| **PR 5 — Recovery + portal** | urateam-licensing | 12–14 | Lost-key flow + Stripe Customer Portal integration |
+| **PR 6 — Admin + docs + smoke test** | urateam-licensing | 15–17 | `/admin/audit`, operations docs, first real-world $1 test |
 
 Per-PR workflow (proven in Phase 1): branch from `main` → build + test locally → push → open PR → invoke `review` skill with Sonnet subagent → land review fixes → merge.
+
+---
+
+## Task -1: ISSUER cutover in urateam repo (prerequisite)
+
+**Purpose:** Change the JWT-verifier's expected issuer from `"urateam.dev"` to `"urateams.com"` so licenses minted by Phase 2 Worker will validate against `@urateam/core` in customer installations. Must merge and release **before** Task 0 wires up real Stripe traffic.
+
+**Repo:** urateam (the current monorepo).
+
+**Files:**
+- Modify: `packages/core/src/license.ts:149`
+- Modify: `packages/core/src/__tests__/license.test.ts` (or wherever license tests live — check)
+
+- [ ] **Step 1: Create worktree + branch from main**
+
+```bash
+cd /private/tmp/urateam
+git worktree add .worktrees/issuer-cutover -b chore/issuer-urateams-com main
+cd .worktrees/issuer-cutover
+pnpm install
+```
+
+- [ ] **Step 2: Check where the existing license tests live**
+
+```bash
+grep -rn "urateam\.dev" packages/core/src/
+```
+Expect: `packages/core/src/license.ts:149: const ISSUER = "urateam.dev";` plus any hardcoded test fixtures.
+
+- [ ] **Step 3: Change ISSUER constant**
+
+In `packages/core/src/license.ts`:
+```ts
+const ISSUER = "urateams.com";
+```
+
+- [ ] **Step 4: Update any test fixtures**
+
+Any test JWT fixtures that hardcode `"iss": "urateam.dev"` get flipped to `"urateams.com"`.
+
+- [ ] **Step 5: Run tests**
+
+```bash
+cd packages/core && npx vitest run
+```
+Expected: all pass. If any fail, they either reference the old issuer string (update them) or depend on a feature unrelated to license verification (real bug — investigate).
+
+- [ ] **Step 6: Build**
+
+```bash
+cd /private/tmp/urateam/.worktrees/issuer-cutover
+pnpm build
+```
+
+- [ ] **Step 7: Commit, push, PR**
+
+```bash
+git add packages/core/src/license.ts packages/core/src/__tests__
+git commit -m "chore: rename license issuer from urateam.dev to urateams.com
+
+Phase 2 billing Worker mints JWTs with iss=urateams.com to match
+the canonical commercial domain. No paying Pro customers exist yet,
+so this is a clean cutover without back-compat shims."
+git push -u origin chore/issuer-urateams-com
+gh pr create --title "chore: rename license issuer to urateams.com" --body "Prereq for Phase 2 billing Worker. Flips the JWT ISSUER constant so @urateam/core can verify licenses minted by the upcoming billing service."
+```
+
+- [ ] **Step 8: Invoke `review` skill with Sonnet subagent, land fixes, merge**
+
+- [ ] **Step 9: Publish a new `@urateam/core` release with the updated ISSUER**
+
+(If the repo has a release workflow, kick it off. Otherwise, bump the version in `packages/core/package.json`, `pnpm build`, and publish.)
+
+- [ ] **Step 10: Remove the worktree**
+
+```bash
+cd /private/tmp/urateam
+git worktree remove .worktrees/issuer-cutover
+```
+
+---
 
 ---
 
@@ -223,8 +305,8 @@ STRIPE_PRO_PRICE_ID = "price_REPLACE_IN_CF_DASHBOARD"
 #   RESEND_API_KEY, MAGIC_LINK_HMAC_SECRET, ADMIN_BASIC_AUTH
 
 [[routes]]
-pattern = "billing.urateam.dev/*"
-zone_name = "urateam.dev"
+pattern = "billing.urateams.com/*"
+zone_name = "urateams.com"
 ```
 
 - [ ] **Step 6: `worker/.dev.vars.example`**
@@ -309,7 +391,7 @@ describe("router", () => {
   it("returns ok on GET /health", async () => {
     const env = {} as any;
     const ctx = {} as any;
-    const res = await worker.fetch(new Request("https://billing.urateam.dev/health"), env, ctx);
+    const res = await worker.fetch(new Request("https://billing.urateams.com/health"), env, ctx);
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
   });
@@ -317,7 +399,7 @@ describe("router", () => {
   it("returns 404 for unknown paths", async () => {
     const env = {} as any;
     const ctx = {} as any;
-    const res = await worker.fetch(new Request("https://billing.urateam.dev/nope"), env, ctx);
+    const res = await worker.fetch(new Request("https://billing.urateams.com/nope"), env, ctx);
     expect(res.status).toBe(404);
   });
 });
@@ -400,7 +482,7 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           workingDirectory: worker
       - name: Smoke test
-        run: curl --fail --retry 3 --retry-delay 5 https://billing.urateam.dev/health
+        run: curl --fail --retry 3 --retry-delay 5 https://billing.urateams.com/health
 
   deploy-pages:
     runs-on: ubuntu-latest
@@ -456,7 +538,7 @@ git push -u origin main
 ```
 (Operator pushes directly to main for the bootstrap commit since there's no prior main to branch from; subsequent PRs branch from main as normal.)
 
-Deploy workflow runs, `GET https://billing.urateam.dev/health` returns `ok`. Smoke test green. Bootstrap complete.
+Deploy workflow runs, `GET https://billing.urateams.com/health` returns `ok`. Smoke test green. Bootstrap complete.
 
 ---
 
@@ -490,7 +572,7 @@ describe("jwt", () => {
     expect(claims.sub).toBe("cus_123");
     expect(claims.tier).toBe("pro");
     expect(claims.seats).toBe(25);
-    expect(claims.iss).toBe("urateam.dev");
+    expect(claims.iss).toBe("urateams.com");
     expect(claims.exp).toBeGreaterThan(Date.now() / 1000);
   });
 
@@ -560,7 +642,7 @@ export async function signLicense(
   opts: SignOptions = {},
 ): Promise<string> {
   const key = await importPKCS8(privatePem, "EdDSA");
-  const iss = opts.iss ?? "urateam.dev";
+  const iss = opts.iss ?? "urateams.com";
   const now = Math.floor(Date.now() / 1000);
   const exp = now + (opts.expSecondsFromNow ?? THIRTEEN_MONTHS_SEC);
   return await new SignJWT({ tier: input.tier, seats: input.seats })
@@ -574,7 +656,7 @@ export async function signLicense(
 
 export async function verifyLicense(publicPem: string, jwt: string): Promise<LicenseClaims> {
   const key = await importSPKI(publicPem, "EdDSA");
-  const { payload } = await jwtVerify(jwt, key, { issuer: "urateam.dev" });
+  const { payload } = await jwtVerify(jwt, key, { issuer: "urateams.com" });
   return payload as unknown as LicenseClaims;
 }
 ```
@@ -828,7 +910,7 @@ describe("POST /stripe/webhook — checkout.session.completed", () => {
     const sig = signHeader(body, "whsec_test");
     const ctx = createExecutionContext();
     const res = await worker.fetch(
-      new Request("https://billing.urateam.dev/stripe/webhook", {
+      new Request("https://billing.urateams.com/stripe/webhook", {
         method: "POST",
         headers: { "stripe-signature": sig, "content-type": "application/json" },
         body,
@@ -859,7 +941,7 @@ describe("POST /stripe/webhook — checkout.session.completed", () => {
     const fire = async () => {
       const ctx = createExecutionContext();
       const res = await worker.fetch(
-        new Request("https://billing.urateam.dev/stripe/webhook", {
+        new Request("https://billing.urateams.com/stripe/webhook", {
           method: "POST",
           headers: { "stripe-signature": sig, "content-type": "application/json" },
           body,
@@ -880,7 +962,7 @@ describe("POST /stripe/webhook — checkout.session.completed", () => {
     const body = makeEvent("cus_bad", "sub_bad", "x@y.com", "X");
     const ctx = createExecutionContext();
     const res = await worker.fetch(
-      new Request("https://billing.urateam.dev/stripe/webhook", {
+      new Request("https://billing.urateams.com/stripe/webhook", {
         method: "POST",
         headers: { "stripe-signature": "t=1,v1=deadbeef", "content-type": "application/json" },
         body,
@@ -1077,7 +1159,7 @@ export async function sendEmail(apiKey: string, msg: EmailMessage): Promise<void
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      from: "urateam <hello@urateam.dev>",
+      from: "urateam <hello@urateams.com>",
       to: msg.to,
       subject: msg.subject,
       html: msg.html,
@@ -1222,7 +1304,7 @@ describe("POST /checkout", () => {
     });
     const ctx = createExecutionContext();
     const res = await worker.fetch(
-      new Request("https://billing.urateam.dev/checkout", { method: "POST" }),
+      new Request("https://billing.urateams.com/checkout", { method: "POST" }),
       env as any, ctx,
     );
     await waitOnExecutionContext(ctx);
@@ -1252,8 +1334,8 @@ export async function handleCheckout(_request: Request, env: Env): Promise<Respo
       type: "text",
     }],
     client_reference_id: crypto.randomUUID(),
-    success_url: "https://urateam.dev/thanks?session_id={CHECKOUT_SESSION_ID}",
-    cancel_url: "https://urateam.dev/pricing",
+    success_url: "https://urateams.com/thanks?session_id={CHECKOUT_SESSION_ID}",
+    cancel_url: "https://urateams.com/pricing",
     allow_promotion_codes: false,
   });
   if (!session.url) {
@@ -1309,13 +1391,13 @@ git commit -m "feat: POST /checkout creates Stripe Checkout Session"
       <li>PM Agent with conflict detection, approval workflows, Slack interface</li>
       <li>Advanced auto-merge + deep review</li>
     </ul>
-    <form method="POST" action="https://billing.urateam.dev/checkout" class="mt-8">
+    <form method="POST" action="https://billing.urateams.com/checkout" class="mt-8">
       <button class="rounded-md bg-slate-900 text-white px-5 py-3 font-semibold hover:bg-slate-800">Buy Pro</button>
     </form>
   </section>
 
   <p class="mt-12 text-sm text-slate-500">
-    Need Enterprise? <a href="mailto:sales@urateam.dev" class="underline">Contact sales</a>.
+    Need Enterprise? <a href="mailto:sales@urateams.com" class="underline">Contact sales</a>.
   </p>
 </main></body></html>
 ```
@@ -1380,7 +1462,7 @@ describe("invoice.paid", () => {
     });
     const body = makeInvoicePaidEvent("cus_fresh");
     const ctx = createExecutionContext();
-    await worker.fetch(new Request("https://billing.urateam.dev/stripe/webhook", {
+    await worker.fetch(new Request("https://billing.urateams.com/stripe/webhook", {
       method: "POST", headers: { "stripe-signature": signHeader(body) }, body,
     }), env as any, ctx);
     await waitOnExecutionContext(ctx);
@@ -1396,7 +1478,7 @@ describe("invoice.paid", () => {
     });
     const body = makeInvoicePaidEvent("cus_soon");
     const ctx = createExecutionContext();
-    await worker.fetch(new Request("https://billing.urateam.dev/stripe/webhook", {
+    await worker.fetch(new Request("https://billing.urateams.com/stripe/webhook", {
       method: "POST", headers: { "stripe-signature": signHeader(body) }, body,
     }), env as any, ctx);
     await waitOnExecutionContext(ctx);
@@ -1644,7 +1726,7 @@ describe("customer.subscription.deleted", () => {
     });
     const body = makeEvent("cus_gone");
     const ctx = createExecutionContext();
-    const res = await worker.fetch(new Request("https://billing.urateam.dev/stripe/webhook", {
+    const res = await worker.fetch(new Request("https://billing.urateams.com/stripe/webhook", {
       method: "POST", headers: { "stripe-signature": sig(body) }, body,
     }), env as any, ctx);
     await waitOnExecutionContext(ctx);
@@ -1670,8 +1752,8 @@ export function renderLapsed(input: { email: string; expiresAt: number }): Rende
     subject: "Your urateam Pro subscription has ended",
     html: `<p>Your subscription has been cancelled.</p>
 <p>Your current license key will keep working until <strong>${date}</strong>.</p>
-<p><a href="https://billing.urateam.dev/recover">Resubscribe or update payment</a></p>`,
-    text: `Your subscription has been cancelled.\nYour key works until ${date}.\nResubscribe: https://billing.urateam.dev/recover\n`,
+<p><a href="https://billing.urateams.com/recover">Resubscribe or update payment</a></p>`,
+    text: `Your subscription has been cancelled.\nYour key works until ${date}.\nResubscribe: https://billing.urateams.com/recover\n`,
     attachments: [],
   };
 }
@@ -1874,7 +1956,7 @@ describe("POST /recover", () => {
     });
     const ctx = createExecutionContext();
     const res = await worker.fetch(
-      new Request("https://billing.urateam.dev/recover", {
+      new Request("https://billing.urateams.com/recover", {
         method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
         body: "email=a%40b.com",
       }), env as any, ctx,
@@ -1894,7 +1976,7 @@ describe("POST /recover", () => {
     });
     const ctx = createExecutionContext();
     const res = await worker.fetch(
-      new Request("https://billing.urateam.dev/recover", {
+      new Request("https://billing.urateams.com/recover", {
         method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
         body: "email=nobody%40x.com",
       }), env as any, ctx,
@@ -1948,7 +2030,7 @@ export async function handleRecoverPost(request: Request, env: Env): Promise<Res
 
   if (customerId) {
     const { token } = await mintMagicLink(env.MAGIC_LINKS, env.MAGIC_LINK_HMAC_SECRET, customerId);
-    const link = `https://billing.urateam.dev/recover/${token}`;
+    const link = `https://billing.urateams.com/recover/${token}`;
     try {
       const rendered = renderRecover({ link });
       await sendEmail(env.RESEND_API_KEY, { to: email, ...rendered });
@@ -2018,7 +2100,7 @@ describe("GET /recover/:token", () => {
 
     const ctx = createExecutionContext();
     const res = await worker.fetch(
-      new Request(`https://billing.urateam.dev/recover/${token}`), env as any, ctx,
+      new Request(`https://billing.urateams.com/recover/${token}`), env as any, ctx,
     );
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(200);
@@ -2029,7 +2111,7 @@ describe("GET /recover/:token", () => {
     // Single-use: second visit → 410
     const ctx2 = createExecutionContext();
     const res2 = await worker.fetch(
-      new Request(`https://billing.urateam.dev/recover/${token}`), env as any, ctx2,
+      new Request(`https://billing.urateams.com/recover/${token}`), env as any, ctx2,
     );
     await waitOnExecutionContext(ctx2);
     expect(res2.status).toBe(410);
@@ -2038,7 +2120,7 @@ describe("GET /recover/:token", () => {
   it("returns 410 on unknown/tampered token", async () => {
     const ctx = createExecutionContext();
     const res = await worker.fetch(
-      new Request(`https://billing.urateam.dev/recover/ff.ff`), env as any, ctx,
+      new Request(`https://billing.urateams.com/recover/ff.ff`), env as any, ctx,
     );
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(410);
@@ -2088,7 +2170,7 @@ export async function handleRecoverGet(request: Request, env: Env, token: string
   const stripe = getStripe(env);
   const portal = await stripe.billingPortal.sessions.create({
     customer: consumed.customerId,
-    return_url: "https://urateam.dev/thanks",
+    return_url: "https://urateams.com/thanks",
   });
 
   await appendAudit(env.AUDIT, consumed.customerId, {
@@ -2163,7 +2245,7 @@ describe("GET /admin/audit", () => {
   it("401 without auth", async () => {
     const ctx = createExecutionContext();
     const res = await worker.fetch(
-      new Request("https://billing.urateam.dev/admin/audit?customerId=cus_1"), env as any, ctx,
+      new Request("https://billing.urateams.com/admin/audit?customerId=cus_1"), env as any, ctx,
     );
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(401);
@@ -2175,7 +2257,7 @@ describe("GET /admin/audit", () => {
     const creds = btoa("admin:hunter2");
     const ctx = createExecutionContext();
     const res = await worker.fetch(
-      new Request("https://billing.urateam.dev/admin/audit?customerId=cus_1", {
+      new Request("https://billing.urateams.com/admin/audit?customerId=cus_1", {
         headers: { authorization: `Basic ${creds}` },
       }), env as any, ctx,
     );
@@ -2190,7 +2272,7 @@ describe("GET /admin/audit", () => {
     const creds = btoa("admin:wrong");
     const ctx = createExecutionContext();
     const res = await worker.fetch(
-      new Request("https://billing.urateam.dev/admin/audit?customerId=cus_1", {
+      new Request("https://billing.urateams.com/admin/audit?customerId=cus_1", {
         headers: { authorization: `Basic ${creds}` },
       }), env as any, ctx,
     );
@@ -2335,7 +2417,7 @@ The `stripe listen` command prints a webhook secret — paste it into `.dev.vars
 - Resend dashboard → Settings → Alerts: bounce rate > 5%.
 
 ## Support playbook
-- Customer lost their key → direct to `billing.urateam.dev/recover`.
+- Customer lost their key → direct to `billing.urateams.com/recover`.
 - Customer emails asking for manual help → `GET /admin/audit?customerId=cus_xxx` to see their history; refer to KV `LICENSES` for current key via `wrangler kv:key get --binding=LICENSES cus_xxx`.
 
 ## Known MVP limitations
@@ -2398,18 +2480,18 @@ Stripe → Products → Add product → `urateam-smoke`, recurring, $1/month. Co
 
 - [ ] **Step 2: Update `STRIPE_PRO_PRICE_ID` in `wrangler.toml` `[vars]` to the smoke price id, deploy**
 
-- [ ] **Step 3: From a clean browser (not your admin account), go to `urateam.dev/pricing`, click Buy Pro, complete Stripe checkout with a real card**
+- [ ] **Step 3: From a clean browser (not your admin account), go to `urateams.com/pricing`, click Buy Pro, complete Stripe checkout with a real card**
 
 - [ ] **Step 4: Verify within 60 seconds**
 
 - Welcome email arrived at the test email address.
 - JWT in the email loads cleanly: `echo $JWT | jose-cli verify --alg EdDSA -k <path to public key>` (or use a small node script).
 - `wrangler kv:key get --binding=LICENSES <your customer id>` returns the expected record.
-- `curl --user plain-auth https://billing.urateam.dev/admin/audit?customerId=cus_xxx` returns the `issued` entry.
+- `curl --user plain-auth https://billing.urateams.com/admin/audit?customerId=cus_xxx` returns the `issued` entry.
 
 - [ ] **Step 5: In Stripe dashboard, cancel the subscription, verify lapsed email arrives**
 
-- [ ] **Step 6: Go to `billing.urateam.dev/recover`, request your email, verify the link works and the portal URL opens Stripe Portal successfully**
+- [ ] **Step 6: Go to `billing.urateams.com/recover`, request your email, verify the link works and the portal URL opens Stripe Portal successfully**
 
 - [ ] **Step 7: Revert `STRIPE_PRO_PRICE_ID` to the real Pro price, archive the `urateam-smoke` product in Stripe, deploy**
 
