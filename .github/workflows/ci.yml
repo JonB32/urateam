@@ -52,7 +52,7 @@ jobs:
 
       - name: Configure git identity
         run: |
-          git config --global user.email "ci@urateam.dev"
+          git config --global user.email "ci@urateams.com"
           git config --global user.name "CI Bot"
 
       - name: Install dependencies
