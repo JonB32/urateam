@@ -146,7 +146,7 @@ type VerifyResult =
   | { ok: true; claims: JwtClaims }
   | { ok: false; reason: NonNullable<LicenseStatus["invalidReason"]> };
 
-const ISSUER = "urateam.dev";
+const ISSUER = "urateams.com";
 
 function b64urlDecode(input: string): Buffer {
   const pad = input.length % 4 === 0 ? "" : "=".repeat(4 - (input.length % 4));

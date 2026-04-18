@@ -44,7 +44,7 @@ describe("issueLicense", () => {
 
     const { header, payload } = decodeJwt(token);
     expect(header).toEqual({ alg: "EdDSA", typ: "JWT" });
-    expect(payload.iss).toBe("urateam.dev");
+    expect(payload.iss).toBe("urateams.com");
     expect(payload.sub).toBe("cust_acme");
     expect(payload.tier).toBe("enterprise");
     expect(payload.seats).toBe(100);
