@@ -26,7 +26,7 @@ describe("checkLicense — audit event on invalid license", () => {
       .replace(/=+$/, "");
     const payload = Buffer.from(
       JSON.stringify({
-        iss: "urateam.dev",
+        iss: "urateams.com",
         sub: "cust",
         tier: "pro",
         iat: 1,

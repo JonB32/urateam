@@ -42,7 +42,7 @@ export function issueLicense(opts: IssueOptions): string {
   const header = { alg: "EdDSA", typ: "JWT" };
   const now = Math.floor(Date.now() / 1000);
   const payload: Record<string, unknown> = {
-    iss: "urateam.dev",
+    iss: "urateams.com",
     sub: opts.customerId,
     tier: opts.tier,
     seats: opts.seats,

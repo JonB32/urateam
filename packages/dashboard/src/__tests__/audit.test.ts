@@ -47,7 +47,7 @@ async function installEnterpriseLicense(): Promise<void> {
 
   const now = Math.floor(Date.now() / 1000);
   const jwt = makeJwt(privateKey, {
-    iss: "urateam.dev",
+    iss: "urateams.com",
     sub: "cust_test",
     tier: "enterprise",
     seats: 25,

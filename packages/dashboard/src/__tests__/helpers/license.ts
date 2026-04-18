@@ -47,7 +47,7 @@ export async function installTestProLicense(
 
   const now = Math.floor(Date.now() / 1000);
   const jwt = makeJwt(privateKey, {
-    iss: "urateam.dev",
+    iss: "urateams.com",
     sub: "cust_test",
     tier,
     seats: 25,

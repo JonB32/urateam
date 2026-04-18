@@ -106,7 +106,7 @@ describe("checkLicense — JWT validation", () => {
 
   it("accepts a valid pro JWT", () => {
     process.env.URATEAM_LICENSE_KEY = makeJwt(privateKey, {
-      iss: "urateam.dev",
+      iss: "urateams.com",
       sub: "cust_test",
       tier: "pro",
       seats: 25,
@@ -124,7 +124,7 @@ describe("checkLicense — JWT validation", () => {
 
   it("accepts a valid enterprise JWT and unlocks enterprise features", () => {
     process.env.URATEAM_LICENSE_KEY = makeJwt(privateKey, {
-      iss: "urateam.dev",
+      iss: "urateams.com",
       sub: "cust_acme",
       tier: "enterprise",
       seats: null,
@@ -141,7 +141,7 @@ describe("checkLicense — JWT validation", () => {
 
   it("respects an explicit `features` override array in the JWT", () => {
     process.env.URATEAM_LICENSE_KEY = makeJwt(privateKey, {
-      iss: "urateam.dev",
+      iss: "urateams.com",
       sub: "cust_partial",
       tier: "pro",
       seats: 5,
@@ -158,7 +158,7 @@ describe("checkLicense — JWT validation", () => {
 
   it("rejects an expired JWT with invalidReason='expired'", () => {
     process.env.URATEAM_LICENSE_KEY = makeJwt(privateKey, {
-      iss: "urateam.dev",
+      iss: "urateams.com",
       sub: "cust_test",
       tier: "pro",
       seats: 25,
@@ -188,7 +188,7 @@ describe("checkLicense — JWT validation", () => {
   it("rejects a JWT signed with the wrong key (bad signature)", () => {
     const { privateKey: otherPriv } = generateKeyPairSync("ed25519");
     process.env.URATEAM_LICENSE_KEY = makeJwt(otherPriv, {
-      iss: "urateam.dev",
+      iss: "urateams.com",
       sub: "cust_test",
       tier: "enterprise",
       seats: null,
@@ -218,7 +218,7 @@ describe("checkLicense — JWT validation", () => {
     }
 
     const validPayload = {
-      iss: "urateam.dev",
+      iss: "urateams.com",
       sub: "cust_attacker",
       tier: "enterprise",
       seats: null,
