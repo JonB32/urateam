@@ -5,9 +5,17 @@
  * Usage:
  *   pnpm tsx scripts/generate-license-keypair.ts
  *
- * Prints the public key (paste into packages/core/src/license-public-key.ts)
- * and the private key (store securely — DO NOT commit). The private key is
- * needed by `ura license issue` and the future Stripe webhook handler.
+ * This script is ONLY for local dev / `ura license issue` offline use.
+ * The production license signing key lives in the `urateam-licensing`
+ * Worker at `billing.urateams.com` — see that repo's
+ * `worker/scripts/gen-signing-key.ts` + `docs/rotation.md`. The public
+ * key at packages/core/src/license-public-key.ts is the published-
+ * product key and should NOT be updated from this script's output
+ * except via the documented rotation procedure.
+ *
+ * Prints the public key and the private key (store securely — DO NOT
+ * commit). The private key is needed by `ura license issue` for
+ * offline Enterprise license minting.
  */
 import { generateKeyPairSync } from "node:crypto";
 
