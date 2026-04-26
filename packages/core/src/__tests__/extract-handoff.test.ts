@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -142,6 +142,94 @@ describe("extractHandoff", () => {
       );
       expect(result.structured).toBe(false); // git-fallback is not agent-produced JSON
       expect(result.artifact.summary).toContain("edge case");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // urateam#35: empty filesChanged in agent JSON + real git changes
+  // ---------------------------------------------------------------------------
+  it("overrides empty agent filesChanged with git diff when worktree has real changes (urateam#35)", async () => {
+    const dir = await createTestRepo();
+    try {
+      // Agent emits structurally-valid JSON but claims no files changed —
+      // reproduces the rotulus PR #7 case.
+      const brokenArtifact = {
+        ...validArtifact,
+        filesChanged: [],
+        summary: "Implementation complete.",
+      };
+      const output = wrapInJsonBlock(brokenArtifact);
+      const result = await extractHandoff(output, "run-1", "ISS-1", "implement", dir);
+
+      expect(result.structured).toBe(true); // fast path still wins (agent JSON parsed)
+      // BUT filesChanged must be populated from git, not the agent's empty list
+      expect(result.artifact.filesChanged).toContain("file.txt");
+      expect(result.artifact.filesChanged.length).toBeGreaterThan(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does NOT override agent filesChanged when the agent supplied a non-empty list", async () => {
+    // Even if git would report different paths, we trust the agent's
+    // intentional list (e.g., when it filters out generated files). The
+    // urateam#35 sanity check only fires on empty.
+    const dir = await createTestRepo();
+    try {
+      const artifactWithFiles = {
+        ...validArtifact,
+        filesChanged: ["src/auth.ts", "src/middleware.ts"],
+      };
+      const output = wrapInJsonBlock(artifactWithFiles);
+      const result = await extractHandoff(output, "run-1", "ISS-1", "implement", dir);
+
+      expect(result.structured).toBe(true);
+      expect(result.artifact.filesChanged).toEqual(["src/auth.ts", "src/middleware.ts"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves empty filesChanged when worktree truly has no changes (no false override)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "extract-test-"));
+    execFileSync("git", ["init"], { cwd: dir });
+    execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: dir });
+    await writeFile(join(dir, "file.txt"), "content");
+    execFileSync("git", ["add", "."], { cwd: dir });
+    execFileSync("git", ["commit", "-m", "init"], { cwd: dir });
+    // No worktree changes after commit.
+
+    try {
+      const reviewArtifact = {
+        ...validArtifact,
+        filesChanged: [],
+        summary: "Reviewed code, no changes needed.",
+      };
+      const output = wrapInJsonBlock(reviewArtifact);
+      const result = await extractHandoff(output, "run-1", "ISS-1", "review", dir);
+
+      expect(result.structured).toBe(true);
+      // Agent and git both agree → empty stays empty.
+      expect(result.artifact.filesChanged).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not crash the fast path if the git status check fails (override is best-effort)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "extract-test-"));
+    // Not a git repo — `git status --porcelain` will error.
+    try {
+      const brokenArtifact = { ...validArtifact, filesChanged: [] };
+      const output = wrapInJsonBlock(brokenArtifact);
+      const result = await extractHandoff(output, "run-1", "ISS-1", "implement", dir);
+
+      // Fast path still wins; empty filesChanged preserved (no git to consult).
+      expect(result.structured).toBe(true);
+      expect(result.artifact.filesChanged).toEqual([]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
