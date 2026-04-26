@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
+import { preflightClaudeAuth } from "../lib/preflight-claude-auth.js";
 
 export const devCommand = new Command("dev")
   .description("Start local development server (webhook + dashboard)")
@@ -58,6 +59,10 @@ export const devCommand = new Command("dev")
       );
       process.exit(1);
     }
+
+    // OSS-tier auth pre-flight (urateam#40). Run before opening the DB so a
+    // bad auth state doesn't leave any resources to clean up.
+    await preflightClaudeAuth({ command: "ura dev" });
 
     const config = {
       webhookSecret: process.env.LINEAR_WEBHOOK_SECRET ?? "dev-secret",

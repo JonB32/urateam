@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
+import { preflightClaudeAuth } from "../lib/preflight-claude-auth.js";
 
 export const startCommand = new Command("start")
   .description("Start production server (webhook + dashboard)")
@@ -163,6 +164,10 @@ export const startCommand = new Command("start")
       pmConfig,
       githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET,
     };
+
+    // OSS-tier auth pre-flight (urateam#40). Run before opening the DB so a
+    // bad auth state doesn't leave any resources to clean up.
+    await preflightClaudeAuth({ command: "ura start", containerized: true });
 
     // --- SSO (Enterprise, opt-in via URATEAM_SSO_ENABLED=true) ---
     // Validate SSO env vars BEFORE opening the DB / starting the runner so a
