@@ -3,6 +3,20 @@ import { createApp, type ServerConfig } from "../server.js";
 import { defaultConfigs } from "../pipeline/config.js";
 import { installTestProLicense, restoreLicense } from "./helpers/license.js";
 
+// Top-level afterEach: any test in this file that calls installTestProLicense
+// (directly or through buildApp setup) leaves cached license state behind
+// because checkLicense() memoizes its result for the lifetime of the worker.
+// This restore happens after every test so the next one starts from a clean
+// OSS baseline, regardless of describe-block ordering or future additions.
+//
+// New contributors: if you add a test that installs a license, you do NOT
+// need a local afterEach — this one covers you. If you add a test that
+// asserts OSS-mode behavior, it will see OSS regardless of the order in
+// which tests run.
+afterEach(async () => {
+  await restoreLicense();
+});
+
 const PM_SLACK_CONFIG = {
   signingSecret: "slack_signing_test",
   botToken: "xoxb-test",
@@ -80,9 +94,7 @@ describe("Unknown routes", () => {
 // PM Slack interface license gating
 // ---------------------------------------------------------------------------
 describe("PM Slack interface mount is license-gated", () => {
-  afterEach(async () => {
-    await restoreLicense();
-  });
+  // restoreLicense is handled by the top-level afterEach.
 
   it("does NOT mount /slack/* routes in OSS mode even when pmSlack is configured", async () => {
     // No license installed → tier is OSS → slack-interface feature unlicensed.
