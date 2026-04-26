@@ -70,6 +70,18 @@ describe("scaffold — sidecar pattern", () => {
       expect(content).toContain(".urateam/node_modules/");
     });
 
+    it("creates .urateam/pnpm-workspace.yaml (pnpm monorepo fix, urateam#31)", () => {
+      const projectDir = join(tempDir, "my-project");
+      scaffold(baseOptions(projectDir, "my-project"));
+
+      const wsPath = join(projectDir, ".urateam", "pnpm-workspace.yaml");
+      expect(existsSync(wsPath)).toBe(true);
+      const content = readFileSync(wsPath, "utf-8");
+      // Empty `packages:` list stops pnpm's upward workspace walk at .urateam/
+      // so `pnpm install` installs the sidecar's own deps locally.
+      expect(content).toContain("packages: []");
+    });
+
     it(".urateam/package.json has sidecar name and @urateam/cli dependency", () => {
       const projectDir = join(tempDir, "cool-agent");
       scaffold(baseOptions(projectDir, "cool-agent"));

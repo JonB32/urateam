@@ -164,6 +164,7 @@ const URATEAM_GITIGNORE = `# urateam sidecar
 .urateam/pnpm-lock.yaml
 `;
 
+
 // CLI entrypoint — only runs when executed directly (not when imported for testing)
 async function main() {
   const arg = process.argv[2];

@@ -7,6 +7,7 @@ import {
   existsSync,
   readFileSync,
   readdirSync,
+  writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -124,12 +125,91 @@ describe("create-urateam — installed tarball", () => {
     expect(existsSync(join(projectDir, ".urateam", "Dockerfile"))).toBe(true);
     expect(existsSync(join(projectDir, ".urateam", "docker-compose.yml"))).toBe(true);
     expect(existsSync(join(projectDir, ".urateam", "README.md"))).toBe(true);
+    expect(existsSync(join(projectDir, ".urateam", "pnpm-workspace.yaml"))).toBe(true);
 
     // Project root files
     expect(existsSync(join(projectDir, "CLAUDE.md"))).toBe(true);
     expect(existsSync(join(projectDir, "README.md"))).toBe(true);
     expect(existsSync(join(projectDir, ".gitignore"))).toBe(true);
   });
+
+  it("pnpm-workspace.yaml from installed copy stops the upward walk (regression guard for urateam#31)", () => {
+    const projectDir = join(workRoot, "pnpm-ws-check");
+    installedScaffold({
+      projectDir,
+      projectName: "pnpm-ws-check",
+      linearApiKey: "lin_api_test",
+      linearTeamId: "team-test",
+      repoUrl: "https://github.com/test/repo",
+      defaultBranch: "main",
+    });
+
+    const ws = readFileSync(
+      join(projectDir, ".urateam", "pnpm-workspace.yaml"),
+      "utf-8",
+    );
+    expect(ws).toContain("packages: []");
+  });
+
+  it(
+    "pnpm install inside scaffolded .urateam/ ignores parent workspace and resolves locally (urateam#31 behavioral guard)",
+    { timeout: 120_000 },
+    () => {
+      // Create a parent directory with a pnpm-workspace.yaml that would
+      // ordinarily swallow .urateam/ (the bug from #31). Then run scaffold,
+      // run a real `pnpm install --offline=false` inside .urateam/, and
+      // assert the lockfile + node_modules land under .urateam/, not the
+      // parent. Uses --prefer-offline to keep CI fast on warm caches.
+      const monorepoRoot = join(workRoot, "fake-monorepo");
+      mkdirSync(monorepoRoot, { recursive: true });
+      writeFileSync(
+        join(monorepoRoot, "pnpm-workspace.yaml"),
+        'packages:\n  - "apps/*"\n',
+      );
+      mkdirSync(join(monorepoRoot, "apps", "stub"), { recursive: true });
+      writeFileSync(
+        join(monorepoRoot, "apps", "stub", "package.json"),
+        '{"name":"stub","version":"0.0.0","private":true}',
+      );
+
+      const projectDir = monorepoRoot;
+      installedScaffold({
+        projectDir,
+        projectName: "fake-monorepo",
+        linearApiKey: "lin_api_test",
+        linearTeamId: "team-test",
+        repoUrl: "https://github.com/test/repo",
+        defaultBranch: "main",
+      });
+
+      // Pre-flight: confirm scaffold emitted the marker file.
+      expect(existsSync(join(projectDir, ".urateam", "pnpm-workspace.yaml"))).toBe(true);
+
+      // Replace the @urateam/cli dep with a small public package so the
+      // install completes quickly and doesn't depend on the cli being
+      // published. We're testing pnpm's workspace-walk behavior, not the
+      // cli itself.
+      const sidecarPkgPath = join(projectDir, ".urateam", "package.json");
+      const sidecarPkg = JSON.parse(readFileSync(sidecarPkgPath, "utf-8"));
+      sidecarPkg.dependencies = { "is-odd": "3.0.1" };
+      writeFileSync(sidecarPkgPath, JSON.stringify(sidecarPkg, null, 2));
+
+      execFileSync("pnpm", ["install", "--prefer-offline"], {
+        cwd: join(projectDir, ".urateam"),
+        stdio: "pipe",
+      });
+
+      // Sidecar deps land in .urateam/, NOT in the parent.
+      expect(
+        existsSync(join(projectDir, ".urateam", "node_modules", "is-odd")),
+      ).toBe(true);
+      expect(existsSync(join(projectDir, ".urateam", "pnpm-lock.yaml"))).toBe(
+        true,
+      );
+      // Negative: the parent must not have been touched.
+      expect(existsSync(join(projectDir, "pnpm-lock.yaml"))).toBe(false);
+    },
+  );
 
   it(".gitignore from installed copy has urateam entries (regression guard for 0.1.4 ENOENT)", () => {
     const projectDir = join(workRoot, "gitignore-check");
