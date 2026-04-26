@@ -876,6 +876,25 @@ export class PipelineRunner {
               break;
             }
 
+            // Eval-failure path: the check agent itself broke (no parseable
+            // output, threw, or exhausted turns). We have NO evidence about
+            // gap status; surface that to the human via the PR draft note
+            // and skip re-implement (retry on the same conditions almost
+            // never recovers, and burns tokens). See urateam#108.
+            if (check.evaluationFailed) {
+              runLog.warn(
+                { iteration, evaluationError: check.evaluationError },
+                "RALPH: evaluation failed — drafting PR with eval-failure note instead of re-implementing",
+              );
+              ralphSatisfied = false;
+              ralphGaps = [
+                check.evaluationError ??
+                  "RALPH evaluation failed (no detail) — human review required",
+              ];
+              ralphSuggestions = [];
+              break;
+            }
+
             // Track the latest gaps for PR comments if loop exhausts
             ralphGaps = check.gaps;
             ralphSuggestions = check.suggestions;
@@ -1273,15 +1292,27 @@ export class PipelineRunner {
               runLog.info({ rfIteration }, "RALPH: re-checking requirements after review-fix implement");
               const rfCheck = await checkRequirements(sanitizedIssue, rfHandoffResult, worktreePath);
               ralphSatisfied = rfCheck.satisfied;
-              ralphGaps = rfCheck.gaps;
-              ralphSuggestions = rfCheck.suggestions;
-              if (rfCheck.satisfied) {
-                runLog.info({ rfIteration }, "RALPH: requirements satisfied after review-fix implement");
-              } else {
+              if (rfCheck.evaluationFailed) {
+                ralphGaps = [
+                  rfCheck.evaluationError ??
+                    "RALPH evaluation failed (no detail) — human review required",
+                ];
+                ralphSuggestions = [];
                 runLog.warn(
-                  { rfIteration, gaps: rfCheck.gaps.length },
-                  "RALPH: requirements NOT satisfied after review-fix implement — PR may be created as draft",
+                  { rfIteration, evaluationError: rfCheck.evaluationError },
+                  "RALPH: re-check evaluation failed — drafting PR with eval-failure note (urateam#108)",
                 );
+              } else {
+                ralphGaps = rfCheck.gaps;
+                ralphSuggestions = rfCheck.suggestions;
+                if (rfCheck.satisfied) {
+                  runLog.info({ rfIteration }, "RALPH: requirements satisfied after review-fix implement");
+                } else {
+                  runLog.warn(
+                    { rfIteration, gaps: rfCheck.gaps.length },
+                    "RALPH: requirements NOT satisfied after review-fix implement — PR may be created as draft",
+                  );
+                }
               }
             }
 
