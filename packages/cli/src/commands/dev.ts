@@ -42,6 +42,23 @@ export const devCommand = new Command("dev")
       repoConfigs[process.env.REPO_TEAM_ID] = repoEntry;
     }
 
+    // Fail fast if no repoConfigs could be built. Without this, `ura dev`
+    // looks healthy in logs (webhook server up, dashboard up) but every
+    // inbound Linear webhook fails with "no repo mapping" — usually after
+    // the user has already moved a real issue to Todo. The first-time-user
+    // setup path nearly always lands here because .urateam/.env ships with
+    // `REPO_URL=` and `REPO_TEAM_ID=` blank. See urateam#33.
+    if (Object.keys(repoConfigs).length === 0) {
+      console.error(
+        "Error: no repoConfigs could be built from environment variables.\n" +
+          "Set REPO_TEAM_ID and REPO_URL in .urateam/.env and restart.\n" +
+          "Example:\n" +
+          "  REPO_TEAM_ID=<your Linear team UUID — usually the same as LINEAR_TEAM_ID>\n" +
+          "  REPO_URL=https://github.com/org/repo\n",
+      );
+      process.exit(1);
+    }
+
     const config = {
       webhookSecret: process.env.LINEAR_WEBHOOK_SECRET ?? "dev-secret",
       linearApiKey: process.env.LINEAR_API_KEY ?? "",
