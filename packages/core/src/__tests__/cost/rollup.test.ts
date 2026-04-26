@@ -1,7 +1,17 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createDb } from "../../db/client.js";
 import { pipelineRuns, stageRuns, costRollupsDaily } from "../../db/schema.js";
 import { recomputeCostRollups } from "../../cost/rollup.js";
+import { installTestProLicense, restoreLicense } from "../helpers/license.js";
+
+// recomputeCostRollups short-circuits without an enterprise license
+// (defensive gate). All tests assume the gate has passed.
+beforeEach(async () => {
+  await installTestProLicense("enterprise");
+});
+afterEach(async () => {
+  await restoreLicense();
+});
 
 let db: any;
 

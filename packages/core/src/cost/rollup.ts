@@ -4,6 +4,7 @@ import type { AnyDb } from "../db/client.js";
 import { pipelineRuns, stageRuns, costRollupsDaily } from "../db/schema.js";
 import { computeRunCost } from "./per-run.js";
 import { createLogger } from "../logger.js";
+import { isFeatureLicensed } from "../license.js";
 
 const log = createLogger({ component: "cost.rollup" });
 
@@ -149,6 +150,13 @@ export async function recomputeCostRollups(
   db: AnyDb,
   config: CostConfig,
 ): Promise<{ rowsWritten: number }> {
+  if (!isFeatureLicensed("cost-roi")) {
+    log.warn(
+      { feature: "cost-roi" },
+      "recomputeCostRollups called without an enterprise license — skipping",
+    );
+    return { rowsWritten: 0 };
+  }
   // Determine yesterday (UTC). Rollups only cover completed UTC days.
   const now = new Date();
   const yesterdayUtc = new Date(Date.UTC(

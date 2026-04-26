@@ -3,9 +3,21 @@ import type { AnyDb } from "../db/client.js";
 import { pipelineRuns, stageRuns, costRollupsDaily } from "../db/schema.js";
 import { computeRunCost } from "./per-run.js";
 import { createLogger } from "../logger.js";
+import { isFeatureLicensed } from "../license.js";
 import type { AggregateResult, BreakdownRow, CostSummary, DailyRow } from "./types.js";
 
 const log = createLogger({ component: "cost.aggregate" });
+
+function emptyAggregateResult(filters: AggregateFilters): AggregateResult {
+  return {
+    summary: {
+      window: { from: filters.from, to: filters.to },
+      runs: 0, prsMerged: 0, inputTokens: 0, outputTokens: 0,
+      dollars: 0, timeSavedHours: 0, roiMultiplier: 0,
+    },
+    byTeam: [], byRepo: [], byPipeline: [], byDay: [],
+  };
+}
 
 const DEFAULT_MAX_RUNS = 10_000;
 
@@ -51,6 +63,13 @@ export async function aggregateAll(
   config: CostConfig,
   opts: { maxRuns?: number } = {},
 ): Promise<AggregateResult> {
+  if (!isFeatureLicensed("cost-roi")) {
+    log.warn(
+      { feature: "cost-roi" },
+      "aggregateAll called without an enterprise license — returning empty result",
+    );
+    return emptyAggregateResult(filters);
+  }
   const hourlyRate = config.costs?.hourlyEngRate ?? 50;
   const maxRuns = opts.maxRuns ?? DEFAULT_MAX_RUNS;
 
@@ -336,6 +355,13 @@ export async function aggregateHybrid(
   config: CostConfig,
   opts: { maxRuns?: number; now?: Date; enableRollups?: boolean } = {},
 ): Promise<AggregateResult> {
+  if (!isFeatureLicensed("cost-roi")) {
+    log.warn(
+      { feature: "cost-roi" },
+      "aggregateHybrid called without an enterprise license — returning empty result",
+    );
+    return emptyAggregateResult(filters);
+  }
   const enableRollups = opts.enableRollups ?? false;
   if (!enableRollups) {
     return aggregateAll(db, filters, config, opts);

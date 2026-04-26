@@ -1,9 +1,19 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createDb } from "../../db/client.js";
 import { pipelineRuns, stageRuns } from "../../db/schema.js";
 import { randomUUID } from "node:crypto";
 import { aggregateAll, aggregateHybrid, normalizeTeamId, snapToUtcDayStart } from "../../cost/aggregate.js";
 import { costRollupsDaily } from "../../db/schema.js";
+import { installTestProLicense, restoreLicense } from "../helpers/license.js";
+
+// aggregateAll/Hybrid short-circuit to empty results without an enterprise
+// license (defensive gate). All shape tests assume the gate has passed.
+beforeEach(async () => {
+  await installTestProLicense("enterprise");
+});
+afterEach(async () => {
+  await restoreLicense();
+});
 
 let db: any;
 
