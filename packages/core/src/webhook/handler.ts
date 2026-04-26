@@ -181,11 +181,11 @@ export function createWebhookHandler(config: WebhookHandlerConfig): Hono {
         if (!repoConfig) {
           log.error(
             { teamId: stateChange.issue.teamId, projectId: stateChange.issue.projectId ?? "none", issueId: stateChange.issue.identifier },
-            // The wording deliberately names the env vars (not a "config file") because
-            // `ura dev` builds repoConfigs from env, not from a config file — see urateam#33.
-            // The `ura run` path uses repos.config.ts; this branch is only reached by
-            // `ura dev` and similar entry points.
-            "no repo mapping for team — set REPO_TEAM_ID + REPO_URL in .urateam/.env (ura dev) or check repos.config.ts (ura run); the team UUID logged here must match",
+            // Library-level error reachable from any consumer of createWebhookHandler.
+            // Names the most common entry-point root causes (env vars for `ura dev` /
+            // `ura start`, config file for `ura run`) rather than the misleading
+            // "check repoConfigs keys" wording the issue called out. See urateam#33.
+            "no repo mapping for team — set REPO_TEAM_ID + REPO_URL in .env (ura dev / ura start) or check repos.config.ts (ura run); the team UUID logged here must match",
           );
           return c.json({
             ok: false,
