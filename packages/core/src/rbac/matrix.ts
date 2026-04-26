@@ -25,13 +25,18 @@ export type PermissionKey = keyof typeof PERMISSION_MATRIX;
  * Check whether `role` is allowed to perform `action`.
  *
  * Defensive license gate: returns `false` (fail closed, "no permission") with
- * a structured warn when the `rbac` feature is not licensed. Today the
- * dashboard middleware (`packages/dashboard/src/middleware/rbac.ts:12`) and
- * the runs UI (`packages/dashboard/src/routes/runs.ts:130`) both short-circuit
- * before calling `canAccess` in OSS mode, so this gate does not change
- * production behavior. It exists so that any future direct caller of the rbac
- * module — a new route, CLI command, third-party integration — cannot silently
- * grant permissions without a license check.
+ * a structured warn when the `rbac` feature is not licensed. The gate is
+ * additive to — not a replacement for — the upstream guards in the dashboard
+ * middleware and the runs UI, both of which already skip calling `canAccess`
+ * in OSS mode. Its purpose is to ensure any future direct caller of the rbac
+ * module — a new route, CLI command, third-party integration — cannot
+ * silently grant permissions without a license check.
+ *
+ * Returns `false` rather than throwing because callers (e.g., the canRetry
+ * ternary in `dashboard/src/routes/runs.ts`) treat the result as a predicate.
+ * Initializers that cannot tolerate a silent denial should mirror the
+ * `getDefaultWorkosClient` pattern in `auth/workos-client.ts` (throws
+ * `LicenseRequiredError`).
  */
 export function canAccess(role: Role, action: PermissionKey): boolean {
   if (!isFeatureLicensed("rbac")) {

@@ -1,10 +1,9 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { _resetLicenseCache } from "../license.js";
 import { canAccess } from "../rbac/matrix.js";
 import { installTestProLicense, restoreLicense } from "./helpers/license.js";
 
 afterEach(async () => {
-  _resetLicenseCache();
+  // restoreLicense() already resets the license cache.
   await restoreLicense();
 });
 
