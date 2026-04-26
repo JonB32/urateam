@@ -9,7 +9,37 @@ to implement features, fix bugs, and create PRs automatically.
 
 1. Fill in `.env` with your Linear API key, webhook secret, team ID, and repo URL
 2. Install dependencies: `pnpm install`
-3. Start the agent: `pnpm dev` (SQLite, local dev) or `pnpm start` (production)
+3. **Authenticate Claude** (OSS path only — see [Claude auth lifecycle](#claude-auth-lifecycle-oss-tier) below): `claude login`
+4. Start the agent: `pnpm dev` (SQLite, local dev) or `pnpm start` (production)
+
+## Claude auth lifecycle (OSS tier)
+
+The free / OSS tier of urateam runs against the local `claude` CLI session,
+**not** an Anthropic API key. That session expires periodically (typically
+weekly) and **`ura dev` will refuse to start when the session is invalid** —
+this prevents the failure mode where webhooks fail mid-pipeline and Linear
+issues get marked as failed before you notice.
+
+If you see this banner at startup:
+
+```
+⚠ Claude session auth check failed at startup.
+  The local `claude` session is missing or expired.
+  Run `claude login` and restart `ura dev` before moving issues to Todo.
+```
+
+…run `claude login` (interactive — opens a browser), then restart `pnpm dev`
+or `pnpm start`. Once running, urateam re-checks the session before each
+agent invocation, so a session that expires mid-day is caught before it
+mutates Linear state.
+
+**Production note:** if you're running in a container, the auth probe runs
+inside the container too. Use `docker compose exec <service> claude login`
+to re-authenticate.
+
+**Upgrading off this:** the Anthropic API tier (long-lived API key) doesn't
+have session-lifetime semantics, so this whole concern goes away. See the
+[urateam docs](https://github.com/JonB32/urateam) for upgrade paths.
 
 ## Expose the webhook
 
