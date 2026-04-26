@@ -2,7 +2,7 @@
 
 ## Reporting Vulnerabilities
 
-Please report security vulnerabilities by emailing security@urateam.dev.
+Please report security vulnerabilities by emailing security@urateams.com.
 
 Do **NOT** open a public issue for security vulnerabilities.
 

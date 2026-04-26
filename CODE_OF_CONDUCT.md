@@ -27,7 +27,7 @@ Examples of unacceptable behavior:
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the project team at conduct@urateam.dev.
+reported to the project team at conduct@urateams.com.
 
 ## Attribution
 
