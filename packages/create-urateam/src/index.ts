@@ -93,6 +93,23 @@ export function scaffold(options: ScaffoldOptions): void {
     writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
   }
 
+  // Write .urateam/.npmrc only if absent. The `ignore-workspace=true` flag
+  // tells pnpm to treat .urateam/ as an isolated project rather than walking
+  // up to a parent pnpm-workspace.yaml — without it, `pnpm install` inside
+  // .urateam/ silently resolves the parent workspace's projects instead of
+  // installing the sidecar's own deps, and `pnpm dev` fails with
+  // `sh: ura: command not found`. See urateam#31.
+  //
+  // IMPORTANT: This file is intentionally NOT shipped via template/.urateam/.
+  // npm publish strips files named `.npmrc` from the published tarball by
+  // default, so loading from template/ would ENOENT at runtime in an
+  // installed copy. Inlining sidesteps the packaging pitfall (same pattern
+  // as URATEAM_GITIGNORE below).
+  const npmrcPath = join(urateamDir, ".npmrc");
+  if (!existsSync(npmrcPath)) {
+    writeFileSync(npmrcPath, URATEAM_NPMRC);
+  }
+
   // Write .urateam/.env only if absent — preserves real credentials on re-run.
   // On first run, generates a random DASHBOARD_PASSWORD and fills in values
   // from user prompts. On re-run, the existing .env is kept intact so users
@@ -162,6 +179,22 @@ const URATEAM_GITIGNORE = `# urateam sidecar
 .urateam/node_modules/
 .urateam/dist/
 .urateam/pnpm-lock.yaml
+`;
+
+/**
+ * Inlined .npmrc for the urateam sidecar.
+ *
+ * `ignore-workspace=true` makes pnpm treat .urateam/ as an isolated project
+ * even when a parent `pnpm-workspace.yaml` exists. Without it, scaffolding
+ * into a pnpm monorepo causes `pnpm install` inside .urateam/ to resolve
+ * the parent workspace and skip the sidecar's own deps. See urateam#31.
+ *
+ * Inlined (rather than shipped via template/) because npm publish strips
+ * `.npmrc` from published tarballs.
+ */
+const URATEAM_NPMRC = `# Treat .urateam/ as outside any parent pnpm workspace so its own deps install.
+# See https://pnpm.io/npmrc#ignore-workspace
+ignore-workspace=true
 `;
 
 // CLI entrypoint — only runs when executed directly (not when imported for testing)

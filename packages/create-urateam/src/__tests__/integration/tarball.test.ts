@@ -124,11 +124,31 @@ describe("create-urateam — installed tarball", () => {
     expect(existsSync(join(projectDir, ".urateam", "Dockerfile"))).toBe(true);
     expect(existsSync(join(projectDir, ".urateam", "docker-compose.yml"))).toBe(true);
     expect(existsSync(join(projectDir, ".urateam", "README.md"))).toBe(true);
+    expect(existsSync(join(projectDir, ".urateam", ".npmrc"))).toBe(true);
 
     // Project root files
     expect(existsSync(join(projectDir, "CLAUDE.md"))).toBe(true);
     expect(existsSync(join(projectDir, "README.md"))).toBe(true);
     expect(existsSync(join(projectDir, ".gitignore"))).toBe(true);
+  });
+
+  it(".npmrc from installed copy has ignore-workspace=true (regression guard for urateam#31)", () => {
+    const projectDir = join(workRoot, "npmrc-check");
+    installedScaffold({
+      projectDir,
+      projectName: "npmrc-check",
+      linearApiKey: "lin_api_test",
+      linearTeamId: "team-test",
+      repoUrl: "https://github.com/test/repo",
+      defaultBranch: "main",
+    });
+
+    // npm publish strips files literally named `.npmrc` from tarballs by
+    // default, the same way it strips `.gitignore`. Inlining the content
+    // (URATEAM_NPMRC in src/index.ts) sidesteps that — this test fails
+    // if anyone reverts to shipping the file through template/.urateam/.
+    const npmrc = readFileSync(join(projectDir, ".urateam", ".npmrc"), "utf-8");
+    expect(npmrc).toContain("ignore-workspace=true");
   });
 
   it(".gitignore from installed copy has urateam entries (regression guard for 0.1.4 ENOENT)", () => {
