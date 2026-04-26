@@ -10,7 +10,7 @@ import type {
 } from "../types.js";
 import type { Db, AnyDb } from "../db/client.js";
 import { stageRuns, agentLogs } from "../db/schema.js";
-import { agentProfiles } from "./profiles.js";
+import { getAgentProfiles } from "./profiles.js";
 import { assemblePrompt } from "./prompt/assembler.js";
 import { extractHandoff } from "./extract-handoff.js";
 import { buildStagePermissionOptions } from "./permissions.js";
@@ -61,7 +61,7 @@ export async function executeStage(
     throw new Error("await-approval is not an agent stage");
   }
 
-  const profile = agentProfiles[stage];
+  const profile = getAgentProfiles()[stage];
   if (!profile) {
     throw new Error(`No agent profile for stage: ${stage}`);
   }
