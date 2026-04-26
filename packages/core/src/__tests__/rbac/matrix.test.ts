@@ -1,8 +1,19 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { canAccess, PERMISSION_MATRIX } from "../../rbac/matrix.js";
 import type { PermissionKey } from "../../rbac/matrix.js";
+import { installTestProLicense, restoreLicense } from "../helpers/license.js";
 
 describe("PERMISSION_MATRIX", () => {
+  // canAccess fails closed without an enterprise license (defensive gate).
+  // The matrix-shape tests below assume the gate has passed, so install a
+  // license before each case and restore after.
+  beforeEach(async () => {
+    await installTestProLicense("enterprise");
+  });
+  afterEach(async () => {
+    await restoreLicense();
+  });
+
   const cases: Array<[PermissionKey, "admin" | "operator" | "viewer", boolean]> = [
     ["runs.view",         "admin",    true],
     ["runs.view",         "operator", true],
