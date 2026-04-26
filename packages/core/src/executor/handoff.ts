@@ -15,6 +15,12 @@ export function buildFallback(
   metadata: { runId: string; issueId: string; stage: string; timestamp: string },
   summary: string,
 ): HandoffArtifact {
+  // Note (urateam#35 Bug 1): if `summary` here is the agent's raw output
+  // truncated to 500 chars, it may contain JSON fragments from a self-
+  // critique block the agent leaked instead of structured prose. The fix
+  // for that is upstream prompt engineering (constraining the agent's
+  // structured-output instructions) — not summary sanitization here, which
+  // would be fragile regex hacks.
   return {
     ...metadata,
     summary: summary || `Stage ${metadata.stage} completed without structured output`,

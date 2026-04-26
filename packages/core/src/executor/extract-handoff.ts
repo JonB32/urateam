@@ -55,26 +55,27 @@ export async function extractHandoff(
     // `filesChanged: []` is emitted alongside) while the diff is real.
     // Trust git as the authoritative source of "what changed in the
     // worktree" only when the agent says nothing changed.
+    //
+    // We deliberately do NOT override a non-empty agent list, even when it
+    // disagrees with git — agents may legitimately filter their list (e.g.,
+    // exclude generated files), and the rotulus PR #7 symptom that drives
+    // this fix is specifically the empty-on-multi-file case.
+    //
+    // No try/catch: gitExecRaw fails-open to "" on error rather than
+    // rejecting (see git.ts), and `parseGitPorcelain("")` returns []. So a
+    // git failure naturally short-circuits the override without throwing.
+    // Mutation of fastResult.artifact is safe — fastResult is a local var
+    // produced by parseHandoffArtifact and not aliased anywhere else before
+    // we return it.
     if (fastResult.artifact.filesChanged.length === 0) {
-      try {
-        const statusOutput = await gitExecRaw(["status", "--porcelain"], workdir);
-        const gitFilesChanged = parseGitPorcelain(statusOutput);
-        if (gitFilesChanged.length > 0) {
-          log.warn(
-            {
-              stage,
-              gitFilesChanged: gitFilesChanged.length,
-              issueRef: "urateam#35",
-            },
-            "agent reported empty filesChanged but git shows real changes — overriding with git diff",
-          );
-          fastResult.artifact.filesChanged = gitFilesChanged;
-        }
-      } catch (err) {
-        // Don't tank the fast path on a git failure — fall through to the
-        // agent's empty list. Surface enough context to debug if it recurs.
-        const msg = err instanceof Error ? err.message : String(err);
-        log.warn({ stage, err: msg }, "git status check failed during fast-path sanity check");
+      const statusOutput = await gitExecRaw(["status", "--porcelain"], workdir);
+      const gitFilesChanged = parseGitPorcelain(statusOutput);
+      if (gitFilesChanged.length > 0) {
+        log.warn(
+          { stage, gitFilesChanged: gitFilesChanged.length },
+          "agent reported empty filesChanged but git shows real changes — overriding with git diff (urateam#35)",
+        );
+        fastResult.artifact.filesChanged = gitFilesChanged;
       }
     }
     return fastResult;

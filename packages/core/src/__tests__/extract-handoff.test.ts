@@ -221,7 +221,9 @@ describe("extractHandoff", () => {
 
   it("does not crash the fast path if the git status check fails (override is best-effort)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "extract-test-"));
-    // Not a git repo — `git status --porcelain` will error.
+    // Not a git repo. `gitExecRaw` resolves to "" on git error (it
+    // fails-open rather than rejecting), so `parseGitPorcelain("")`
+    // returns [] and the override naturally short-circuits.
     try {
       const brokenArtifact = { ...validArtifact, filesChanged: [] };
       const output = wrapInJsonBlock(brokenArtifact);
@@ -230,6 +232,32 @@ describe("extractHandoff", () => {
       // Fast path still wins; empty filesChanged preserved (no git to consult).
       expect(result.structured).toBe(true);
       expect(result.artifact.filesChanged).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("override correctly resolves renamed files to the new name (parseGitPorcelain XY old -> new)", async () => {
+    // Build a clean repo state with a single committed file, then do
+    // ONLY a rename so porcelain emits the rename arrow form unambiguously.
+    const dir = await mkdtemp(join(tmpdir(), "extract-test-"));
+    try {
+      execFileSync("git", ["init"], { cwd: dir });
+      execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: dir });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: dir });
+      await writeFile(join(dir, "original.txt"), "content");
+      execFileSync("git", ["add", "."], { cwd: dir });
+      execFileSync("git", ["commit", "-m", "init"], { cwd: dir });
+      execFileSync("git", ["mv", "original.txt", "renamed.txt"], { cwd: dir });
+
+      const brokenArtifact = { ...validArtifact, filesChanged: [] };
+      const output = wrapInJsonBlock(brokenArtifact);
+      const result = await extractHandoff(output, "run-1", "ISS-1", "implement", dir);
+
+      expect(result.structured).toBe(true);
+      // parseGitPorcelain extracts the post-rename name, not the pre-rename one.
+      expect(result.artifact.filesChanged).toContain("renamed.txt");
+      expect(result.artifact.filesChanged).not.toContain("original.txt");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
