@@ -138,13 +138,20 @@ export async function extractHandoff(
   };
 
   try {
-    // Slow path uses the same union (worktree + branch-vs-base diff) as the
-    // fast-path override so a review-stage handoff after autoCommitChanges
-    // still surfaces the implement-stage files. baseRef may be undefined for
-    // back-compat; in that case only the worktree is consulted.
+    // Slow path uses the same union helper. Necessary for the RALPH call
+    // sites in pipeline/runner.ts which always take the slow path
+    // (they invoke extractHandoff with agentOutput="" so parseJsonBlock
+    // returns null). The fast-path override in PR #95 + this PR's widening
+    // were the load-bearing fix for the rotulus#16 PR-body bug; the slow
+    // path benefits incidentally.
+    //
+    // diffStat must scan the same range as filesChanged or the "Modified
+    // N files: <stat tail>" approach string can be misleading (empty stat
+    // alongside non-empty files when the worktree is autoCommit-clean).
+    const statRange = baseRef ? `${baseRef}...HEAD` : "HEAD";
     const [filesChanged, diffStat] = await Promise.all([
       gitChangedFilesAcross(workdir, baseRef),
-      gitExecSafe(["diff", "--stat", "HEAD"], workdir),
+      gitExecSafe(["diff", "--stat", statRange], workdir),
     ]);
 
     // Best-effort summary from agent output. The last few lines often contain

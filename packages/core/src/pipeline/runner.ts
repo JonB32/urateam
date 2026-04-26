@@ -861,6 +861,7 @@ export class PipelineRunner {
               sanitizedIssue.id,
               stage,
               worktreePath,
+              // Full ref form (extractHandoff doesn't prepend `origin/`).
               `origin/${repoConfig.defaultBranch}`,
             );
 
@@ -1266,6 +1267,7 @@ export class PipelineRunner {
                 sanitizedIssue.id,
                 fixStage,
                 worktreePath,
+                // Full ref form (extractHandoff doesn't prepend `origin/`).
                 `origin/${repoConfig.defaultBranch}`,
               );
               runLog.info({ rfIteration }, "RALPH: re-checking requirements after review-fix implement");
