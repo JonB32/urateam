@@ -1,6 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
 
+const stubWorkosClient = vi.fn(async (_apiKey: string) => ({
+  getAuthorizationUrl: async () => "https://stub/auth",
+  authenticateWithCode: async () => ({
+    user: {
+      id: "u",
+      email: "u@example.com",
+      firstName: null,
+      lastName: null,
+    },
+  }),
+}));
+
 // Stub the core module so we don't actually hit WorkOS during tests.
 vi.mock("@urateam/core", async () => {
   const actual = await vi.importActual<typeof import("@urateam/core")>(
@@ -8,17 +20,7 @@ vi.mock("@urateam/core", async () => {
   );
   return {
     ...actual,
-    getDefaultWorkosClient: vi.fn(async (_apiKey: string) => ({
-      getAuthorizationUrl: async () => "https://stub/auth",
-      authenticateWithCode: async () => ({
-        user: {
-          id: "u",
-          email: "u@example.com",
-          firstName: null,
-          lastName: null,
-        },
-      }),
-    })),
+    getDefaultWorkosClient: stubWorkosClient,
   };
 });
 
@@ -92,5 +94,20 @@ describe("bootstrapSsoFromEnv", { timeout: 15_000 }, () => {
       URATEAM_SSO_ALLOWED_DOMAIN: "acme.com",
     });
     expect(result!.sso.allowedDomain).toBe("acme.com");
+  });
+
+  it("exits with an actionable message when getDefaultWorkosClient throws LicenseRequiredError", async () => {
+    const { LicenseRequiredError } = await import("@urateam/core");
+    stubWorkosClient.mockRejectedValueOnce(
+      new LicenseRequiredError("sso", "pro"),
+    );
+    await expect(bootstrapSsoFromEnv({ ...FULL_ENV })).rejects.toThrow(
+      "__EXIT__",
+    );
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const msg = errorSpy.mock.calls[0]!.join(" ");
+    expect(msg).toContain("requires an enterprise license");
+    expect(msg).toContain("Current tier: pro");
+    expect(msg).toContain("support@urateams.com");
   });
 });

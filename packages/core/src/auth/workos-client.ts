@@ -1,3 +1,8 @@
+import { checkLicense, LicenseRequiredError } from "../license.js";
+import { createLogger } from "../logger.js";
+
+const log = createLogger({ component: "auth.workos" });
+
 /**
  * Thin interface over @workos-inc/node so tests can inject a stub
  * without importing the SDK or hitting the network.
@@ -36,9 +41,26 @@ let cached: WorkosClient | null = null;
  * environments that never call this never need the SDK installed.
  *
  * NOTE: The singleton cache is not keyed on apiKey. If the API key is
- * rotated, the process must be restarted to pick up the new key.
+ * rotated, the process must be restarted to pick up the new key. The cache
+ * is also coupled to the license cache: if a future change introduces
+ * in-process license refresh (see `_resetLicenseCache`), call
+ * `_resetWorkosClient()` too so the next call re-evaluates the gate.
+ *
+ * Throws `LicenseRequiredError` if the `sso` feature is not licensed. This is
+ * a defensive library-boundary gate: even though dashboard wiring already
+ * skips SSO mounting in OSS mode, any direct caller of this function (CLI
+ * bootstrap, future routes, third-party integrations) cannot accidentally
+ * load the WorkOS SDK without a license.
  */
 export async function getDefaultWorkosClient(apiKey: string): Promise<WorkosClient> {
+  const status = checkLicense();
+  if (!status.features.has("sso")) {
+    log.warn(
+      { feature: "sso", tier: status.tier },
+      "getDefaultWorkosClient called without an enterprise license — refusing to load WorkOS SDK",
+    );
+    throw new LicenseRequiredError("sso", status.tier);
+  }
   if (cached) return cached;
   // Dynamic import so the dep is loaded only when actually used.
   // The SDK lives in @urateam/dashboard (the only package that activates SSO),

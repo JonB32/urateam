@@ -62,7 +62,7 @@ export async function bootstrapSsoFromEnv(
     process.exit(1);
   }
 
-  const { SsoConfigSchema, getDefaultWorkosClient } = await import(
+  const { SsoConfigSchema, getDefaultWorkosClient, LicenseRequiredError } = await import(
     "@urateam/core"
   );
 
@@ -86,6 +86,19 @@ export async function bootstrapSsoFromEnv(
     process.exit(1);
   }
 
-  const workos = await getDefaultWorkosClient(sso.workosApiKey);
+  let workos;
+  try {
+    workos = await getDefaultWorkosClient(sso.workosApiKey);
+  } catch (err) {
+    if (err instanceof LicenseRequiredError) {
+      console.error(
+        `URATEAM_SSO_ENABLED=true but the "sso" feature requires an enterprise license. ` +
+          `Current tier: ${err.actualTier}. ` +
+          `Either unset URATEAM_SSO_ENABLED or contact support@urateams.com to upgrade.`,
+      );
+      process.exit(1);
+    }
+    throw err;
+  }
   return { sso, workos };
 }
