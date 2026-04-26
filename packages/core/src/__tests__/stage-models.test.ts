@@ -50,7 +50,7 @@ import { executeStage } from "../executor/executor.js";
 import { createDb, type Db } from "../db/client.js";
 import { pipelineRuns } from "../db/schema.js";
 import { PipelineConfigSchema } from "../types.js";
-import { agentProfiles, DEFAULT_MODEL, HAIKU_MODEL } from "../executor/profiles.js";
+import { DEFAULT_MODEL, HAIKU_MODEL } from "../executor/profiles.js";
 import type { SanitizedIssue, RepoConfig } from "../types.js";
 
 // ── Shared fixtures ───────────────────────────────────────────────────────────

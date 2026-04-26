@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { agentProfiles, DEFAULT_MODEL, HAIKU_MODEL } from "../executor/profiles.js";
+// Tests assert on the unmerged baseline shape; use DEFAULT_AGENT_PROFILES
+// instead of the deprecated `agentProfiles` alias to make that intent explicit.
+import {
+  DEFAULT_AGENT_PROFILES as agentProfiles,
+  DEFAULT_MODEL,
+  HAIKU_MODEL,
+} from "../executor/profiles.js";
 import { parseHandoffArtifact } from "../executor/handoff.js";
 import { AGENT_STAGES } from "../types.js";
 
