@@ -1,5 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { computeRunCost } from "../../cost/per-run.js";
+import { installTestProLicense, restoreLicense } from "../helpers/license.js";
+
+// computeRunCost short-circuits to zero without an enterprise license
+// (defensive gate). The cost-shape tests below assume the gate has passed.
+beforeEach(async () => {
+  await installTestProLicense("enterprise");
+});
+afterEach(async () => {
+  await restoreLicense();
+});
 
 const config = {
   costs: {

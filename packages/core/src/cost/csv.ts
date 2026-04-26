@@ -2,6 +2,10 @@ import type { AnyDb } from "../db/client.js";
 import { and, gte, lt, inArray } from "drizzle-orm";
 import { pipelineRuns, stageRuns } from "../db/schema.js";
 import { computeRunCost } from "./per-run.js";
+import { isFeatureLicensed } from "../license.js";
+import { createLogger } from "../logger.js";
+
+const log = createLogger({ component: "cost.csv" });
 
 const HEADER =
   "completed_at,run_id,issue_id,pipeline_key,linear_team_id,repo_url,input_tokens,output_tokens,dollars,time_saved_hours";
@@ -36,6 +40,13 @@ export async function* streamCostCsv(
   config: CostConfig,
   maxRuns: number = DEFAULT_CSV_MAX_RUNS,
 ): AsyncIterable<string> {
+  if (!isFeatureLicensed("cost-roi")) {
+    log.warn(
+      { feature: "cost-roi" },
+      "streamCostCsv called without an enterprise license — returning empty stream",
+    );
+    return;
+  }
   yield HEADER + "\n";
 
   const runs = await db

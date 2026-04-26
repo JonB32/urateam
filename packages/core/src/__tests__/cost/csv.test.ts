@@ -1,7 +1,17 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createDb } from "../../db/client.js";
 import { pipelineRuns, stageRuns } from "../../db/schema.js";
 import { streamCostCsv } from "../../cost/csv.js";
+import { installTestProLicense, restoreLicense } from "../helpers/license.js";
+
+// streamCostCsv short-circuits to an empty stream without an enterprise
+// license (defensive gate). All tests assume the gate has passed.
+beforeEach(async () => {
+  await installTestProLicense("enterprise");
+});
+afterEach(async () => {
+  await restoreLicense();
+});
 
 async function collect(iter: AsyncIterable<string>): Promise<string> {
   let out = "";

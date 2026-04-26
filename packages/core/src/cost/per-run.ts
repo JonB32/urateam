@@ -1,5 +1,16 @@
 import { resolveModelRate, resolveTimeSavedPerPr } from "./rates.js";
 import type { RunCost } from "./types.js";
+import { isFeatureLicensed } from "../license.js";
+import { createLogger } from "../logger.js";
+
+const log = createLogger({ component: "cost.per-run" });
+
+const ZERO_COST: RunCost = {
+  inputTokens: 0,
+  outputTokens: 0,
+  dollars: 0,
+  timeSavedHours: 0,
+};
 
 interface PipelineRunRow {
   pipelineKey: string;
@@ -31,6 +42,13 @@ export function computeRunCost(
   stages: StageRunRow[],
   config: CostConfig,
 ): RunCost {
+  if (!isFeatureLicensed("cost-roi")) {
+    log.warn(
+      { feature: "cost-roi", pipelineKey: run.pipelineKey },
+      "computeRunCost called without an enterprise license — returning zero cost",
+    );
+    return { ...ZERO_COST };
+  }
   const pc = config.pipelineConfigs?.[run.pipelineKey];
   let dollars = 0;
   let inputTokens = 0;
