@@ -1,26 +1,7 @@
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
-
-/**
- * OSS-tier auth pre-flight: probe `claude auth status` before opening any
- * connections / mutating Linear state. See urateam#40 + the matching
- * helper in dev.ts. No-op when the Claude API tier (long-lived API key)
- * is in use; this is purely OSS protection.
- */
-async function preflightClaudeAuth(): Promise<void> {
-  const { isClaudeAuthValid } = await import("@urateam/core");
-  if (await isClaudeAuthValid()) return;
-  console.error(
-    "⚠ Claude session auth check failed at startup.\n" +
-      "  The local `claude` session is missing or expired.\n" +
-      "  Run `claude login` (or `docker compose exec <service> claude login`\n" +
-      "  if running containerized) and restart `ura start` before processing\n" +
-      "  webhooks. Without this fix, webhooks will fail mid-pipeline and the\n" +
-      "  agent will mark Linear issues as failed — requiring manual recovery.\n",
-  );
-  process.exit(1);
-}
+import { preflightClaudeAuth } from "../lib/preflight-claude-auth.js";
 
 export const startCommand = new Command("start")
   .description("Start production server (webhook + dashboard)")
@@ -186,7 +167,7 @@ export const startCommand = new Command("start")
 
     // OSS-tier auth pre-flight (urateam#40). Run before opening the DB so a
     // bad auth state doesn't leave any resources to clean up.
-    await preflightClaudeAuth();
+    await preflightClaudeAuth({ command: "ura start", containerized: true });
 
     // --- SSO (Enterprise, opt-in via URATEAM_SSO_ENABLED=true) ---
     // Validate SSO env vars BEFORE opening the DB / starting the runner so a

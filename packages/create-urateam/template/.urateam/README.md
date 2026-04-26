@@ -20,12 +20,15 @@ weekly) and **`ura dev` will refuse to start when the session is invalid** —
 this prevents the failure mode where webhooks fail mid-pipeline and Linear
 issues get marked as failed before you notice.
 
-If you see this banner at startup:
+If you see this banner at startup (the exact wording varies slightly between
+`pnpm dev` and `pnpm start`):
 
 ```
 ⚠ Claude session auth check failed at startup.
   The local `claude` session is missing or expired.
-  Run `claude login` and restart `ura dev` before moving issues to Todo.
+  Run `claude login` and restart `ura dev`. Without this fix,
+  webhooks will fail mid-pipeline and the agent will mark Linear issues
+  as failed — requiring manual recovery.
 ```
 
 …run `claude login` (interactive — opens a browser), then restart `pnpm dev`
@@ -33,9 +36,9 @@ or `pnpm start`. Once running, urateam re-checks the session before each
 agent invocation, so a session that expires mid-day is caught before it
 mutates Linear state.
 
-**Production note:** if you're running in a container, the auth probe runs
-inside the container too. Use `docker compose exec <service> claude login`
-to re-authenticate.
+**Production / containerized:** the production banner shown by `pnpm start`
+mentions the docker-compose form: `docker compose exec <service> claude login`.
+Use that variant when re-authing inside a running container.
 
 **Upgrading off this:** the Anthropic API tier (long-lived API key) doesn't
 have session-lifetime semantics, so this whole concern goes away. See the

@@ -1,29 +1,6 @@
 import { Command } from "commander";
 import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
-
-/**
- * OSS-tier auth pre-flight: probe `claude auth status` before opening any
- * connections / mutating Linear state. The OSS path uses the interactive
- * Claude session which expires silently in the background; without this
- * check the first inbound webhook would burn through tokens, mark the
- * Linear issue as failed, and leave the operator to manually unstick it.
- * See urateam#40.
- *
- * The Claude API tier presumably uses a long-lived API key with no
- * session-lifetime semantics; this gate is a no-op in that case.
- */
-async function preflightClaudeAuth(): Promise<void> {
-  const { isClaudeAuthValid } = await import("@urateam/core");
-  if (await isClaudeAuthValid()) return;
-  console.error(
-    "⚠ Claude session auth check failed at startup.\n" +
-      "  The local `claude` session is missing or expired.\n" +
-      "  Run `claude login` and restart `ura dev` before moving issues to Todo.\n" +
-      "  Without this fix, webhooks will fail mid-pipeline and the agent will\n" +
-      "  mark Linear issues as failed — requiring manual recovery.\n",
-  );
-  process.exit(1);
-}
+import { preflightClaudeAuth } from "../lib/preflight-claude-auth.js";
 
 export const devCommand = new Command("dev")
   .description("Start local development server (webhook + dashboard)")
@@ -85,7 +62,7 @@ export const devCommand = new Command("dev")
 
     // OSS-tier auth pre-flight (urateam#40). Run before opening the DB so a
     // bad auth state doesn't leave any resources to clean up.
-    await preflightClaudeAuth();
+    await preflightClaudeAuth({ command: "ura dev" });
 
     const config = {
       webhookSecret: process.env.LINEAR_WEBHOOK_SECRET ?? "dev-secret",
