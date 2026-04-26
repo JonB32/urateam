@@ -132,6 +132,23 @@ export function isFeatureLicensed(feature: string): boolean {
   return checkLicense().features.has(feature);
 }
 
+/**
+ * Thrown when a commercially gated feature is invoked without a license that
+ * unlocks it. Library entry points for gated features (SSO, RBAC, cost
+ * calculation, etc.) throw this when callers can't be served a safe default
+ * — the caller MUST hold a valid license to proceed.
+ */
+export class LicenseRequiredError extends Error {
+  readonly feature: string;
+  constructor(feature: string) {
+    super(
+      `feature "${feature}" requires a license that unlocks it; running in OSS mode`,
+    );
+    this.name = "LicenseRequiredError";
+    this.feature = feature;
+  }
+}
+
 interface JwtClaims {
   iss: string;
   sub: string;
