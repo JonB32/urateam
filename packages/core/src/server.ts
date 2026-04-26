@@ -128,6 +128,7 @@ export async function createApp(config: ServerConfig) {
   if (config.pmSlack) {
     if (!isFeatureLicensed("slack-interface")) {
       log.warn(
+        { feature: "slack-interface" },
         "pmSlack is configured but the slack-interface feature requires a Pro license — Slack routes will NOT be mounted",
       );
     } else {
