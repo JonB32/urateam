@@ -7,6 +7,20 @@ export const DEFAULT_MODEL = "claude-sonnet-4-6";
 export const HAIKU_MODEL = "claude-haiku-4-5";
 
 /**
+ * Recursively freeze an object so accidental mutation by callers throws
+ * (in strict mode) rather than silently corrupting the shared defaults.
+ */
+function deepFreeze<T>(o: T): T {
+  if (o === null || typeof o !== "object") return o;
+  for (const v of Object.values(o as object)) deepFreeze(v);
+  return Object.freeze(o);
+}
+
+/** Upper bounds for env-var overrides — protect against fat-finger like {"maxTurns": 999999}. */
+const MAX_TURNS_CEILING = 500;
+const MAX_INPUT_TOKENS_CEILING = 500_000;
+
+/**
  * Default budget + tool surface for each pipeline stage. The defaults are
  * sized for a "mature repo" — implement stage does real work, test stage
  * runs an existing test suite, etc. They are intentionally NOT sized for
@@ -16,8 +30,12 @@ export const HAIKU_MODEL = "claude-haiku-4-5";
  *
  * Operators with bootstrapping needs can override individual fields per
  * stage via the URATEAM_AGENT_PROFILES env var (see `getAgentProfiles`).
+ *
+ * Deep-frozen so accidental mutation by a caller (e.g., a test that does
+ * `getAgentProfiles().test.maxTurns = 999`) throws instead of silently
+ * corrupting the shared defaults for the rest of process lifetime.
  */
-export const DEFAULT_AGENT_PROFILES: Record<string, AgentProfile> = {
+export const DEFAULT_AGENT_PROFILES: Record<string, AgentProfile> = deepFreeze({
   triage: {
     tools: ["Read", "Glob", "Grep", "WebSearch"],
     maxInputTokens: 30_000,
@@ -48,11 +66,16 @@ export const DEFAULT_AGENT_PROFILES: Record<string, AgentProfile> = {
     maxTurns: 20,
     model: DEFAULT_MODEL,
   },
-};
+});
 
 /**
  * Backward-compat re-export. Prefer `getAgentProfiles()` so per-process
  * env-var overrides are honored.
+ *
+ * @deprecated Use `getAgentProfiles()` for active profiles (env-var-merged).
+ *   This alias only ever returns the unmerged defaults — useful for
+ *   asserting the default shape in tests, but wrong for any consumer
+ *   that wants the runtime-effective values.
  */
 export const agentProfiles = DEFAULT_AGENT_PROFILES;
 
@@ -69,47 +92,57 @@ function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((x) => typeof x === "string");
 }
 
-function isPositiveInteger(v: unknown): v is number {
-  return typeof v === "number" && Number.isInteger(v) && v > 0;
+function isPositiveIntegerWithin(v: unknown, max: number): v is number {
+  return typeof v === "number" && Number.isInteger(v) && v > 0 && v <= max;
 }
 
 /**
  * Apply a single override object on top of a base profile. Unknown stages
  * are dropped with a warn (op-side typo protection). Known stages with
  * malformed fields are dropped field-by-field (don't let one bad field
- * tank the whole stage).
+ * tank the whole stage). The stage name is included in every warn payload
+ * so operators can pinpoint which stage triggered each warning.
+ *
+ * Returns a fresh object — never mutates `base`. The `tools` array is
+ * copied either from the override or from a fresh `[...base.tools]` copy
+ * so callers cannot reach back into DEFAULT_AGENT_PROFILES via the
+ * returned reference.
  */
-function mergeOverride(base: AgentProfile, override: PartialProfile): AgentProfile {
-  const merged: AgentProfile = { ...base };
+function mergeOverride(
+  base: AgentProfile,
+  override: PartialProfile,
+  stage: string,
+): AgentProfile {
+  const merged: AgentProfile = { ...base, tools: [...base.tools] };
   if (isStringArray(override.tools)) {
-    merged.tools = override.tools;
+    merged.tools = override.tools.slice();
   } else if (override.tools !== undefined) {
     log.warn(
-      { stage: undefined, field: "tools", got: typeof override.tools },
+      { stage, field: "tools", got: typeof override.tools },
       "URATEAM_AGENT_PROFILES override: tools must be a string array — ignoring this field",
     );
   }
-  if (isPositiveInteger(override.maxInputTokens)) {
+  if (isPositiveIntegerWithin(override.maxInputTokens, MAX_INPUT_TOKENS_CEILING)) {
     merged.maxInputTokens = override.maxInputTokens;
   } else if (override.maxInputTokens !== undefined) {
     log.warn(
-      { field: "maxInputTokens", got: override.maxInputTokens },
-      "URATEAM_AGENT_PROFILES override: maxInputTokens must be a positive integer — ignoring this field",
+      { stage, field: "maxInputTokens", got: override.maxInputTokens, ceiling: MAX_INPUT_TOKENS_CEILING },
+      "URATEAM_AGENT_PROFILES override: maxInputTokens must be a positive integer ≤ ceiling — ignoring this field",
     );
   }
-  if (isPositiveInteger(override.maxTurns)) {
+  if (isPositiveIntegerWithin(override.maxTurns, MAX_TURNS_CEILING)) {
     merged.maxTurns = override.maxTurns;
   } else if (override.maxTurns !== undefined) {
     log.warn(
-      { field: "maxTurns", got: override.maxTurns },
-      "URATEAM_AGENT_PROFILES override: maxTurns must be a positive integer — ignoring this field",
+      { stage, field: "maxTurns", got: override.maxTurns, ceiling: MAX_TURNS_CEILING },
+      "URATEAM_AGENT_PROFILES override: maxTurns must be a positive integer ≤ ceiling — ignoring this field",
     );
   }
   if (typeof override.model === "string" && override.model.length > 0) {
     merged.model = override.model;
   } else if (override.model !== undefined) {
     log.warn(
-      { field: "model", got: override.model },
+      { stage, field: "model", got: override.model },
       "URATEAM_AGENT_PROFILES override: model must be a non-empty string — ignoring this field",
     );
   }
@@ -176,7 +209,7 @@ export function getAgentProfiles(): Record<string, AgentProfile> {
       );
       continue;
     }
-    result[stage] = mergeOverride(DEFAULT_AGENT_PROFILES[stage]!, override);
+    result[stage] = mergeOverride(DEFAULT_AGENT_PROFILES[stage]!, override, stage);
     log.info(
       { stage, profile: result[stage] },
       "URATEAM_AGENT_PROFILES override applied",
