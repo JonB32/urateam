@@ -70,14 +70,16 @@ describe("scaffold — sidecar pattern", () => {
       expect(content).toContain(".urateam/node_modules/");
     });
 
-    it("creates .urateam/.npmrc with ignore-workspace=true (pnpm monorepo fix, urateam#31)", () => {
+    it("creates .urateam/pnpm-workspace.yaml (pnpm monorepo fix, urateam#31)", () => {
       const projectDir = join(tempDir, "my-project");
       scaffold(baseOptions(projectDir, "my-project"));
 
-      const npmrcPath = join(projectDir, ".urateam", ".npmrc");
-      expect(existsSync(npmrcPath)).toBe(true);
-      const content = readFileSync(npmrcPath, "utf-8");
-      expect(content).toContain("ignore-workspace=true");
+      const wsPath = join(projectDir, ".urateam", "pnpm-workspace.yaml");
+      expect(existsSync(wsPath)).toBe(true);
+      const content = readFileSync(wsPath, "utf-8");
+      // Empty `packages:` list stops pnpm's upward workspace walk at .urateam/
+      // so `pnpm install` installs the sidecar's own deps locally.
+      expect(content).toContain("packages: []");
     });
 
     it(".urateam/package.json has sidecar name and @urateam/cli dependency", () => {
@@ -308,23 +310,6 @@ describe("scaffold — sidecar pattern", () => {
         readFileSync(join(projectDir, ".urateam", "package.json"), "utf-8"),
       );
       expect(pkgAfter.dependencies["some-custom-plugin"]).toBe("^1.0.0");
-    });
-
-    it("preserves existing .urateam/.npmrc with custom settings", () => {
-      const projectDir = join(tempDir, "rerun-project");
-      scaffold(baseOptions(projectDir, "rerun-project"));
-
-      // Simulate user customizing .npmrc (e.g., adding a registry override
-      // alongside the workspace flag).
-      const customNpmrc =
-        "ignore-workspace=true\n@my-scope:registry=https://npm.pkg.example.com\n";
-      writeFileSync(join(projectDir, ".urateam", ".npmrc"), customNpmrc);
-
-      // Re-run scaffold — must not clobber the user's customization.
-      scaffold(baseOptions(projectDir, "rerun-project"));
-
-      const after = readFileSync(join(projectDir, ".urateam", ".npmrc"), "utf-8");
-      expect(after).toBe(customNpmrc);
     });
 
     it("refreshes template files like Dockerfile and docker-compose.yml", () => {

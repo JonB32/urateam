@@ -1,0 +1,7 @@
+# Empty workspace marker. Stops pnpm's upward `pnpm-workspace.yaml` walk at
+# this directory, so `pnpm install` inside .urateam/ installs the sidecar's
+# own deps locally rather than resolving a parent workspace's projects. See
+# urateam#31. The `.npmrc` `ignore-workspace=true` flag does NOT work for this
+# (it only takes effect as a CLI argument, not from .npmrc, in pnpm 9.x).
+# npm and yarn ignore this file entirely, so it's a no-op for non-pnpm users.
+packages: []
