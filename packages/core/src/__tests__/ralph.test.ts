@@ -138,7 +138,11 @@ describe("checkRequirements", () => {
 
     const result = await checkRequirements(issue, makeHandoff(), "/tmp");
     expect(result.satisfied).toBe(false);
-    expect(result.evaluationFailed).toBeFalsy();
+    // Tighter than toBeFalsy() — the success-path contract is that the
+    // field is absent entirely, not just falsy. Catches regressions where
+    // someone adds `evaluationFailed: false` on every return out of misplaced
+    // defensive habit (which would still pass toBeFalsy but break narrowing).
+    expect(result.evaluationFailed).toBeUndefined();
     expect(result.gaps).toEqual(["Missing pagination"]);
   });
 });

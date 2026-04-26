@@ -759,6 +759,13 @@ export class PipelineRunner {
       let ralphSatisfied = true;
       let ralphGaps: string[] = [];
       let ralphSuggestions: string[] = [];
+      // urateam#108: distinguish "RALPH ran successfully and found N gaps"
+      // (ralphSatisfied=false, ralphGaps populated) from "RALPH check agent
+      // itself failed" (ralphSatisfied=false, ralphEvaluationFailed=true).
+      // These produce different PR-body / comment / notifier copy so reviewers
+      // don't waste time hunting for a non-existent failed requirement.
+      let ralphEvaluationFailed = false;
+      let ralphEvaluationError: string | undefined;
       const effectiveRalphIterations = isFeatureLicensed("deep-review")
         ? config.ralphIterations ?? 2
         : Math.min(config.ralphIterations ?? 1, 1);
@@ -887,10 +894,9 @@ export class PipelineRunner {
                 "RALPH: evaluation failed — drafting PR with eval-failure note instead of re-implementing",
               );
               ralphSatisfied = false;
-              ralphGaps = [
-                check.evaluationError ??
-                  "RALPH evaluation failed (no detail) — human review required",
-              ];
+              ralphEvaluationFailed = true;
+              ralphEvaluationError = check.evaluationError;
+              ralphGaps = [];
               ralphSuggestions = [];
               break;
             }
@@ -1293,16 +1299,19 @@ export class PipelineRunner {
               const rfCheck = await checkRequirements(sanitizedIssue, rfHandoffResult, worktreePath);
               ralphSatisfied = rfCheck.satisfied;
               if (rfCheck.evaluationFailed) {
-                ralphGaps = [
-                  rfCheck.evaluationError ??
-                    "RALPH evaluation failed (no detail) — human review required",
-                ];
+                ralphEvaluationFailed = true;
+                ralphEvaluationError = rfCheck.evaluationError;
+                ralphGaps = [];
                 ralphSuggestions = [];
                 runLog.warn(
                   { rfIteration, evaluationError: rfCheck.evaluationError },
                   "RALPH: re-check evaluation failed — drafting PR with eval-failure note (urateam#108)",
                 );
               } else {
+                // Reset in case a prior iteration's eval failed but this
+                // re-check ran cleanly.
+                ralphEvaluationFailed = false;
+                ralphEvaluationError = undefined;
                 ralphGaps = rfCheck.gaps;
                 ralphSuggestions = rfCheck.suggestions;
                 if (rfCheck.satisfied) {
@@ -1718,6 +1727,8 @@ export class PipelineRunner {
           shouldDraft,
           ralphSatisfied,
           ralphGaps,
+          ralphEvaluationFailed,
+          ralphEvaluationError,
           unresolvedBlockingFindings,
           agentCommits,
         });
@@ -1823,7 +1834,22 @@ export class PipelineRunner {
           runLog.info({ prUrl }, "draft PR: adding review comments with gaps and next steps");
           const commentParts: string[] = [];
 
-          if (!ralphSatisfied && ralphGaps.length > 0) {
+          if (!ralphSatisfied && ralphEvaluationFailed) {
+            // urateam#108: separate header + copy when the evaluator itself
+            // crashed. The previous "Unmet Acceptance Criteria" header was a
+            // lie — there were zero acceptance criteria checked, the agent
+            // broke before it could check anything.
+            commentParts.push("## RALPH Evaluation Error\n");
+            commentParts.push(
+              `The RALPH requirements-check agent failed to evaluate this PR. Human review is required to confirm all acceptance criteria are met.\n`,
+            );
+            commentParts.push(
+              `**Reason:** ${ralphEvaluationError ?? "no detail captured"}\n`,
+            );
+            commentParts.push(
+              "Common causes: agent exhausted its 6-turn cap on a complex spec, transient SDK error, or agent emitted no parseable JSON. Re-running the issue may succeed.",
+            );
+          } else if (!ralphSatisfied && ralphGaps.length > 0) {
             commentParts.push("## Unmet Acceptance Criteria (RALPH)\n");
             commentParts.push(`RALPH checked ${ralphIterations} time(s) and found the following gaps:\n`);
             for (const gap of ralphGaps) {
@@ -1864,11 +1890,15 @@ export class PipelineRunner {
             runLog.warn({ err: commentErr }, "failed to add PR comment for draft — continuing");
           }
 
-          // Notify for human review
+          // Notify for human review (urateam#108: don't claim "N unmet
+          // criteria" when N is actually an evaluator-error count).
+          const ralphSummary = ralphEvaluationFailed
+            ? "RALPH evaluation failed"
+            : `${ralphGaps.length} unmet acceptance criteria`;
           await this.notifier.onHumanReviewNeeded?.(
             run,
             prUrl,
-            `Draft PR created — ${ralphGaps.length} unmet acceptance criteria, ${unresolvedBlockingFindings.length} blocking findings`,
+            `Draft PR created — ${ralphSummary}, ${unresolvedBlockingFindings.length} blocking findings`,
           );
         }
 
