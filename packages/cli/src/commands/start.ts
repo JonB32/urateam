@@ -71,6 +71,20 @@ export const startCommand = new Command("start")
       repoConfigs[process.env.REPO_TEAM_ID] = repoEntry;
     }
 
+    // Fail fast if no repoConfigs could be built. Same guard as `ura dev` —
+    // without it the webhook server starts looking healthy and silently
+    // fails every inbound Linear event with "no repo mapping". See urateam#33.
+    if (Object.keys(repoConfigs).length === 0) {
+      console.error(
+        "Error: no repoConfigs could be built from environment variables.\n" +
+          "Set REPO_TEAM_ID and REPO_URL and restart.\n" +
+          "Example:\n" +
+          "  REPO_TEAM_ID=<your Linear team UUID — usually the same as LINEAR_TEAM_ID>\n" +
+          "  REPO_URL=https://github.com/org/repo\n",
+      );
+      process.exit(1);
+    }
+
     // GitHub App config (optional)
     let github: import("@urateam/core").GitHubConfig | undefined;
     if (process.env.GITHUB_APP_ID && process.env.GITHUB_PRIVATE_KEY_PATH) {
