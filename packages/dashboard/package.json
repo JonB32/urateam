@@ -14,7 +14,7 @@
     "directory": "packages/dashboard"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node --input-type=module -e \"import{cpSync}from'node:fs';cpSync('src/static','dist/static',{recursive:true})\"",
     "test": "vitest run",
     "dev": "tsx watch src/server.ts"
   },

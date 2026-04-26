@@ -2,6 +2,8 @@
 import { Hono } from "hono";
 import { basicAuth } from "hono/basic-auth";
 import { serveStatic } from "@hono/node-server/serve-static";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { createLogger, isFeatureLicensed } from "@urateam/core";
 import type {
   Db,
@@ -198,8 +200,17 @@ export function createDashboard(config: DashboardConfig): Hono {
     });
   }
 
-  // Static files
-  app.use("/static/*", serveStatic({ root: "./packages/dashboard/src/" }));
+  // Static files. Resolve `static/` relative to this module's installed
+  // location, not the consumer's cwd. Without this, npm-installed users
+  // (every operator running from a `.urateam/` sidecar) hit a startup
+  // warning because `./packages/dashboard/src/` is repo-relative and
+  // doesn't exist outside the urateam monorepo. See urateam#101.
+  //
+  // After build, `import.meta.url` resolves to dist/server.js, so the
+  // join lands at dist/static/ — where the build script copies src/static/
+  // before publishing.
+  const dashboardModuleDir = dirname(fileURLToPath(import.meta.url));
+  app.use("/static/*", serveStatic({ root: join(dashboardModuleDir, "static") }));
 
   // Mount routes — pass basePath so every layout() call uses the correct prefix.
   const runsRouter = createRunsRouter(config.db, basePath);
