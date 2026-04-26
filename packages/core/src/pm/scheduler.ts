@@ -491,6 +491,11 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
 
         // Cost & ROI daily rollup (no-op if unlicensed).
         // Wrapped in try/catch — rollup failure must not crash the tick.
+        // The isFeatureLicensed check here is the SECONDARY guard — the
+        // primary gate now lives inside recomputeCostRollups itself. This
+        // outer check skips the call entirely (saves a function frame +
+        // one structured warn log per tick) and should not be removed
+        // even if the inner gate looks sufficient.
         try {
           if (isFeatureLicensed("cost-roi")) {
             await recomputeCostRollups(db, config as any);
