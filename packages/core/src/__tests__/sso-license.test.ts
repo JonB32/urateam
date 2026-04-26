@@ -16,13 +16,14 @@ describe("getDefaultWorkosClient license gate", () => {
     );
   });
 
-  it("LicenseRequiredError carries the feature key", async () => {
+  it("LicenseRequiredError carries feature + actual tier (oss in OSS mode)", async () => {
     try {
       await getDefaultWorkosClient("sk_test_unused");
       expect.fail("expected LicenseRequiredError");
     } catch (err) {
       expect(err).toBeInstanceOf(LicenseRequiredError);
       expect((err as LicenseRequiredError).feature).toBe("sso");
+      expect((err as LicenseRequiredError).actualTier).toBe("oss");
     }
   });
 
@@ -38,11 +39,13 @@ describe("getDefaultWorkosClient license gate", () => {
     });
   });
 
-  it("not licensed at pro tier", async () => {
+  it("rejects with actualTier='pro' when license is pro (sso is enterprise-only)", async () => {
     await installTestProLicense("pro");
-    await expect(getDefaultWorkosClient("sk_test_unused")).rejects.toBeInstanceOf(
-      LicenseRequiredError,
-    );
+    await expect(getDefaultWorkosClient("sk_test_unused")).rejects.toMatchObject({
+      name: "LicenseRequiredError",
+      feature: "sso",
+      actualTier: "pro",
+    });
   });
 
   // Note: positive-path "with enterprise license, returns a client" is not
