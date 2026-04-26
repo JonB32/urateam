@@ -23,17 +23,59 @@ function parseGitPorcelain(statusOutput: string): string[] {
 }
 
 /**
+ * Parse `git diff --name-only` output into a list of changed file paths.
+ * Newline-separated; one path per line.
+ */
+function parseGitDiffNames(output: string): string[] {
+  if (!output) return [];
+  return output.split("\n").map((p) => p.trim()).filter(Boolean);
+}
+
+/**
+ * Compute "what did the agent change in this branch" by combining the
+ * uncommitted worktree state (`git status --porcelain`) with the
+ * already-committed-on-the-branch diff against `baseRef` (`git diff
+ * --name-only baseRef...HEAD`).
+ *
+ * Both signals are needed because the runner runs `autoCommitChanges`
+ * between stages — which means a review-stage handoff sees a clean
+ * worktree, even though the implement stage just modified 15 files. Status
+ * alone misses those committed-then-rewound changes.
+ *
+ * fail-open: gitExecRaw resolves to "" on error, so a missing baseRef
+ * (e.g., no `origin/main` configured in a test repo) is silent.
+ */
+async function gitChangedFilesAcross(
+  workdir: string,
+  baseRef: string | undefined,
+): Promise<string[]> {
+  const statusOutput = await gitExecRaw(["status", "--porcelain"], workdir);
+  const fromStatus = parseGitPorcelain(statusOutput);
+  if (!baseRef) return fromStatus;
+  const diffOutput = await gitExecRaw(
+    ["diff", "--name-only", `${baseRef}...HEAD`],
+    workdir,
+  );
+  const fromDiff = parseGitDiffNames(diffOutput);
+  // Dedupe in case a file shows up in both (unlikely but possible if the
+  // agent partially committed and then made more edits).
+  return Array.from(new Set([...fromStatus, ...fromDiff]));
+}
+
+/**
  * Extract a structured handoff artifact from the stage agent's raw output
  * and the actual worktree state.
  *
  * Strategy:
  * 1. Fast path: if the agent already produced valid JSON, use it — but
- *    cross-check against `git status --porcelain` and override an empty
- *    `filesChanged` list when the worktree actually has changes (urateam#35).
- *    Without this guard, an agent that emits `filesChanged: []` for a
- *    multi-file PR (or self-critique JSON in `summary`) leaves the PR body
- *    rendered as "No file changes recorded" + "No test changes" even though
- *    the diff has 15+ files.
+ *    cross-check against the union of `git status --porcelain` (uncommitted)
+ *    and `git diff --name-only baseRef...HEAD` (committed on this branch
+ *    since it diverged from baseRef). Override an empty `filesChanged`
+ *    list when git shows real changes (urateam#35). The committed-half
+ *    of that union is load-bearing: the runner runs autoCommitChanges
+ *    between stages, so by review-stage time the worktree is clean even
+ *    though the implement stage modified N files. Status alone misses
+ *    that case (gap from PR #95).
  * 2. Otherwise, run git commands to get actual file changes and build the
  *    handoff programmatically from the diff + agent's raw text output
  *
@@ -45,35 +87,40 @@ export async function extractHandoff(
   issueId: string,
   stage: string,
   workdir: string,
+  /**
+   * Optional base ref (e.g., "origin/main") to compare HEAD against for the
+   * "agent committed work on the branch" portion of the empty-filesChanged
+   * override. When absent, only the worktree (`git status --porcelain`) is
+   * consulted — i.e., the PR #95 behavior. Pass the full ref form including
+   * any `origin/` prefix the caller wants.
+   */
+  baseRef?: string,
 ): Promise<HandoffParseResult> {
   // Fast path: if the agent already produced valid structured JSON, use it
   const fastResult = parseHandoffArtifact(agentOutput, runId, issueId, stage);
   if (fastResult.structured) {
-    // Sanity check against the worktree: an empty `filesChanged` from the
-    // agent is the symptom of urateam#35 — the agent's structured output
-    // can be malformed (e.g., self-critique JSON leaks into `summary` and
+    // Sanity check against git: an empty `filesChanged` from the agent is
+    // the symptom of urateam#35 — the agent's structured output can be
+    // malformed (e.g., self-critique JSON leaks into `summary` and
     // `filesChanged: []` is emitted alongside) while the diff is real.
-    // Trust git as the authoritative source of "what changed in the
-    // worktree" only when the agent says nothing changed.
+    // Trust git as the authoritative source only when the agent says
+    // nothing changed.
     //
     // We deliberately do NOT override a non-empty agent list, even when it
     // disagrees with git — agents may legitimately filter their list (e.g.,
     // exclude generated files), and the rotulus PR #7 symptom that drives
     // this fix is specifically the empty-on-multi-file case.
     //
-    // No try/catch: gitExecRaw fails-open to "" on error rather than
-    // rejecting (see git.ts), and `parseGitPorcelain("")` returns []. So a
-    // git failure naturally short-circuits the override without throwing.
-    // Mutation of fastResult.artifact is safe — fastResult is a local var
-    // produced by parseHandoffArtifact and not aliased anywhere else before
-    // we return it.
+    // gitExecRaw fails-open to "" on error rather than rejecting, so a
+    // missing remote/baseRef is silent. Mutation of fastResult.artifact
+    // is safe — fastResult is a local var produced by parseHandoffArtifact
+    // and not aliased anywhere else before we return it.
     if (fastResult.artifact.filesChanged.length === 0) {
-      const statusOutput = await gitExecRaw(["status", "--porcelain"], workdir);
-      const gitFilesChanged = parseGitPorcelain(statusOutput);
+      const gitFilesChanged = await gitChangedFilesAcross(workdir, baseRef);
       if (gitFilesChanged.length > 0) {
         log.warn(
-          { stage, gitFilesChanged: gitFilesChanged.length },
-          "agent reported empty filesChanged but git shows real changes — overriding with git diff (urateam#35)",
+          { stage, gitFilesChanged: gitFilesChanged.length, baseRef: baseRef ?? "(worktree only)" },
+          "agent reported empty filesChanged but git shows real changes — overriding (urateam#35)",
         );
         fastResult.artifact.filesChanged = gitFilesChanged;
       }
@@ -91,15 +138,21 @@ export async function extractHandoff(
   };
 
   try {
-    // Run both git commands in parallel — they're independent
-    const [statusOutput, diffStat] = await Promise.all([
-      gitExecRaw(["status", "--porcelain"], workdir),
-      gitExecSafe(["diff", "--stat", "HEAD"], workdir),
+    // Slow path uses the same union helper. Necessary for the RALPH call
+    // sites in pipeline/runner.ts which always take the slow path
+    // (they invoke extractHandoff with agentOutput="" so parseJsonBlock
+    // returns null). The fast-path override in PR #95 + this PR's widening
+    // were the load-bearing fix for the rotulus#16 PR-body bug; the slow
+    // path benefits incidentally.
+    //
+    // diffStat must scan the same range as filesChanged or the "Modified
+    // N files: <stat tail>" approach string can be misleading (empty stat
+    // alongside non-empty files when the worktree is autoCommit-clean).
+    const statRange = baseRef ? `${baseRef}...HEAD` : "HEAD";
+    const [filesChanged, diffStat] = await Promise.all([
+      gitChangedFilesAcross(workdir, baseRef),
+      gitExecSafe(["diff", "--stat", statRange], workdir),
     ]);
-
-    // Parse porcelain output: "XY filename" — 2 status chars + 1 space + path
-    // For renames: "XY old -> new"
-    const filesChanged = parseGitPorcelain(statusOutput);
 
     // Best-effort summary from agent output. The last few lines often contain
     // tool noise rather than meaningful prose. filesChanged is the reliable signal.

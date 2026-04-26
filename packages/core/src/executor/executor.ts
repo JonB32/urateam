@@ -179,12 +179,19 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
     turns = result.turns;
     lastTextContent = result.lastText;
 
+    // Pass `origin/<defaultBranch>` as baseRef so extractHandoff's
+    // empty-filesChanged override picks up commits the agent made on the
+    // branch in earlier stages (urateam#35 widened-fix gap from PR #95).
+    // Note: extractHandoff takes the FULL ref form including `origin/` —
+    // `getChangedFiles` in repo/git.ts takes a bare branch and prefixes
+    // internally; don't conflate the two contracts.
     const handoffResult = await extractHandoff(
       lastTextContent,
       runId,
       issueId,
       stage,
       workdir,
+      `origin/${repoConfig.defaultBranch}`,
     );
 
     await db

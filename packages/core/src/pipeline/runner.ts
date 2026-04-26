@@ -861,6 +861,8 @@ export class PipelineRunner {
               sanitizedIssue.id,
               stage,
               worktreePath,
+              // Full ref form (extractHandoff doesn't prepend `origin/`).
+              `origin/${repoConfig.defaultBranch}`,
             );
 
             runLog.info({ iteration, maxIterations: ralphIterations }, "RALPH: checking requirements");
@@ -1265,6 +1267,8 @@ export class PipelineRunner {
                 sanitizedIssue.id,
                 fixStage,
                 worktreePath,
+                // Full ref form (extractHandoff doesn't prepend `origin/`).
+                `origin/${repoConfig.defaultBranch}`,
               );
               runLog.info({ rfIteration }, "RALPH: re-checking requirements after review-fix implement");
               const rfCheck = await checkRequirements(sanitizedIssue, rfHandoffResult, worktreePath);

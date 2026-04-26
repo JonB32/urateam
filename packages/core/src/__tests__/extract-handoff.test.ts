@@ -237,6 +237,117 @@ describe("extractHandoff", () => {
     }
   });
 
+  it("override picks up branch-committed files when worktree is clean (urateam#35 widened, autoCommit gap)", async () => {
+    // Reproduces the rotulus PR #16 case from the OSS validation run: the
+    // implement stage modifies files and autoCommitChanges runs between
+    // stages. By the time the review stage's extractHandoff runs, the
+    // worktree is CLEAN — `git status --porcelain` returns nothing — and
+    // the empty-filesChanged override from PR #95 doesn't fire (status-only).
+    //
+    // Widened fix: when baseRef is supplied, also consult
+    // `git diff --name-only baseRef...HEAD` so the committed-on-branch
+    // files surface. This test simulates the autoCommit boundary by
+    // committing a feature edit on a feature branch with a baseline tag
+    // serving as baseRef.
+    const dir = await mkdtemp(join(tmpdir(), "extract-test-"));
+    try {
+      execFileSync("git", ["init", "-b", "main"], { cwd: dir });
+      execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: dir });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: dir });
+      // Initial commit — establishes the base.
+      await writeFile(join(dir, "existing.ts"), "export const a = 1;");
+      execFileSync("git", ["add", "."], { cwd: dir });
+      execFileSync("git", ["commit", "-m", "init"], { cwd: dir });
+      // Set up a fake `origin/main` so the prod `origin/main` ref form
+      // resolves in the test repo. update-ref creates it without a remote.
+      execFileSync(
+        "git",
+        ["update-ref", "refs/remotes/origin/main", "HEAD"],
+        { cwd: dir },
+      );
+      // Branch + commit two feature files, then leave the worktree clean
+      // (mirrors what autoCommitChanges produces).
+      execFileSync("git", ["checkout", "-b", "agent/iss-1"], { cwd: dir });
+      await writeFile(join(dir, "feature-a.ts"), "export const x = 1;");
+      await writeFile(join(dir, "feature-b.ts"), "export const y = 2;");
+      execFileSync("git", ["add", "."], { cwd: dir });
+      execFileSync("git", ["commit", "-m", "feat: add features"], { cwd: dir });
+
+      // Sanity check: `git status` is empty (autoCommit-clean state).
+      const status = execFileSync("git", ["status", "--porcelain"], { cwd: dir })
+        .toString();
+      expect(status.trim()).toBe("");
+
+      // Agent emits structurally-valid JSON but with empty filesChanged.
+      const brokenArtifact = { ...validArtifact, filesChanged: [] };
+      const output = wrapInJsonBlock(brokenArtifact);
+      const result = await extractHandoff(
+        output,
+        "run-1",
+        "ISS-1",
+        "review",
+        dir,
+        "origin/main",
+      );
+
+      expect(result.structured).toBe(true);
+      // Both feature files surface from the branch-vs-base diff, not status.
+      expect(result.artifact.filesChanged).toContain("feature-a.ts");
+      expect(result.artifact.filesChanged).toContain("feature-b.ts");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("dedupes files that show up in BOTH worktree status and branch-vs-base diff", async () => {
+    // Edge case: agent committed feature-a, then made an additional
+    // uncommitted edit to it. Should appear once, not twice.
+    const dir = await mkdtemp(join(tmpdir(), "extract-test-"));
+    try {
+      execFileSync("git", ["init", "-b", "main"], { cwd: dir });
+      execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: dir });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: dir });
+      await writeFile(join(dir, "existing.ts"), "export const a = 1;");
+      execFileSync("git", ["add", "."], { cwd: dir });
+      execFileSync("git", ["commit", "-m", "init"], { cwd: dir });
+      execFileSync("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], { cwd: dir });
+      execFileSync("git", ["checkout", "-b", "agent/iss-2"], { cwd: dir });
+      await writeFile(join(dir, "feature.ts"), "export const x = 1;");
+      execFileSync("git", ["add", "."], { cwd: dir });
+      execFileSync("git", ["commit", "-m", "feat: feature"], { cwd: dir });
+      // Now modify the same file again — uncommitted.
+      await writeFile(join(dir, "feature.ts"), "export const x = 99;");
+
+      const brokenArtifact = { ...validArtifact, filesChanged: [] };
+      const output = wrapInJsonBlock(brokenArtifact);
+      const result = await extractHandoff(
+        output, "run-1", "ISS-1", "review", dir, "origin/main",
+      );
+
+      expect(result.structured).toBe(true);
+      const occurrences = result.artifact.filesChanged.filter((f) => f === "feature.ts").length;
+      expect(occurrences).toBe(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to status-only when baseRef is undefined (back-compat with PR #95)", async () => {
+    // Existing callers that don't pass baseRef must keep getting the
+    // PR #95 behavior (worktree-only). This guards the optional-arg contract.
+    const dir = await createTestRepo();
+    try {
+      const brokenArtifact = { ...validArtifact, filesChanged: [] };
+      const output = wrapInJsonBlock(brokenArtifact);
+      const result = await extractHandoff(output, "run-1", "ISS-1", "implement", dir);
+      // Worktree has the modified file.txt from createTestRepo; override fires.
+      expect(result.structured).toBe(true);
+      expect(result.artifact.filesChanged).toContain("file.txt");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("override correctly resolves renamed files to the new name (parseGitPorcelain XY old -> new)", async () => {
     // Build a clean repo state with a single committed file, then do
     // ONLY a rename so porcelain emits the rename arrow form unambiguously.
