@@ -1,8 +1,16 @@
-import { describe, it, expect } from "vitest";
-import { createApp } from "../server.js";
+import { describe, it, expect, afterEach } from "vitest";
+import { createApp, type ServerConfig } from "../server.js";
 import { defaultConfigs } from "../pipeline/config.js";
+import { installTestProLicense, restoreLicense } from "./helpers/license.js";
 
-async function buildApp() {
+const PM_SLACK_CONFIG = {
+  signingSecret: "slack_signing_test",
+  botToken: "xoxb-test",
+  channelId: "C_TEST",
+  teamIds: ["T_TEST"],
+};
+
+async function buildApp(overrides: Partial<ServerConfig> = {}) {
   return createApp({
     webhookSecret: "whsec_test_secret",
     linearApiKey: "lin_api_test",
@@ -15,6 +23,7 @@ async function buildApp() {
         buildCommand: "npm run build",
       },
     },
+    ...overrides,
   });
 }
 
@@ -64,5 +73,33 @@ describe("Unknown routes", () => {
     const res = await app.request("/does-not-exist");
 
     expect(res.status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PM Slack interface license gating
+// ---------------------------------------------------------------------------
+describe("PM Slack interface mount is license-gated", () => {
+  afterEach(async () => {
+    await restoreLicense();
+  });
+
+  it("does NOT mount /slack/* routes in OSS mode even when pmSlack is configured", async () => {
+    // No license installed → tier is OSS → slack-interface feature unlicensed.
+    const { app } = await buildApp({ pmSlack: PM_SLACK_CONFIG });
+    const res = await app.request("/slack/events", { method: "POST" });
+    // If the route had mounted, it'd return some Slack-handler status (200 / 401 sig
+    // verification fail / 400 bad body). 404 confirms the route isn't mounted.
+    expect(res.status).toBe(404);
+  });
+
+  it("DOES mount /slack/* routes when a Pro license is installed", async () => {
+    await installTestProLicense();
+    const { app } = await buildApp({ pmSlack: PM_SLACK_CONFIG });
+    const res = await app.request("/slack/events", { method: "POST" });
+    // Route is mounted — status must NOT be 404. Slack handler will reject the
+    // empty unsigned body via its own validation, so any non-404 status confirms
+    // the mount.
+    expect(res.status).not.toBe(404);
   });
 });

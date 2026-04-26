@@ -124,17 +124,24 @@ export async function createApp(config: ServerConfig) {
     app.route("/", githubWebhookApp);
   }
 
-  // PM Agent Slack interface (optional)
+  // PM Agent Slack interface (optional, license-gated)
   if (config.pmSlack) {
-    const { createSlackInterface } = await import("./pm/slack-interface.js");
-    const { router: slackRouter } = createSlackInterface({
-      signingSecret: config.pmSlack.signingSecret,
-      botToken: config.pmSlack.botToken,
-      channelId: config.pmSlack.channelId,
-      linearApiKey: config.linearApiKey,
-      teamIds: config.pmSlack.teamIds,
-    });
-    app.route("/", slackRouter);
+    if (!isFeatureLicensed("slack-interface")) {
+      log.warn(
+        { feature: "slack-interface" },
+        "pmSlack is configured but the slack-interface feature requires a Pro license — Slack routes will NOT be mounted",
+      );
+    } else {
+      const { createSlackInterface } = await import("./pm/slack-interface.js");
+      const { router: slackRouter } = createSlackInterface({
+        signingSecret: config.pmSlack.signingSecret,
+        botToken: config.pmSlack.botToken,
+        channelId: config.pmSlack.channelId,
+        linearApiKey: config.linearApiKey,
+        teamIds: config.pmSlack.teamIds,
+      });
+      app.route("/", slackRouter);
+    }
   }
 
   // Health check
