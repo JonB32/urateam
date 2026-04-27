@@ -71,6 +71,44 @@ describe("issueLicense", () => {
     expect(verify(null, signingInput, pk, sig)).toBe(true);
   });
 
+  it("accepts a PEM-wrapped PKCS8 key in URATEAM_LICENSE_SIGNING_KEY_DER_B64", () => {
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const pubDer = Buffer.from(publicKey.export({ format: "der", type: "spki" }));
+    process.env.URATEAM_LICENSE_SIGNING_KEY_DER_B64 = privateKey
+      .export({ format: "pem", type: "pkcs8" })
+      .toString();
+
+    const token = issueLicense({
+      customerId: "cust_pem",
+      tier: "pro",
+      seats: 5,
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+
+    const [h, p, s] = token.split(".");
+    const sig = Buffer.from(
+      s.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (s.length % 4)) % 4),
+      "base64",
+    );
+    const pk = createPublicKey({ key: pubDer, format: "der", type: "spki" });
+    expect(verify(null, Buffer.from(`${h}.${p}`), pk, sig)).toBe(true);
+  });
+
+  it("tolerates whitespace around a DER-base64 key", () => {
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const b64 = Buffer.from(privateKey.export({ format: "der", type: "pkcs8" })).toString("base64");
+    process.env.URATEAM_LICENSE_SIGNING_KEY_DER_B64 = `\n  ${b64}\n`;
+
+    expect(() =>
+      issueLicense({
+        customerId: "cust_ws",
+        tier: "pro",
+        seats: 1,
+        expiresAt: new Date(Date.now() + 86_400_000),
+      }),
+    ).not.toThrow();
+  });
+
   it("throws when URATEAM_LICENSE_SIGNING_KEY_DER_B64 is not set", () => {
     delete process.env.URATEAM_LICENSE_SIGNING_KEY_DER_B64;
     expect(() =>
