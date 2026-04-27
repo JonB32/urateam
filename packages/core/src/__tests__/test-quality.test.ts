@@ -377,6 +377,101 @@ it("throws on bad input", () => { expect(() => sum(null, 2)).toThrow(); });
     expect(typeof v.fix).toBe("string");
   });
 
+  // ---------------------------------------------------------------------------
+  // urateam#97 / rotulus#17 PR #18: constant-self-equality stub detection
+  // ---------------------------------------------------------------------------
+  it("flags constant-self-equality stubs even when buried among real assertions (rotulus#17 case)", async () => {
+    // Reproduces the PR #18 regression: nav test file had 4 stubs of the
+    // form `expect(BRAND_COLOR).toBe(BRAND_COLOR)` mixed in with many
+    // real behavioral assertions. Pre-fix, the stubs counted as
+    // "behavioral" (toBe matcher), the file's trivialRatio stayed below
+    // the 0.8 threshold, and the file was NOT flagged. Post-fix, the
+    // stubs are reclassified to trivial AND any non-zero stubAssertions
+    // unconditionally flags the file.
+    const content = `
+describe("nav constants", () => {
+  it("uses brand color", () => { expect(BRAND_COLOR).toBe(BRAND_COLOR); });
+  it("uses bg color", () => { expect(TAB_BAR_BG).toBe(TAB_BAR_BG); });
+  it("uses inactive color", () => { expect(TAB_INACTIVE_COLOR).toBe(TAB_INACTIVE_COLOR); });
+  it("uses ac3", () => { expect(AC3).toBe(AC3); });
+  it("real test 1", () => { expect(getValue()).toEqual({ a: 1, b: 2 }); });
+  it("real test 2", () => { expect(items).toHaveLength(3); });
+  it("real test 3", () => { expect(spy).toHaveBeenCalledWith("foo"); });
+  it("real test 4", () => { expect(promise).resolves.toEqual("done"); });
+  it("real test 5", () => { expect(error).toThrow("BadInput"); });
+});`;
+    mockReadFile({ [join("/worktree", "nav.test.tsx")]: content });
+
+    const result = await checkTestQuality(["nav.test.tsx"], "/worktree");
+
+    expect(result.analyses[0].stubAssertions).toBe(4);
+    expect(result.analyses[0].isFlagged).toBe(true);
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0].description).toContain(
+      "4 constant-self-equality stub(s)",
+    );
+  });
+
+  it("reclassifies expect(X).toEqual(X) and toStrictEqual(X) as trivial too", async () => {
+    const content = `
+it("a", () => { expect(VAR).toEqual(VAR); });
+it("b", () => { expect(VAR2).toStrictEqual(VAR2); });
+it("c", () => { expect(real).toBe(42); });`;
+    mockReadFile({ [join("/worktree", "x.test.ts")]: content });
+
+    const result = await checkTestQuality(["x.test.ts"], "/worktree");
+    const a = result.analyses[0];
+    expect(a.stubAssertions).toBe(2);
+    // Real `toBe(42)` stays behavioral.
+    expect(a.behavioralAssertions).toBe(1);
+    // Trivial pool gains the 2 stubs (despite using behavioral matchers).
+    expect(a.trivialAssertions).toBe(2);
+    expect(a.isFlagged).toBe(true);
+  });
+
+  it("matches member-access identifiers (expect(obj.foo).toBe(obj.foo))", async () => {
+    const content = `it("a", () => { expect(config.brandColor).toBe(config.brandColor); });`;
+    mockReadFile({ [join("/worktree", "y.test.ts")]: content });
+    const result = await checkTestQuality(["y.test.ts"], "/worktree");
+    expect(result.analyses[0].stubAssertions).toBe(1);
+    expect(result.analyses[0].isFlagged).toBe(true);
+  });
+
+  it("does NOT flag expect(X).toBe(Y) when identifiers differ (negative control)", async () => {
+    const content = `
+it("a", () => { expect(actual).toBe(expected); });
+it("b", () => { expect(brandColor).toBe(theme.brandColor); });
+it("c", () => { expect(items).toEqual([1, 2, 3]); });`;
+    mockReadFile({ [join("/worktree", "z.test.ts")]: content });
+
+    const result = await checkTestQuality(["z.test.ts"], "/worktree");
+    expect(result.analyses[0].stubAssertions).toBe(0);
+    expect(result.analyses[0].behavioralAssertions).toBe(3);
+    expect(result.analyses[0].isFlagged).toBe(false);
+    expect(result.violations).toHaveLength(0);
+  });
+
+  it("flags a file where ONE test has a constant-self-equality stub (no dilution-grace)", async () => {
+    // The diluted-ratio defense was the rotulus#17 regression. Even one
+    // stub in a file with otherwise-real tests should fire the flag.
+    const content = `
+it("real 1", () => { expect(a).toEqual({ x: 1 }); });
+it("real 2", () => { expect(b).toHaveLength(5); });
+it("stub", () => { expect(THEME).toBe(THEME); });
+it("real 3", () => { expect(spy).toHaveBeenCalledWith("ok"); });`;
+    mockReadFile({ [join("/worktree", "mixed.test.ts")]: content });
+
+    const result = await checkTestQuality(["mixed.test.ts"], "/worktree");
+    const a = result.analyses[0];
+    expect(a.stubAssertions).toBe(1);
+    expect(a.behavioralAssertions).toBe(3); // 3 real, 1 stub reclassified out
+    // Trivial ratio is 1/4 = 25% — way below the 0.8 threshold. Pre-fix
+    // this would NOT have been flagged. Post-fix the unconditional
+    // stub-count flag fires.
+    expect(a.trivialRatio).toBeLessThan(TRIVIAL_THRESHOLD);
+    expect(a.isFlagged).toBe(true);
+  });
+
   it("identifies BEC-52 pattern: 13 tests all with toBeDefined", async () => {
     // Reproduce the problematic BEC-52 dashboard server.test.ts pattern
     const tests = Array.from(
