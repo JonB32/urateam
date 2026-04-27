@@ -338,6 +338,8 @@ export interface PipelineRun {
   autoMergeReason?: string;
   /** True when auto-commit was triggered because the agent did not commit its work. Quality metric. */
   autoCommitted?: boolean;
+  /** In-memory only: count of retries per stage. Surfaces silent retry attempts in logs. */
+  stageRetries?: Record<string, number>;
 }
 
 // --- Pipeline Result / Error ---
