@@ -374,6 +374,77 @@ describe("extractHandoff", () => {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // urateam#97: JSON-soup summary sanitization (slow path)
+  // ---------------------------------------------------------------------------
+  it("replaces JSON-soup summary text with a deterministic placeholder (urateam#97 rotulus#7 case)", async () => {
+    // Reproduces the exact pattern from rotulus PR #7: the review-stage
+    // agent emits review-finding JSON arrays (different schema than
+    // HandoffArtifact). The previous slow-path scraped the last 5 lines
+    // verbatim into `summary`, leaking JSON fragments into the rendered
+    // PR body's "## Summary" section.
+    const dir = await createTestRepo();
+    try {
+      const reviewFindingsLeak = [
+        "Done analyzing.",
+        '"description": "patchMeSchema uses Zod default strip — fields silently dropped.",',
+        '"fix": "Append .strict() to patchMeSchema",',
+        '"severity": "warning"',
+        "}]",
+      ].join("\n");
+
+      const result = await extractHandoff(reviewFindingsLeak, "run-1", "ISS-1", "review", dir);
+      expect(result.structured).toBe(false);
+      // Must NOT contain the leaked JSON fragments
+      expect(result.artifact.summary).not.toContain('"description"');
+      expect(result.artifact.summary).not.toContain('"fix"');
+      expect(result.artifact.summary).not.toContain('"severity"');
+      // Must have the deterministic placeholder
+      expect(result.artifact.summary).toContain("Stage review completed");
+      expect(result.artifact.summary).toContain("see Changes for files modified");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves prose summary when agent output is normal text (no false positive)", async () => {
+    // Negative control: the JSON-soup heuristic should NOT fire on
+    // legitimate prose summaries.
+    const dir = await createTestRepo();
+    try {
+      const prose = [
+        "Completed implementation of the search endpoint.",
+        "Added pagination support and input validation.",
+        "All tests pass.",
+      ].join("\n");
+
+      const result = await extractHandoff(prose, "run-1", "ISS-1", "implement", dir);
+      expect(result.structured).toBe(false);
+      expect(result.artifact.summary).toContain("search endpoint");
+      expect(result.artifact.summary).toContain("All tests pass");
+      // Sanity: not the placeholder
+      expect(result.artifact.summary).not.toContain("not parseable prose");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves prose with incidental quoted phrases (no over-eager pattern match)", async () => {
+    // Edge case: prose that mentions a JSON-shaped phrase by coincidence
+    // (e.g., "the description: field is missing"). The heuristic requires
+    // 2+ `"x":"` patterns OR an opening { / [, neither of which fires here.
+    const dir = await createTestRepo();
+    try {
+      const prose = "Implementation done. The description field on User model now accepts emojis.";
+      const result = await extractHandoff(prose, "run-1", "ISS-1", "implement", dir);
+      expect(result.structured).toBe(false);
+      expect(result.artifact.summary).toContain("emojis");
+      expect(result.artifact.summary).not.toContain("not parseable prose");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("returns structured: false when git diff fails (not a git repo)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "extract-test-"));
     // Not a git repo — no .git directory

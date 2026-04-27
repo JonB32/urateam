@@ -63,7 +63,16 @@ export function parseHandoffArtifact(
 
   const parsed = parseJsonBlock(agentOutput);
   if (!parsed) {
-    log.error({ stage }, "no valid JSON block in agent output, using fallback");
+    // Demoted from error → debug: this fires on EVERY implement/test stage
+    // because per-stage prompts (templates.ts) never instruct the agent to
+    // emit a HandoffArtifact-shaped JSON block. The slow path in
+    // extractHandoff reconstructs filesChanged from git diff and provides a
+    // sanitized summary, so this isn't an actionable error — it's expected
+    // operation. Logging at error level falsely flagged it as a problem in
+    // every operator dashboard. See urateam#97. (When prompt engineering
+    // catches up and the fast path actually runs, this log becomes useful
+    // again — flip back to warn at that point.)
+    log.debug({ stage }, "no valid JSON block in agent output, using slow-path reconstruction");
     return {
       artifact: buildFallback(metadata, agentOutput.slice(0, 500)),
       structured: false,
@@ -79,9 +88,12 @@ export function parseHandoffArtifact(
 
   const result = HandoffArtifactSchema.safeParse(fullArtifact);
   if (!result.success) {
-    log.error(
+    // Same demotion as the no-block case above (urateam#97). The review
+    // stage routinely emits review-findings JSON (severity/file/line shape)
+    // which fails this validation. That's expected, not an error.
+    log.debug(
       { stage, validationErrors: result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join(", ") },
-      "invalid HandoffArtifact, using fallback",
+      "JSON block did not match HandoffArtifact schema, using slow-path reconstruction",
     );
     return {
       artifact: buildFallback(metadata, agentOutput.slice(0, 500)),
