@@ -432,7 +432,8 @@ describe("extractHandoff", () => {
   it("preserves prose with incidental quoted phrases (no over-eager pattern match)", async () => {
     // Edge case: prose that mentions a JSON-shaped phrase by coincidence
     // (e.g., "the description: field is missing"). The heuristic requires
-    // 2+ `"x":"` patterns OR an opening { / [, neither of which fires here.
+    // 3+ `"x":"` patterns OR an opening { / [ followed by JSON structure,
+    // neither of which fires here.
     const dir = await createTestRepo();
     try {
       const prose = "Implementation done. The description field on User model now accepts emojis.";
@@ -440,6 +441,68 @@ describe("extractHandoff", () => {
       expect(result.structured).toBe(false);
       expect(result.artifact.summary).toContain("emojis");
       expect(result.artifact.summary).not.toContain("not parseable prose");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves prose starting with checklist or tag prefixes (no false positive on `[x]`/`[PASS]`)", async () => {
+    // Sonnet review of PR #110 caught: agent output often ends with
+    // checklist items like `[x] tests pass` or tag-prefixed lines like
+    // `[PASS] all checks` / `[fix] update schema`. The previous
+    // `^[\s\[\{]` heuristic fired on these. Tightened to require an
+    // actual JSON opener (`[{` or `{"`) after the bracket.
+    const dir = await createTestRepo();
+    try {
+      const checklistTail = [
+        "[x] feature implemented",
+        "[x] tests pass",
+        "[PASS] lint",
+      ].join("\n");
+      const result = await extractHandoff(checklistTail, "run-1", "ISS-1", "test", dir);
+      expect(result.structured).toBe(false);
+      expect(result.artifact.summary).toContain("[x]");
+      expect(result.artifact.summary).toContain("PASS");
+      expect(result.artifact.summary).not.toContain("not parseable prose");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves config-change prose with two quoted attribute pairs (threshold guard)", async () => {
+    // Sonnet review of PR #110 caught: prose like
+    // `Added "env": "production" and "debug": "false" in config` was
+    // tripping the c3 heuristic when its threshold was 2. Raised to 3.
+    const dir = await createTestRepo();
+    try {
+      const configProse = 'Added "env": "production" and "debug": "false" to the staging config.';
+      const result = await extractHandoff(configProse, "run-1", "ISS-1", "implement", dir);
+      expect(result.structured).toBe(false);
+      expect(result.artifact.summary).toContain("staging config");
+      expect(result.artifact.summary).not.toContain("not parseable prose");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("JSON-soup detection still fires when baseRef is provided (slow-path coverage)", async () => {
+    // Coverage gap from PR #110 — the original 3 tests didn't pass baseRef.
+    // The widened union helper from PR #104 doesn't change the soup
+    // detection path, but the test surface should exercise both args.
+    const dir = await createTestRepo();
+    try {
+      const reviewFindingsLeak = '[{"description": "issue", "fix": "fix it", "severity": "blocking", "category": "Other"}]';
+      const result = await extractHandoff(
+        reviewFindingsLeak,
+        "run-1",
+        "ISS-1",
+        "review",
+        dir,
+        "origin/main",
+      );
+      expect(result.structured).toBe(false);
+      expect(result.artifact.summary).not.toContain('"description"');
+      expect(result.artifact.summary).toContain("Stage review completed");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

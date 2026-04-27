@@ -15,12 +15,18 @@ export function buildFallback(
   metadata: { runId: string; issueId: string; stage: string; timestamp: string },
   summary: string,
 ): HandoffArtifact {
-  // Note (urateam#35 Bug 1): if `summary` here is the agent's raw output
-  // truncated to 500 chars, it may contain JSON fragments from a self-
-  // critique block the agent leaked instead of structured prose. The fix
-  // for that is upstream prompt engineering (constraining the agent's
-  // structured-output instructions) — not summary sanitization here, which
-  // would be fragile regex hacks.
+  // Note (urateam#97): callers should NOT use this raw `summary` string
+  // for end-user surfaces. The slow path in extract-handoff.ts applies
+  // a JSON-soup heuristic before assigning to artifact.summary so the
+  // PR body's "## Summary" section doesn't render review-finding JSON
+  // fragments verbatim (rotulus#7 reproduction). buildFallback itself is
+  // schema-required to populate `summary` to satisfy HandoffArtifact;
+  // the sanitization logically belongs at the call site, not here.
+  //
+  // The deeper root cause — per-stage prompts in templates.ts never
+  // instruct the agent to emit a HandoffArtifact JSON block — is tracked
+  // in urateam#97 as the long-term fix. When that lands, the fast path
+  // becomes load-bearing and this fallback is rarely hit.
   return {
     ...metadata,
     summary: summary || `Stage ${metadata.stage} completed without structured output`,
@@ -64,14 +70,18 @@ export function parseHandoffArtifact(
   const parsed = parseJsonBlock(agentOutput);
   if (!parsed) {
     // Demoted from error → debug: this fires on EVERY implement/test stage
-    // because per-stage prompts (templates.ts) never instruct the agent to
-    // emit a HandoffArtifact-shaped JSON block. The slow path in
-    // extractHandoff reconstructs filesChanged from git diff and provides a
-    // sanitized summary, so this isn't an actionable error — it's expected
-    // operation. Logging at error level falsely flagged it as a problem in
-    // every operator dashboard. See urateam#97. (When prompt engineering
-    // catches up and the fast path actually runs, this log becomes useful
-    // again — flip back to warn at that point.)
+    // because per-stage prompts in `packages/core/src/executor/prompt/templates.ts`
+    // never instruct the agent to emit a HandoffArtifact-shaped JSON block.
+    // The slow path in extractHandoff reconstructs filesChanged from git diff
+    // and provides a sanitized summary, so this isn't an actionable error —
+    // it's expected operation. Logging at error level falsely flagged it as
+    // a problem in every operator dashboard (and triggered Slack alerts via
+    // notifier/slack-alerts.ts which fires on level >= 50). See urateam#97.
+    //
+    // CONTRACT FOR FLIP-BACK: when (a) the per-stage prompts in templates.ts
+    // are updated to request a HandoffArtifact JSON block, AND (b) the fast
+    // path actually reaches `structured: true` on a meaningful fraction of
+    // runs, this log should flip back to warn. Track via urateam#97.
     log.debug({ stage }, "no valid JSON block in agent output, using slow-path reconstruction");
     return {
       artifact: buildFallback(metadata, agentOutput.slice(0, 500)),
@@ -88,9 +98,11 @@ export function parseHandoffArtifact(
 
   const result = HandoffArtifactSchema.safeParse(fullArtifact);
   if (!result.success) {
-    // Same demotion as the no-block case above (urateam#97). The review
-    // stage routinely emits review-findings JSON (severity/file/line shape)
-    // which fails this validation. That's expected, not an error.
+    // Same demotion as the no-block case above (urateam#97); same
+    // flip-back contract. The review stage routinely emits review-findings
+    // JSON (severity/file/line shape, see security/review-checklist.ts
+    // REVIEW_OUTPUT_FORMAT) which fails this validation. That's expected
+    // operation, not an error.
     log.debug(
       { stage, validationErrors: result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join(", ") },
       "JSON block did not match HandoffArtifact schema, using slow-path reconstruction",

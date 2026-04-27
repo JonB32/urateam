@@ -169,11 +169,22 @@ export async function extractHandoff(
     const rawTail = lines.length > 0
       ? lines.slice(-5).join(" ").slice(0, 500)
       : "";
+    // Heuristics tuned to avoid false positives on common agent prose:
+    //   - `[x] tests pass`, `[PASS]`, `[fix] ...` — checklist / tag prefixes
+    //   - `Added "env": "production" and "debug": "false"` — config-change prose
+    //   - `{ destructured } = result` — JS destructuring prose
+    // To trip detection, the tail must look STRUCTURALLY like JSON, not just
+    // contain bracket characters. `^\s*[\[{]\s*[{"]` matches `[{...`, `{"...`,
+    // and similar real JSON openers but not `[x]` / `{ destruct }` / etc.
     const looksLikeJsonSoup =
-      /^[\s\[\{]/.test(rawTail) ||
+      /^\s*[[{]\s*["{]/.test(rawTail) ||
       /"(description|fix|severity|category)"\s*:/.test(rawTail) ||
-      // Heuristic: 2+ JSON-property colons in close proximity (e.g. ", "x":")
-      (rawTail.match(/"\s*:\s*"/g)?.length ?? 0) >= 2;
+      // Tighter threshold (3+) for the bare-property-pair heuristic. Two
+      // pairs is too low — operators routinely write prose with two quoted
+      // attribute references (e.g., "Added \"env\": \"production\" and
+      // \"debug\": \"false\""). Three+ is consistent with real review-finding
+      // JSON arrays which always emit many such pairs per tail window.
+      (rawTail.match(/"\s*:\s*"/g)?.length ?? 0) >= 3;
     const summary = !rawTail
       ? `Stage ${stage} completed`
       : looksLikeJsonSoup
