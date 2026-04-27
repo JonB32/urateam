@@ -31,4 +31,4 @@ console.log("# Public key (paste into packages/core/src/license-public-key.ts)")
 console.log(`URATEAM_LICENSE_PUBLIC_KEY_DER_B64="${publicB64}"`);
 console.log("");
 console.log("# Private key (STORE SECURELY — operator-only, never commit)");
-console.log(`URATEAM_LICENSE_SIGNING_KEY_DER_B64="${privateB64}"`);
+console.log(`URATEAM_LICENSE_SIGNING_KEY="${privateB64}"`);

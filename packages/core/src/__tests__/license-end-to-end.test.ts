@@ -46,11 +46,11 @@ describe("license end-to-end (CLI issue → core validate)", () => {
 
   beforeEach(async () => {
     _resetLicenseCache();
-    originalSigningKey = process.env.URATEAM_LICENSE_SIGNING_KEY_DER_B64;
+    originalSigningKey = process.env.URATEAM_LICENSE_SIGNING_KEY;
     originalLicenseKey = process.env.URATEAM_LICENSE_KEY;
 
     const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-    process.env.URATEAM_LICENSE_SIGNING_KEY_DER_B64 = Buffer.from(
+    process.env.URATEAM_LICENSE_SIGNING_KEY = Buffer.from(
       privateKey.export({ format: "der", type: "pkcs8" }),
     ).toString("base64");
 
@@ -64,7 +64,7 @@ describe("license end-to-end (CLI issue → core validate)", () => {
   });
 
   afterEach(async () => {
-    process.env.URATEAM_LICENSE_SIGNING_KEY_DER_B64 = originalSigningKey;
+    process.env.URATEAM_LICENSE_SIGNING_KEY = originalSigningKey;
     if (originalLicenseKey === undefined) delete process.env.URATEAM_LICENSE_KEY;
     else process.env.URATEAM_LICENSE_KEY = originalLicenseKey;
 
