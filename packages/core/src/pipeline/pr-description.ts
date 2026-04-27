@@ -14,6 +14,18 @@ export interface PRDescriptionOptions {
   ralphSatisfied?: boolean;
   /** List of unmet RALPH gap items (used for count in draft reason). */
   ralphGaps?: unknown[];
+  /**
+   * Set when the RALPH check agent itself failed (threw, hit its turn cap,
+   * or produced no parseable JSON). Distinct from `ralphSatisfied: false`
+   * with a non-empty gap list — that means RALPH ran successfully and found
+   * real gaps. When this is true, the draft reason wording switches from
+   * "RALPH found N unmet acceptance criteria" to "RALPH evaluation failed:
+   * <reason>" so reviewers don't waste time hunting for a non-existent
+   * failed requirement (urateam#108).
+   */
+  ralphEvaluationFailed?: boolean;
+  /** Human-readable reason from `RalphCheckResult.evaluationError`. */
+  ralphEvaluationError?: string;
   /** Blocking review findings that remain unresolved (used for count in draft reason). */
   unresolvedBlockingFindings?: unknown[];
   /** Agent-authored commit messages (not auto-committed fallbacks) to include in a Commits section. */
@@ -40,6 +52,8 @@ export function generatePRDescription(options: PRDescriptionOptions): string {
     shouldDraft = false,
     ralphSatisfied = true,
     ralphGaps = [],
+    ralphEvaluationFailed = false,
+    ralphEvaluationError,
     unresolvedBlockingFindings = [],
     agentCommits = [],
   } = options;
@@ -76,7 +90,20 @@ export function generatePRDescription(options: PRDescriptionOptions): string {
   // Flag draft status with reason
   if (shouldDraft) {
     const reasons: string[] = [];
-    if (!ralphSatisfied) reasons.push(`RALPH found ${ralphGaps.length} unmet acceptance criteria`);
+    if (!ralphSatisfied) {
+      // urateam#108: distinguish "agent ran, found gaps" from "evaluator
+      // crashed". The previous "RALPH found N unmet acceptance criteria"
+      // copy lied when N actually counted "RALPH check agent failed: ..."
+      // strings, sending reviewers hunting for a non-existent requirement
+      // failure.
+      if (ralphEvaluationFailed) {
+        reasons.push(
+          `RALPH evaluation failed (${ralphEvaluationError ?? "no detail"}) — human review required`,
+        );
+      } else {
+        reasons.push(`RALPH found ${ralphGaps.length} unmet acceptance criteria`);
+      }
+    }
     if (unresolvedBlockingFindings.length > 0)
       reasons.push(`${unresolvedBlockingFindings.length} blocking review findings remain`);
     parts.push(`> **Draft PR** — ${reasons.join("; ")}. See PR comments for details.`);

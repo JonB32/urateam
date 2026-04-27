@@ -84,16 +84,66 @@ describe("checkRequirements", () => {
     expect(result.gaps[0]).toContain("Pagination");
   });
 
-  it("returns satisfied on agent error (fail-open)", async () => {
+  // urateam#108 — fail closed on eval failure (was fail-open). The previous
+  // behavior masked SDK errors / maxTurns exhaustion as "all requirements
+  // satisfied", letting broken eval ship as ready-to-merge PRs.
+  it("returns evaluationFailed: true when the agent SDK throws (fail-closed)", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     (query as any).mockReturnValue(
       (async function* () {
-        throw new Error("SDK error");
+        throw new Error("Reached maximum number of turns (6)");
       })(),
     );
 
     const result = await checkRequirements(issue, makeHandoff(), "/tmp");
-    expect(result.satisfied).toBe(true);
+    expect(result.satisfied).toBe(false);
+    expect(result.evaluationFailed).toBe(true);
+    expect(result.evaluationError).toContain("RALPH check agent failed");
+    expect(result.evaluationError).toContain("Reached maximum number of turns");
+    expect(result.gaps).toEqual([]); // no fake gaps invented
+  });
+
+  it("returns evaluationFailed: true when agent emits no parseable JSON block", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    (query as any).mockReturnValue(
+      (async function* () {
+        yield {
+          type: "assistant",
+          content: [{ type: "text", text: "I think it looks fine." }],
+        };
+      })(),
+    );
+
+    const result = await checkRequirements(issue, makeHandoff(), "/tmp");
+    expect(result.satisfied).toBe(false);
+    expect(result.evaluationFailed).toBe(true);
+    expect(result.evaluationError).toContain("no parseable structured output");
+  });
+
+  it("does NOT mark evaluationFailed when agent legitimately returns satisfied: false with gaps", async () => {
+    // Negative-control: a genuine "agent ran successfully and found gaps"
+    // case must not get flagged as eval failure.
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    (query as any).mockReturnValue(
+      (async function* () {
+        yield {
+          type: "assistant",
+          content: [{
+            type: "text",
+            text: '```json\n{"satisfied": false, "gaps": ["Missing pagination"], "suggestions": []}\n```',
+          }],
+        };
+      })(),
+    );
+
+    const result = await checkRequirements(issue, makeHandoff(), "/tmp");
+    expect(result.satisfied).toBe(false);
+    // Tighter than toBeFalsy() — the success-path contract is that the
+    // field is absent entirely, not just falsy. Catches regressions where
+    // someone adds `evaluationFailed: false` on every return out of misplaced
+    // defensive habit (which would still pass toBeFalsy but break narrowing).
+    expect(result.evaluationFailed).toBeUndefined();
+    expect(result.gaps).toEqual(["Missing pagination"]);
   });
 });
 

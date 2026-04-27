@@ -390,6 +390,39 @@ describe("PR Description Enrichment (BEC-83)", () => {
       expect(body).toContain("RALPH found 1 unmet acceptance criteria");
     });
 
+    it("uses 'RALPH evaluation failed' draft reason when ralphEvaluationFailed (urateam#108)", () => {
+      // Distinct copy from "RALPH found N unmet criteria" because the
+      // evaluator itself crashed — there were zero criteria checked.
+      // Reviewers reading "1 unmet criteria" would search for a failing
+      // requirement and find nothing, wasting time. Locks in the fix.
+      const handoff: any = {
+        summary: "Test",
+        filesChanged: [],
+        approach: "test",
+        context: { issueIntent: "test", constraints: [], assumptions: [] },
+        tokenBudget: { contextTokensUsed: 10000, recommendedMaxTurns: 10 },
+      };
+
+      const body = generatePRDescription({
+        handoff,
+        issueId: "BEC-810",
+        shouldDraft: true,
+        ralphSatisfied: false,
+        ralphEvaluationFailed: true,
+        ralphEvaluationError: "Reached maximum number of turns (6)",
+        unresolvedBlockingFindings: [],
+        ralphGaps: [],
+      });
+
+      expect(body).toContain("> **Draft PR**");
+      expect(body).toContain("RALPH evaluation failed");
+      expect(body).toContain("Reached maximum number of turns (6)");
+      expect(body).toContain("human review required");
+      // Critically: must NOT use the "found N unmet criteria" wording.
+      expect(body).not.toContain("RALPH found 0 unmet acceptance criteria");
+      expect(body).not.toContain("RALPH found 1 unmet acceptance criteria");
+    });
+
     it("includes blocking review findings count in draft status", () => {
       const handoff: any = {
         summary: "Test",

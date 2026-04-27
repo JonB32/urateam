@@ -12,6 +12,21 @@ export interface RalphCheckResult {
   satisfied: boolean;
   gaps: string[];
   suggestions: string[];
+  /**
+   * Set when the requirements-check agent itself failed (threw, ran out of
+   * turns, or produced no parseable JSON). Distinct from `satisfied: false`
+   * with a populated `gaps` list — that means the agent ran successfully and
+   * found real gaps. `evaluationFailed: true` means we have NO information
+   * about whether the criteria were met.
+   *
+   * Callers should treat this as "must surface to a human" — it is NEVER
+   * safe to treat as `satisfied: true`, but also wasteful to feed back
+   * into a re-implement loop because retrying the same eval-failure
+   * conditions will probably hit the same wall.
+   */
+  evaluationFailed?: boolean;
+  /** Human-readable reason for the evaluation failure. Used in PR-body draft notes. */
+  evaluationError?: string;
 }
 
 /**
@@ -102,13 +117,35 @@ Be strict but fair. If the code addresses the intent of a criterion even if not 
       };
     }
 
+    // Agent ran but emitted no parseable JSON — we have NO evidence the
+    // criteria were checked. Fail closed. Surfacing this as `satisfied:
+    // false + evaluationFailed: true` lets the caller draft the PR with an
+    // honest "RALPH eval failed, human review required" note rather than
+    // silently shipping it as ready (urateam follow-up to PR #95 fail-open
+    // observed during rotulus#17 OSS validation).
     log.warn("requirements check agent did not produce structured output");
-    return { satisfied: true, gaps: [], suggestions: [] };
+    return {
+      satisfied: false,
+      gaps: [],
+      suggestions: [],
+      evaluationFailed: true,
+      evaluationError:
+        "RALPH check agent completed but produced no parseable structured output — gaps could not be evaluated",
+    };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     log.error({ err: msg }, "requirements check agent failed");
-    // Don't block the pipeline on check failure
-    return { satisfied: true, gaps: [], suggestions: [] };
+    // Same fail-closed semantics as the no-JSON case above. The previous
+    // behavior here returned satisfied: true with a comment "Don't block
+    // the pipeline on check failure" — that masked real failures (e.g., the
+    // 6-turn cap exhaustion observed on rotulus#17) as positive signals.
+    return {
+      satisfied: false,
+      gaps: [],
+      suggestions: [],
+      evaluationFailed: true,
+      evaluationError: `RALPH check agent failed: ${msg}`,
+    };
   }
 }
 
