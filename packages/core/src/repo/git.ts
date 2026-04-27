@@ -119,8 +119,23 @@ export async function fetchLatest(repoDir: string): Promise<void> {
 }
 
 /**
- * Try to add a git worktree. If it fails with "already checked out",
- * force-remove the stale worktree and retry once.
+ * Try to add a git worktree. If it fails because the branch is already
+ * tied to another worktree, force-remove the stale one and retry once.
+ *
+ * Git emits TWO different error wordings for this case (urateam#112):
+ *   - "fatal: '<branch>' is already checked out at '<path>'"
+ *     — fires when the branch is currently checked out in another live
+ *     worktree.
+ *   - "fatal: '<branch>' is already used by worktree at '<path>'"
+ *     — fires when the branch is associated with a worktree even if the
+ *     worktree directory has been deleted out from under git. Common
+ *     after a previous run completed and the worktree dir was cleaned up
+ *     (or rm -rf'd) without `git worktree prune` running.
+ *
+ * Both are recoverable the same way: remove the stale worktree (force +
+ * fall back to rm + prune), retry. The previous version of this function
+ * only matched the first wording; the second produced "pipeline failed
+ * with unexpected error" on every Linear re-trigger after a completed run.
  */
 async function worktreeAddWithRetry(
   repoDir: string,
@@ -133,11 +148,14 @@ async function worktreeAddWithRetry(
     await gitExec(["worktree", "add", ...args], repoDir);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (!msg.includes("already checked out")) throw err;
+    if (!msg.includes("already checked out") && !msg.includes("already used by worktree")) {
+      throw err;
+    }
 
-    // Extract the stale worktree path from the error message:
-    // "fatal: '<branch>' is already checked out at '<path>'"
-    const match = msg.match(/already checked out at '([^']+)'/);
+    // Extract the stale worktree path from either error wording:
+    //   "fatal: '<branch>' is already checked out at '<path>'"
+    //   "fatal: '<branch>' is already used by worktree at '<path>'"
+    const match = msg.match(/already (?:checked out|used by worktree) at '([^']+)'/);
     const stalePath = match?.[1];
     if (stalePath) {
       log.warn({ stalePath, worktreePath }, "removing stale worktree blocking branch checkout");
