@@ -42,6 +42,30 @@ describe("PR Description Enrichment (BEC-83)", () => {
       expect(body).toContain("No summary available.");
     });
 
+    it("propagates the JSON-soup placeholder summary to ## Summary verbatim (urateam#97)", () => {
+      // Closes the loop on the urateam#97 fix: extract-handoff slow path
+      // produces a deterministic placeholder when the agent emits JSON soup
+      // instead of prose; pr-description must render it as-is. Without this
+      // test, a future change to the summary block could break the chain.
+      const handoff: any = {
+        summary: "Stage review completed — agent output was not parseable prose; see Changes for files modified",
+        filesChanged: ["src/auth.ts"],
+        approach: "test",
+        context: { issueIntent: "test", constraints: [], assumptions: [] },
+        tokenBudget: { contextTokensUsed: 100, recommendedMaxTurns: 5 },
+      };
+
+      const body = generatePRDescription({ handoff, issueId: "BEC-97" });
+
+      expect(body).toContain("## Summary");
+      expect(body).toContain("Stage review completed");
+      expect(body).toContain("see Changes for files modified");
+      // Critical: the body must NOT contain JSON-fragment-shaped strings
+      // that the placeholder is meant to replace.
+      expect(body).not.toContain('"description"');
+      expect(body).not.toContain('"severity"');
+    });
+
     it("renders empty summary when handoff.summary is an empty string", () => {
       const handoff: any = {
         summary: "",

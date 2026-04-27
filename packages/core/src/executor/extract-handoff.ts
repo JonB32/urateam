@@ -154,12 +154,42 @@ export async function extractHandoff(
       gitExecSafe(["diff", "--stat", statRange], workdir),
     ]);
 
-    // Best-effort summary from agent output. The last few lines often contain
-    // tool noise rather than meaningful prose. filesChanged is the reliable signal.
+    // Best-effort summary from agent output. Two failure modes are common
+    // here (urateam#97):
+    //   - Review-stage agents emit review-finding JSON arrays (not the
+    //     HandoffArtifact shape) which leak into the rendered PR body
+    //     "## Summary" as `"description": "..."` / `"fix": "..."` fragments.
+    //   - Implement/test stage agents emit nothing structured; the last few
+    //     lines often contain tool noise rather than prose.
+    // Detect JSON-fragment-shaped content and replace with a deterministic
+    // placeholder. Reviewers got bitten on rotulus#7 by JSON-soup summaries
+    // that looked like a structured review (and even flagged a real bug)
+    // that nobody acted on.
     const lines = agentOutput.split("\n").filter((l) => l.trim().length > 0);
-    const summary = lines.length > 0
+    const rawTail = lines.length > 0
       ? lines.slice(-5).join(" ").slice(0, 500)
-      : `Stage ${stage} completed`;
+      : "";
+    // Heuristics tuned to avoid false positives on common agent prose:
+    //   - `[x] tests pass`, `[PASS]`, `[fix] ...` — checklist / tag prefixes
+    //   - `Added "env": "production" and "debug": "false"` — config-change prose
+    //   - `{ destructured } = result` — JS destructuring prose
+    // To trip detection, the tail must look STRUCTURALLY like JSON, not just
+    // contain bracket characters. `^\s*[\[{]\s*[{"]` matches `[{...`, `{"...`,
+    // and similar real JSON openers but not `[x]` / `{ destruct }` / etc.
+    const looksLikeJsonSoup =
+      /^\s*[[{]\s*["{]/.test(rawTail) ||
+      /"(description|fix|severity|category)"\s*:/.test(rawTail) ||
+      // Tighter threshold (3+) for the bare-property-pair heuristic. Two
+      // pairs is too low — operators routinely write prose with two quoted
+      // attribute references (e.g., "Added \"env\": \"production\" and
+      // \"debug\": \"false\""). Three+ is consistent with real review-finding
+      // JSON arrays which always emit many such pairs per tail window.
+      (rawTail.match(/"\s*:\s*"/g)?.length ?? 0) >= 3;
+    const summary = !rawTail
+      ? `Stage ${stage} completed`
+      : looksLikeJsonSoup
+        ? `Stage ${stage} completed — agent output was not parseable prose; see Changes for files modified`
+        : rawTail;
 
     const approach = diffStat
       ? `Modified ${filesChanged.length} file(s): ${diffStat.split("\n").pop() || ""}`
