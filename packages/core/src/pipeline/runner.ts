@@ -965,6 +965,17 @@ export class PipelineRunner {
         ) {
           for (let attempt = 0; attempt < config.retry.maxAttempts; attempt++) {
             if (config.retry.strategy === "fix-and-retry") {
+              runLog.warn(
+                {
+                  stage: stageType,
+                  attempt: attempt + 1,
+                  maxAttempts: config.retry.maxAttempts,
+                  prevError: result.errorMessage ?? "stage failed",
+                },
+                "stage failed — restarting (urateam#121)",
+              );
+              run.stageRetries ??= {};
+              run.stageRetries[stageType] = (run.stageRetries[stageType] ?? 0) + 1;
               result = await executeStage({
                 runId,
                 issueId: sanitizedIssue.id,
@@ -2032,6 +2043,9 @@ export class PipelineRunner {
         .where(eq(pipelineRuns.id, runId));
       run.status = "completed";
 
+      const totalStageRetries = run.stageRetries
+        ? Object.values(run.stageRetries).reduce((a, b) => a + b, 0)
+        : 0;
       runLog.info(
         {
           prUrl: prUrl || undefined,
@@ -2039,6 +2053,9 @@ export class PipelineRunner {
           autoCommitted: run.autoCommitted ?? false,
           totalInputTokens: run.totalInputTokens,
           totalOutputTokens: run.totalOutputTokens,
+          ...(totalStageRetries > 0
+            ? { stageRetries: run.stageRetries, totalStageRetries }
+            : {}),
         },
         "pipeline completed",
       );
