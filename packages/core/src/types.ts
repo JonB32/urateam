@@ -338,7 +338,14 @@ export interface PipelineRun {
   autoMergeReason?: string;
   /** True when auto-commit was triggered because the agent did not commit its work. Quality metric. */
   autoCommitted?: boolean;
-  /** In-memory only: count of retries per stage. Surfaces silent retry attempts in logs. */
+  /**
+   * In-memory only: count of retries per stage. Surfaces silent retry attempts
+   * in the "pipeline completed" log when non-zero.
+   *
+   * TODO(urateam#121): persist to DB so the dashboard can show retry counts on
+   * completed runs, and so transient-retry resumes (which reload the run from
+   * DB) carry the count forward.
+   */
   stageRetries?: Record<string, number>;
 }
 

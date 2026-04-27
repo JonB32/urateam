@@ -53,8 +53,14 @@ export async function consumeAgentStream(
     onProgress?: (stats: { messageCount: number; turns: number; inputTokens: number; outputTokens: number }) => void;
     progressIntervalMs?: number;
     /**
-     * Throw StageStalledError if no new outputTokens or turns arrive in this window.
-     * Default 30 minutes. See urateam#122.
+     * Throw StageStalledError if no new outputTokens or assistant turns arrive
+     * in this window. Default 30 minutes. See urateam#122.
+     *
+     * NOTE: tool_use / tool_result messages do NOT reset this timer. The
+     * ROT-15 zombie pattern emitted system messages while stuck, but a
+     * legitimate long-running tool call (e.g. a 30+ min build) also produces
+     * no assistant turns until the tool returns. If your stage runs slow
+     * tool calls, raise this value (or chunk the work).
      */
     progressTimeoutMs?: number;
   },
@@ -70,33 +76,46 @@ export async function consumeAgentStream(
   const stallTimeoutMs = options?.progressTimeoutMs ?? 30 * 60_000;
 
   const iterator = (messages as AsyncIterable<unknown>)[Symbol.asyncIterator]();
+  const STALLED = { __stalled: true } as const;
+  type StallSentinel = typeof STALLED;
   while (true) {
     const remainingUntilStall = stallTimeoutMs - (Date.now() - lastTokenAdvanceAt);
     let stallTimer: ReturnType<typeof setTimeout> | undefined;
-    const stallSentinel: unique symbol = Symbol("stall") as unknown as never;
-    const next = iterator.next();
-    const stallPromise = new Promise<typeof stallSentinel>((resolve) => {
-      stallTimer = setTimeout(() => resolve(stallSentinel), Math.max(remainingUntilStall, 0));
+    let nextSettled = false;
+    let nextValue: IteratorResult<unknown> | undefined;
+    const next = iterator.next().then((v) => {
+      nextSettled = true;
+      nextValue = v;
+      return v;
+    });
+    const stallPromise = new Promise<StallSentinel>((resolve) => {
+      stallTimer = setTimeout(() => resolve(STALLED), Math.max(remainingUntilStall, 0));
     });
 
     const raced = await Promise.race([next, stallPromise]);
     if (stallTimer) clearTimeout(stallTimer);
 
-    if (raced === stallSentinel) {
-      // Fire-and-forget cleanup — when the agent generator is paused on a
-      // never-resolving await (the exact zombie pattern from urateam#122),
-      // awaiting iterator.return() would hang forever waiting for that
-      // await to settle. Best-effort signal; let the GC handle the rest.
-      iterator.return?.().catch(() => {});
-      throw new StageStalledError(Date.now() - lastTokenAdvanceAt, {
-        messageCount,
-        turns,
-        inputTokens,
-        outputTokens,
-      });
+    if (raced === STALLED) {
+      // Defensive race-loss check: if the iterator settled in the same tick
+      // as the timer fired, prefer the message we already have. The
+      // microtask vs macrotask ordering in V8 makes this near-impossible
+      // in practice, but the cost is one boolean check.
+      if (!(nextSettled && nextValue && !nextValue.done)) {
+        // Fire-and-forget cleanup — when the agent generator is paused on a
+        // never-resolving await (the exact zombie pattern from urateam#122),
+        // awaiting iterator.return() would hang forever waiting for that
+        // await to settle. Best-effort signal; let the GC handle the rest.
+        iterator.return?.().catch(() => {});
+        throw new StageStalledError(Date.now() - lastTokenAdvanceAt, {
+          messageCount,
+          turns,
+          inputTokens,
+          outputTokens,
+        });
+      }
     }
 
-    const result = raced as IteratorResult<unknown>;
+    const result = (raced === STALLED ? nextValue! : raced) as IteratorResult<unknown>;
     if (result.done) break;
 
     const message = result.value as StreamMessage;

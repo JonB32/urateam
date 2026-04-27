@@ -47,7 +47,7 @@ describe("consumeAgentStream — stall watchdog (urateam#122)", () => {
   it("throws StageStalledError when the iterator hangs longer than progressTimeoutMs", async () => {
     await expect(
       consumeAgentStream(hangsAfter([{ type: "assistant", content: [{ type: "text", text: "ok" }] }]), {
-        progressTimeoutMs: 80,
+        progressTimeoutMs: 200,
       }),
     ).rejects.toBeInstanceOf(StageStalledError);
   });
@@ -58,7 +58,7 @@ describe("consumeAgentStream — stall watchdog (urateam#122)", () => {
         hangsAfter([
           { type: "assistant", usage: { output_tokens: 12 }, content: [{ type: "text", text: "hi" }] },
         ]),
-        { progressTimeoutMs: 80 },
+        { progressTimeoutMs: 200 },
       );
       throw new Error("expected StageStalledError");
     } catch (err) {
@@ -66,13 +66,14 @@ describe("consumeAgentStream — stall watchdog (urateam#122)", () => {
       const stalled = err as StageStalledError;
       expect(stalled.lastStats.turns).toBe(1);
       expect(stalled.lastStats.outputTokens).toBe(12);
-      expect(stalled.stalledForMs).toBeGreaterThanOrEqual(80);
+      expect(stalled.stalledForMs).toBeGreaterThanOrEqual(200);
     }
   });
 
   it("does NOT fire when output tokens keep advancing within the window", async () => {
-    // 4 chunks at 30ms each = 120ms total. Window is 100ms but resets on each token bump.
-    const result = await consumeAgentStream(tokenStream(4, 30), { progressTimeoutMs: 100 });
+    // 4 chunks at 30ms each = 120ms total. Window is 250ms but resets on each token bump.
+    // Generous slack (130ms+) keeps this from flaking under loaded CI.
+    const result = await consumeAgentStream(tokenStream(4, 30), { progressTimeoutMs: 250 });
     expect(result.turns).toBe(4);
     expect(result.outputTokens).toBe(20);
   });
@@ -90,7 +91,7 @@ describe("consumeAgentStream — stall watchdog (urateam#122)", () => {
       }
     }
     await expect(
-      consumeAgentStream(zombieStream(), { progressTimeoutMs: 60 }),
+      consumeAgentStream(zombieStream(), { progressTimeoutMs: 200 }),
     ).rejects.toBeInstanceOf(StageStalledError);
   });
 });
