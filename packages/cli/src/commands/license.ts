@@ -20,18 +20,29 @@ function b64url(buf: Buffer): string {
 /**
  * Sign a urateam license JWT with the operator's Ed25519 private key.
  *
- * The signing key is read from URATEAM_LICENSE_SIGNING_KEY_DER_B64. The
- * variable accepts either raw base64 PKCS8 DER (as emitted by
- * scripts/generate-license-keypair.ts) or a PEM-wrapped PKCS8 string
- * (as emitted by the urateam-licensing Worker's gen-signing-key.ts).
- * The key is operator-only and must never enter the urateam runtime.
+ * The signing key is read from URATEAM_LICENSE_SIGNING_KEY (preferred) or
+ * URATEAM_LICENSE_SIGNING_KEY_DER_B64 (deprecated, kept for backwards
+ * compatibility). Both accept either raw base64 PKCS8 DER (as emitted by
+ * scripts/generate-license-keypair.ts) or a PEM-wrapped PKCS8 string (as
+ * emitted by the urateam-licensing Worker's gen-signing-key.ts). The key
+ * is operator-only and must never enter the urateam runtime.
  */
 export function issueLicense(opts: IssueOptions): string {
-  const raw = process.env.URATEAM_LICENSE_SIGNING_KEY_DER_B64;
+  const raw =
+    process.env.URATEAM_LICENSE_SIGNING_KEY ??
+    process.env.URATEAM_LICENSE_SIGNING_KEY_DER_B64;
   if (!raw) {
     throw new Error(
-      "URATEAM_LICENSE_SIGNING_KEY_DER_B64 env var is not set. " +
+      "URATEAM_LICENSE_SIGNING_KEY env var is not set. " +
         "Run scripts/generate-license-keypair.ts to create one.",
+    );
+  }
+  if (
+    process.env.URATEAM_LICENSE_SIGNING_KEY === undefined &&
+    process.env.URATEAM_LICENSE_SIGNING_KEY_DER_B64 !== undefined
+  ) {
+    console.warn(
+      "URATEAM_LICENSE_SIGNING_KEY_DER_B64 is deprecated; rename to URATEAM_LICENSE_SIGNING_KEY (same value, both PEM and base64 DER accepted).",
     );
   }
 
@@ -42,6 +53,13 @@ export function issueLicense(opts: IssueOptions): string {
         format: "der",
         type: "pkcs8",
       });
+
+  if (privateKey.asymmetricKeyType !== "ed25519") {
+    throw new Error(
+      `URATEAM_LICENSE_SIGNING_KEY must be an Ed25519 key, got ${privateKey.asymmetricKeyType}. ` +
+        "JWT header advertises alg=EdDSA — signing with any other key type would produce an unverifiable token.",
+    );
+  }
 
   const header = { alg: "EdDSA", typ: "JWT" };
   const now = Math.floor(Date.now() / 1000);
