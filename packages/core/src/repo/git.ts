@@ -413,13 +413,40 @@ export async function abortRebase(worktreePath: string): Promise<void> {
  * the original (possibly diverged) branch for human review.
  * Verifies that the worktree HEAD is on the expected branch before pushing
  * to prevent cross-branch contamination (BEC-99).
+ *
+ * Recovers from "stale info" rejections (urateam#115): when the local
+ * tracking ref `refs/remotes/origin/<branch>` points at a commit that
+ * no longer exists on origin (because the branch was deleted between
+ * runs), force-with-lease can't verify its lease and rejects. Running
+ * `git fetch --prune origin` removes stale local tracking refs, after
+ * which the lease is either consistent with the new origin state or
+ * absent (which is fine — push then creates the branch fresh).
+ *
+ * Reactive recovery (only fetch+prune on actual failure) matches the
+ * existing `worktreeAddWithRetry` pattern from urateam#112 and avoids
+ * the network round-trip on the happy path.
  */
 export async function pushBranchForce(
   worktreePath: string,
   branch: string,
 ): Promise<void> {
+  const log = getLog();
   await verifyBranchMatch(worktreePath, branch);
-  await gitExec(["push", "origin", branch, "--force-with-lease"], worktreePath);
+  try {
+    await gitExec(["push", "origin", branch, "--force-with-lease"], worktreePath);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("stale info")) throw err;
+    log.warn(
+      { branch },
+      "force-with-lease push rejected with stale info — fetching+pruning origin and retrying (urateam#115)",
+    );
+    await gitExec(["fetch", "--prune", "origin"], worktreePath);
+    // Retry once — if fetch+prune didn't actually clear the staleness
+    // (possible only if origin re-created the branch in the same window),
+    // bubbling the second failure to the caller is the right outcome.
+    await gitExec(["push", "origin", branch, "--force-with-lease"], worktreePath);
+  }
 }
 
 /**
