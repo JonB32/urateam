@@ -277,13 +277,13 @@ function buildEnv(
   push("# GITHUB_APP_ID=");
   push("# GITHUB_PRIVATE_KEY_PATH=/run/gh-app.pem");
   push("# GITHUB_INSTALLATION_ID=");
-  // GITHUB_WEBHOOK_SECRET is shared with GitHub's webhook config — only emit
-  // when the operator has pasted a real value. Empty/missing means the
-  // PR-comment re-trigger feature is disabled, which is the expected default.
+  // GITHUB_WEBHOOK_SECRET is shared with GitHub's webhook config. Auto-genned
+  // by default (operator pastes the value INTO GitHub when creating the
+  // webhook). Blank means PR-comment re-trigger feature stays disabled.
   if (options.githubWebhookSecret) {
     push(`GITHUB_WEBHOOK_SECRET=${options.githubWebhookSecret}`);
   } else {
-    push("# GITHUB_WEBHOOK_SECRET=  # paste from GitHub webhook config (only needed for PR-comment re-runs)");
+    push("# GITHUB_WEBHOOK_SECRET=  # paste here AND into GitHub webhook config to enable PR-comment re-runs");
   }
   blank();
 
@@ -310,6 +310,23 @@ function buildEnv(
 
   push("# === Concurrency ===");
   push(`MAX_CONCURRENT_RUNS=${options.maxConcurrentRuns}`);
+  blank();
+
+  // AGENT_BYPASS_PERMISSIONS — Claude Code permission-mode override. Runtime
+  // logic at packages/core/src/executor/permissions.ts:
+  //   - root user (UID 0): all permission flags ignored (Claude Code refuses)
+  //   - else, env var unset: implement/reproduce=acceptEdits, test/review=default
+  //   - else, env var =true: bypassPermissions for all stages
+  // The hardened compose template runs the container as root, so this var is
+  // a no-op for production VPS deploys. For local `pnpm dev` (non-root), the
+  // test/review stages would hang on interactive prompts without this — local
+  // mode therefore defaults to true.
+  push("# === Agent permissions (Claude Code) ===");
+  if (options.deployMode === "local") {
+    push("AGENT_BYPASS_PERMISSIONS=true");
+  } else {
+    push("# AGENT_BYPASS_PERMISSIONS=true  # no-op in root containers; uncomment if running container as a non-root user");
+  }
   blank();
 
   if (options.pmAgent) {
@@ -409,12 +426,7 @@ function resolveSecrets(options: ScaffoldOptions): {
 
   let dashboardPassword = options.dashboardPassword ?? "";
   let postgresPassword = options.postgresPassword ?? "";
-  // GITHUB_WEBHOOK_SECRET is NOT auto-generated. The secret is shared with
-  // GitHub's webhook config — operator either pastes the value GitHub generates
-  // in the webhook UI, OR provides their own and pastes that into both sides.
-  // Auto-generating one only here would mismatch GitHub's value and silently
-  // reject every incoming PR comment.
-  const githubWebhookSecret = options.githubWebhookSecret ?? "";
+  let githubWebhookSecret = options.githubWebhookSecret ?? "";
 
   if (autoGen) {
     // base64url avoids `+`, `/`, `=` which can trip strict env-file parsers
@@ -426,6 +438,13 @@ function resolveSecrets(options: ScaffoldOptions): {
     if (!postgresPassword) {
       postgresPassword = randomBytes(24).toString("base64url");
       generated.postgresPassword = postgresPassword;
+    }
+    if (!githubWebhookSecret) {
+      // hex (not base64url) for compatibility with the broadest set of HMAC
+      // validators that operators paste this into. Operator pastes the same
+      // value into GitHub's webhook config so signatures match.
+      githubWebhookSecret = randomBytes(32).toString("hex");
+      generated.githubWebhookSecret = githubWebhookSecret;
     }
   }
 
@@ -819,11 +838,13 @@ async function main() {
   // --- Stage 6: optional GitHub webhook secret + notification webhooks ---
   const stage6 = await prompts([
     {
-      // Hidden input — secret is shared with GitHub's webhook config.
+      // Hidden input — secret is shared with GitHub's webhook config. If the
+      // operator already has a secret in GitHub, paste it here. Otherwise leave
+      // blank and the auto-gen step at Stage 8 will mint one for both sides.
       type: "password",
       name: "githubWebhookSecret",
       message:
-        "GITHUB_WEBHOOK_SECRET (paste from GitHub webhook config; leave blank to disable PR-comment re-runs):",
+        "GITHUB_WEBHOOK_SECRET (paste from GitHub if you already set one, or leave blank to auto-generate):",
     },
     {
       type: "text",
@@ -900,15 +921,70 @@ async function main() {
   }
 
   // --- Stage 8: secret generation strategy ---
-  // GITHUB_WEBHOOK_SECRET intentionally NOT in this list — it must match
-  // GitHub's webhook config and is collected explicitly in Stage 6.
+  // GITHUB_WEBHOOK_SECRET is in this set with one twist: if the operator
+  // explicitly pasted a value in Stage 6, it wins; otherwise it's auto-genned
+  // here. Either way the operator gets a value they can paste into GitHub's
+  // webhook config so HMAC signatures match.
   const stage8 = await prompts({
     type: "confirm",
     name: "autoGen",
     message:
-      "Auto-generate POSTGRES_PASSWORD and DASHBOARD_PASSWORD? (No → leave blank in .env)",
+      "Auto-generate POSTGRES_PASSWORD, DASHBOARD_PASSWORD, GITHUB_WEBHOOK_SECRET? (No → leave blank in .env for any not provided above)",
     initial: true,
   });
+
+  // --- Stage 9: GitHub PR-comment re-trigger config (gated) ---
+  // Only prompt when both signals are present:
+  //   - URATEAM_LICENSE_KEY pasted (operator is engaged with the product enough
+  //     to want advanced workflows)
+  //   - A GITHUB_WEBHOOK_SECRET will exist in .env (either pasted in Stage 6
+  //     or auto-genned in Stage 8) — without it the runtime won't even mount
+  //     the feedback handler.
+  let githubFeedback: GithubFeedbackOptions | undefined;
+  const willHaveGhSecret = !!stage6.githubWebhookSecret || stage8.autoGen;
+  if (stage5.licenseKey && willHaveGhSecret) {
+    const setupFeedback = await prompts({
+      type: "confirm",
+      name: "setup",
+      message:
+        "Configure GitHub PR-comment re-triggers (GITHUB_FEEDBACK_*) now? You can skip and add later.",
+      initial: false,
+    });
+    if (setupFeedback.setup) {
+      const fb = await prompts([
+        {
+          type: "text",
+          name: "triggerKeyword",
+          message:
+            "  GITHUB_FEEDBACK_TRIGGER_KEYWORD (require this string in PR comment to fire; blank = any review/comment):",
+        },
+        {
+          type: "text",
+          name: "allowedReviewers",
+          message:
+            "  GITHUB_FEEDBACK_ALLOWED_REVIEWERS (csv of GitHub usernames whose comments fire it; blank = all):",
+        },
+        {
+          type: "text",
+          name: "botLogins",
+          message:
+            "  GITHUB_FEEDBACK_BOT_LOGINS (csv of bot logins like github-actions[bot]; blank = none):",
+        },
+        {
+          type: "confirm",
+          name: "autoTrigger",
+          message: "  GITHUB_FEEDBACK_AUTO_TRIGGER — fire automatically on qualifying comments?",
+          initial: true,
+        },
+      ]);
+      githubFeedback = {
+        triggerKeyword: fb.triggerKeyword || undefined,
+        allowedReviewers: fb.allowedReviewers || undefined,
+        botLogins: fb.botLogins || undefined,
+        autoTrigger: fb.autoTrigger,
+      };
+    }
+  }
 
   const projectDir = arg === "." ? process.cwd() : join(process.cwd(), arg);
   const projectName = arg === "." ? basename(projectDir) || "my-project" : arg;
@@ -929,6 +1005,7 @@ async function main() {
     licenseKey: stage5.licenseKey,
     pmAgent,
     githubWebhookSecret: stage6.githubWebhookSecret || undefined,
+    githubFeedback,
     slackWebhookUrl: stage6.slackWebhookUrl || undefined,
     discordWebhookUrl: stage6.discordWebhookUrl || undefined,
     agentProfiles,
@@ -949,9 +1026,10 @@ async function main() {
       console.log(`    POSTGRES_PASSWORD: ${result.generatedSecrets.postgresPassword}`);
     }
     if (result.generatedSecrets.githubWebhookSecret) {
-      console.log(
-        `    GITHUB_WEBHOOK_SECRET: ${result.generatedSecrets.githubWebhookSecret.slice(0, 12)}…`,
-      );
+      // Show the full secret — the operator needs it to paste into GitHub's
+      // webhook UI for HMAC signatures to match.
+      console.log(`    GITHUB_WEBHOOK_SECRET: ${result.generatedSecrets.githubWebhookSecret}`);
+      console.log(`    ↑ paste this into the webhook's "Secret" field at github.com/<repo>/settings/hooks/new`);
     }
     console.log("");
   }
