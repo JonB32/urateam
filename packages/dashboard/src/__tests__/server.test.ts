@@ -285,6 +285,53 @@ describe("createDashboard — basePath navigation links", () => {
     expect(resBare.status).toBe(404);
   });
 
+  it("HTMX poll URL has no trailing slash when basePath is set (avoids 404 every 5s)", async () => {
+    // urateam#131 follow-up: run-feed.ts used to emit hx-get="${basePath}/"
+    // which produced "/ateam/" for non-empty basePath — Hono mounts the runs
+    // router at "/ateam" (no trailing slash), so the poll 404s on every tick.
+    // run-feed reads basePath via getBasePath() (env var), so set it here.
+    const previousEnv = process.env.DASHBOARD_BASE_PATH;
+    process.env.DASHBOARD_BASE_PATH = "/ateam";
+    try {
+      const app = createDashboard({
+        db: mockDb,
+        pipelineConfigs: {},
+        repoConfigs: {},
+        auth: AUTH,
+        basePath: "/ateam",
+      });
+      const res = await app.request("/ateam", { headers: authHeader });
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).toContain('hx-get="/ateam"');
+      expect(html).not.toContain('hx-get="/ateam/"');
+      // Brand link too.
+      expect(html).toContain('class="brand" href="/ateam"');
+    } finally {
+      if (previousEnv === undefined) delete process.env.DASHBOARD_BASE_PATH;
+      else process.env.DASHBOARD_BASE_PATH = previousEnv;
+    }
+  });
+
+  it("HTMX poll URL is / when basePath is empty (root)", async () => {
+    const previousEnv = process.env.DASHBOARD_BASE_PATH;
+    delete process.env.DASHBOARD_BASE_PATH;
+    try {
+      const app = createDashboard({
+        db: mockDb,
+        pipelineConfigs: {},
+        repoConfigs: {},
+        auth: AUTH,
+      });
+      const res = await app.request("/", { headers: authHeader });
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).toContain('hx-get="/"');
+    } finally {
+      if (previousEnv !== undefined) process.env.DASHBOARD_BASE_PATH = previousEnv;
+    }
+  });
+
   it("static style.css serves at /static/style.css when basePath is empty (root mount)", async () => {
     const app = createDashboard({
       db: mockDb,
