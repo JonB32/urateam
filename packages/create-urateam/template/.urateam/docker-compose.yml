@@ -20,6 +20,11 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    environment:
+      # Compose interpolates ${POSTGRES_PASSWORD} from .env here. It does NOT
+      # interpolate inside .env itself, so DATABASE_URL must be assembled
+      # at the compose layer rather than the env-file layer.
+      DATABASE_URL: "postgres://urateam:${POSTGRES_PASSWORD}@postgres:5432/urateam"
     depends_on:
       - postgres
     expose:

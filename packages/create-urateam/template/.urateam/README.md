@@ -7,12 +7,18 @@ to implement features, fix bugs, and create PRs automatically.
 
 ## Setup
 
+Two paths: pick one.
+
+### Local dev (your laptop)
+
 1. Copy `.env.example` to `.env` and fill in. NEVER commit `.env`.
 2. Install dependencies: `pnpm install`
-3. **Authenticate Claude** (OSS path only — see [Claude auth lifecycle](#claude-auth-lifecycle-oss-tier) below): `claude login`. Skip if you set `ANTHROPIC_API_KEY` (recommended for production / containerized deploys).
-4. Start the agent: `pnpm dev` (SQLite, local dev) or `pnpm start` (production)
+3. **Authenticate Claude** (OSS path only — see [Claude auth lifecycle](#claude-auth-lifecycle-oss-tier) below): `claude login`. Skip if you set `ANTHROPIC_API_KEY`.
+4. Start the agent: `pnpm dev`
 
-For VPS / containerized deployment, see [Production deploy](#production-deploy-via-docker-compose) below.
+### Production VPS
+
+Skip the `pnpm install` / `pnpm dev` steps and jump straight to [Production deploy](#production-deploy-via-docker-compose) — Docker Compose handles everything.
 
 ## Claude auth lifecycle (OSS tier)
 
@@ -78,7 +84,7 @@ Compose template ships a hardened three-service stack:
 
 ### Pre-flight
 
-1. **Provision a VPS** (Hetzner, DigitalOcean, Hetzner, Linode, etc.). 4 GB RAM
+1. **Provision a VPS** (Hetzner, DigitalOcean, Linode, Fly, etc.). 4 GB RAM
    minimum for `MAX_CONCURRENT_RUNS=3`.
 2. **Point a domain** (e.g. `urateam.your-domain.com`) at the VPS IP. Caddy needs
    ports 80 + 443 open for ACME challenges.
@@ -92,12 +98,17 @@ cd /opt/<project>/.urateam
 
 # 2. Copy and fill in env
 cp .env.example .env
-# At minimum set: DOMAIN, POSTGRES_PASSWORD (openssl rand -base64 32),
+# At minimum set: DOMAIN, CADDY_EMAIL, POSTGRES_PASSWORD (openssl rand -base64 32),
 # ANTHROPIC_API_KEY, URATEAM_LICENSE_KEY (for Pro), LINEAR_*, REPO_*,
-# DASHBOARD_PASSWORD, GH_TOKEN.
+# DASHBOARD_PASSWORD.
 
 # 3. Bring up the stack
 docker compose up -d --build
+
+# 4. Authenticate gh CLI inside the container (required for PR creation
+#    unless you wired GITHUB_APP_ID / GITHUB_PRIVATE_KEY_PATH /
+#    GITHUB_INSTALLATION_ID in .env).
+docker compose exec agent gh auth login
 
 # 4. Tail logs to verify license, webhooks, dashboard
 docker compose logs -f agent

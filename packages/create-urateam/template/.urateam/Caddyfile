@@ -9,13 +9,17 @@
 # DOMAIN is read from .env; required for cert issuance.
 # Ports 80 and 443 must be reachable from the public internet for ACME.
 
+{
+    email {$CADDY_EMAIL}
+}
+
 {$DOMAIN} {
     encode zstd gzip
 
-    handle_path /webhooks/* {
+    handle /webhooks/* {
         reverse_proxy agent:3000
     }
-    handle_path /slack/* {
+    handle /slack/* {
         reverse_proxy agent:3000
     }
     handle /health {
