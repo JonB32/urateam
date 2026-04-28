@@ -232,11 +232,22 @@ export function createDashboard(config: DashboardConfig): Hono {
   // join lands at dist/static/ — where the build script copies src/static/
   // before publishing.
   const dashboardModuleDir = dirname(fileURLToPath(import.meta.url));
-  // Static middleware needs to see the prefixed path too — operator visiting
-  // /ateam/static/foo.css needs to hit serveStatic. Hono's `app.use` doesn't
-  // share prefix with `app.route`, so we plumb basePath in explicitly here.
-  const staticPath = basePath ? `${basePath}/static/*` : "/static/*";
-  app.use(staticPath, serveStatic({ root: join(dashboardModuleDir, "static") }));
+  // Static middleware needs to see the prefixed path AND strip the URL
+  // prefix before resolving the file under `root`. @hono/node-server's
+  // serveStatic joins `c.req.path` directly with `root` — so a request
+  // for `/ateam/static/style.css` against `root: dist/static` would look
+  // up `dist/static/ateam/static/style.css` (404). The same surprise hit
+  // even without basePath: `/static/style.css` would look up
+  // `dist/static/static/style.css`. Use rewriteRequestPath to strip the
+  // entire URL-side prefix so the lookup lands at `dist/static/<file>`.
+  const staticUrlPrefix = basePath ? `${basePath}/static` : "/static";
+  app.use(
+    `${staticUrlPrefix}/*`,
+    serveStatic({
+      root: join(dashboardModuleDir, "static"),
+      rewriteRequestPath: (path) => path.replace(staticUrlPrefix, ""),
+    }),
+  );
 
   // Mount each sub-router at the basePath prefix. basePath also continues to
   // get passed INTO each router so layout() emits correct hrefs — the two
