@@ -33,6 +33,10 @@ services:
     volumes:
       - agent-runs:/var/agent-runs
       - agent-repos:/var/agent-repos
+      # Persist the `claude` and `gh` CLI login state across rebuilds so
+      # operators don't have to re-auth every `docker compose up --build`.
+      - claude-config:/root/.config/claude
+      - gh-config:/root/.config/gh
     networks:
       - frontend
       - backend
@@ -59,3 +63,5 @@ volumes:
   agent-repos:
   caddy-data:
   caddy-config:
+  claude-config:
+  gh-config:

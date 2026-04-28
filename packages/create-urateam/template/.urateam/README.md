@@ -105,9 +105,14 @@ cp .env.example .env
 # 3. Bring up the stack
 docker compose up -d --build
 
-# 4. Authenticate gh CLI inside the container (required for PR creation
+# 4. Authenticate Claude Code CLI inside the container (skip if you set
+#    ANTHROPIC_API_KEY in .env). Login is persisted in a docker volume,
+#    so this only has to run once per deployment.
+docker compose exec agent claude login
+
+# 5. Authenticate gh CLI inside the container (required for PR creation
 #    unless you wired GITHUB_APP_ID / GITHUB_PRIVATE_KEY_PATH /
-#    GITHUB_INSTALLATION_ID in .env).
+#    GITHUB_INSTALLATION_ID in .env). Also persisted across rebuilds.
 docker compose exec agent gh auth login
 
 # 4. Tail logs to verify license, webhooks, dashboard
