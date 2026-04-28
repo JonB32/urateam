@@ -916,6 +916,59 @@ async function main() {
     initial: true,
   });
 
+  // --- Stage 9: GitHub PR-comment re-trigger config (gated) ---
+  // Only prompt when both signals are present:
+  //   - URATEAM_LICENSE_KEY pasted (operator is engaged with the product enough
+  //     to want advanced workflows)
+  //   - A GITHUB_WEBHOOK_SECRET will exist in .env (either pasted in Stage 6
+  //     or auto-genned in Stage 8) — without it the runtime won't even mount
+  //     the feedback handler.
+  let githubFeedback: GithubFeedbackOptions | undefined;
+  const willHaveGhSecret = !!stage6.githubWebhookSecret || stage8.autoGen;
+  if (stage5.licenseKey && willHaveGhSecret) {
+    const setupFeedback = await prompts({
+      type: "confirm",
+      name: "setup",
+      message:
+        "Configure GitHub PR-comment re-triggers (GITHUB_FEEDBACK_*) now? You can skip and add later.",
+      initial: false,
+    });
+    if (setupFeedback.setup) {
+      const fb = await prompts([
+        {
+          type: "text",
+          name: "triggerKeyword",
+          message:
+            "  GITHUB_FEEDBACK_TRIGGER_KEYWORD (require this string in PR comment to fire; blank = any review/comment):",
+        },
+        {
+          type: "text",
+          name: "allowedReviewers",
+          message:
+            "  GITHUB_FEEDBACK_ALLOWED_REVIEWERS (csv of GitHub usernames whose comments fire it; blank = all):",
+        },
+        {
+          type: "text",
+          name: "botLogins",
+          message:
+            "  GITHUB_FEEDBACK_BOT_LOGINS (csv of bot logins like github-actions[bot]; blank = none):",
+        },
+        {
+          type: "confirm",
+          name: "autoTrigger",
+          message: "  GITHUB_FEEDBACK_AUTO_TRIGGER — fire automatically on qualifying comments?",
+          initial: true,
+        },
+      ]);
+      githubFeedback = {
+        triggerKeyword: fb.triggerKeyword || undefined,
+        allowedReviewers: fb.allowedReviewers || undefined,
+        botLogins: fb.botLogins || undefined,
+        autoTrigger: fb.autoTrigger,
+      };
+    }
+  }
+
   const projectDir = arg === "." ? process.cwd() : join(process.cwd(), arg);
   const projectName = arg === "." ? basename(projectDir) || "my-project" : arg;
 
@@ -935,6 +988,7 @@ async function main() {
     licenseKey: stage5.licenseKey,
     pmAgent,
     githubWebhookSecret: stage6.githubWebhookSecret || undefined,
+    githubFeedback,
     slackWebhookUrl: stage6.slackWebhookUrl || undefined,
     discordWebhookUrl: stage6.discordWebhookUrl || undefined,
     agentProfiles,
