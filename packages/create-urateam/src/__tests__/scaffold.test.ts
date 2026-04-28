@@ -528,8 +528,8 @@ describe("scaffold — production options", () => {
     );
   });
 
-  it("never auto-generates GITHUB_WEBHOOK_SECRET (must come from GitHub side)", () => {
-    const projectDir = join(tempDir, "no-gh-secret-autogen");
+  it("auto-generates GITHUB_WEBHOOK_SECRET when autoGenSecrets is true and none provided", () => {
+    const projectDir = join(tempDir, "gh-secret-autogen");
     const result = scaffold({
       projectDir,
       projectName: "x",
@@ -537,29 +537,48 @@ describe("scaffold — production options", () => {
       linearTeamId: "t",
       repoUrl: "https://github.com/o/r",
       defaultBranch: "main",
-      autoGenSecrets: true, // even when on, GitHub secret stays blank
+      autoGenSecrets: true,
     });
     const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
-    // Line is commented when blank, not bare assignment.
-    expect(env).toMatch(/^# GITHUB_WEBHOOK_SECRET=/m);
-    expect(env).not.toMatch(/^GITHUB_WEBHOOK_SECRET=\S/m);
-    expect(result.generatedSecrets.githubWebhookSecret).toBeUndefined();
+    expect(env).toMatch(/^GITHUB_WEBHOOK_SECRET=[a-f0-9]{64}$/m);
+    expect(result.generatedSecrets.githubWebhookSecret).toMatch(/^[a-f0-9]{64}$/);
   });
 
-  it("emits GITHUB_WEBHOOK_SECRET as a real value when explicitly provided", () => {
-    const projectDir = join(tempDir, "gh-secret-set");
-    scaffold({
+  it("explicit GITHUB_WEBHOOK_SECRET wins over auto-gen", () => {
+    const projectDir = join(tempDir, "gh-secret-explicit-wins");
+    const result = scaffold({
       projectDir,
       projectName: "x",
       linearApiKey: "x",
       linearTeamId: "t",
       repoUrl: "https://github.com/o/r",
       defaultBranch: "main",
-      githubWebhookSecret: "my-paste-from-github",
+      autoGenSecrets: true,
+      githubWebhookSecret: "operator-paste-from-github",
     });
     const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
-    expect(env).toMatch(/^GITHUB_WEBHOOK_SECRET=my-paste-from-github$/m);
+    expect(env).toMatch(/^GITHUB_WEBHOOK_SECRET=operator-paste-from-github$/m);
+    // Not in generated set since it came from the operator.
+    expect(result.generatedSecrets.githubWebhookSecret).toBeUndefined();
   });
+
+  it("leaves GITHUB_WEBHOOK_SECRET commented when autoGenSecrets is false and none provided", () => {
+    const projectDir = join(tempDir, "gh-secret-blank");
+    const result = scaffold({
+      projectDir,
+      projectName: "x",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      autoGenSecrets: false,
+    });
+    const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+    expect(env).toMatch(/^# GITHUB_WEBHOOK_SECRET=/m);
+    expect(env).not.toMatch(/^GITHUB_WEBHOOK_SECRET=\S/m);
+    expect(result.generatedSecrets.githubWebhookSecret).toBeUndefined();
+  });
+
 
   it("returns license info in result when licenseKey decodes", () => {
     const payload = Buffer.from(
