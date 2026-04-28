@@ -118,9 +118,10 @@ describe("scaffold — sidecar pattern", () => {
       scaffold(baseOptions(projectDir, "my-project"));
 
       const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
-      const match = env.match(/DASHBOARD_PASSWORD=([a-f0-9]+)/);
+      // base64url-encoded 18 random bytes = 24 chars, no padding, no `+` or `/`
+      const match = env.match(/DASHBOARD_PASSWORD=([A-Za-z0-9_-]+)/);
       expect(match).not.toBeNull();
-      expect(match![1].length).toBeGreaterThanOrEqual(32);
+      expect(match![1].length).toBeGreaterThanOrEqual(20);
     });
 
     it("creates README.md at project root with project name", () => {
@@ -341,5 +342,190 @@ describe("scaffold — sidecar pattern", () => {
       const matches = content.match(/^\.urateam\/\.env$/gm);
       expect(matches?.length).toBe(1);
     });
+  });
+});
+
+describe("decodeLicense", () => {
+  // We import lazily inside each test to keep the existing top-of-file
+  // import structure clean.
+  it("decodes a Pro JWT and reads tier + features", async () => {
+    const { decodeLicense } = await import("../index.js");
+    // Hand-rolled unsigned JWT (header.payload.signature — signature ignored by decoder)
+    const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" })).toString("base64url");
+    const payload = Buffer.from(
+      JSON.stringify({
+        iss: "urateams.com",
+        sub: "cust_test",
+        tier: "pro",
+        features: ["slack-interface", "deep-review", "multi-repo"],
+        exp: 2_000_000_000,
+      }),
+    ).toString("base64url");
+    const jwt = `${header}.${payload}.x`;
+
+    const info = decodeLicense(jwt);
+    expect(info?.tier).toBe("pro");
+    expect(info?.features).toEqual(["slack-interface", "deep-review", "multi-repo"]);
+    expect(info?.customerId).toBe("cust_test");
+  });
+
+  it("returns null on malformed JWT", async () => {
+    const { decodeLicense } = await import("../index.js");
+    expect(decodeLicense("not.a.jwt")).toBeNull();
+    expect(decodeLicense("")).toBeNull();
+    expect(decodeLicense(undefined)).toBeNull();
+    expect(decodeLicense("only.two")).toBeNull();
+  });
+
+  it("falls back to oss tier for unknown tier values", async () => {
+    const { decodeLicense } = await import("../index.js");
+    const payload = Buffer.from(JSON.stringify({ tier: "rogue" })).toString("base64url");
+    expect(decodeLicense(`x.${payload}.y`)?.tier).toBe("oss");
+  });
+});
+
+describe("scaffold — production options", () => {
+  let tempDir: string;
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "create-urateam-test-prod-"));
+  });
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("writes DOMAIN + CADDY_EMAIL when deployMode is production", () => {
+    const projectDir = join(tempDir, "prod");
+    scaffold({
+      projectDir,
+      projectName: "prod",
+      linearApiKey: "lin_api",
+      linearTeamId: "team-1",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      deployMode: "production",
+      domain: "myateam.example.com",
+      caddyEmail: "ops@example.com",
+    });
+    const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+    expect(env).toContain("DOMAIN=myateam.example.com");
+    expect(env).toContain("CADDY_EMAIL=ops@example.com");
+  });
+
+  it("omits DOMAIN block when deployMode is local", () => {
+    const projectDir = join(tempDir, "loc");
+    scaffold({
+      projectDir,
+      projectName: "loc",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      deployMode: "local",
+    });
+    const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+    expect(env).not.toContain("DOMAIN=");
+    expect(env).not.toContain("CADDY_EMAIL=");
+  });
+
+  it("writes PM_AGENT block when pmAgent is provided", () => {
+    const projectDir = join(tempDir, "pm");
+    scaffold({
+      projectDir,
+      projectName: "pm",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      pmAgent: {
+        slackBotToken: "xoxb-123",
+        slackSigningSecret: "sig123",
+        slackChannelId: "C123",
+        teamIds: "team-1,team-2",
+        dailyTokenBudget: 7_500_000,
+      },
+    });
+    const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+    expect(env).toContain("PM_AGENT_ENABLED=true");
+    expect(env).toContain("PM_AGENT_TEAM_IDS=team-1,team-2");
+    expect(env).toContain("PM_AGENT_SLACK_CHANNEL_ID=C123");
+    expect(env).toContain("PM_AGENT_DAILY_TOKEN_BUDGET=7500000");
+    expect(env).toContain("SLACK_BOT_TOKEN=xoxb-123");
+  });
+
+  it("comments out PM_AGENT block by default", () => {
+    const projectDir = join(tempDir, "no-pm");
+    scaffold({
+      projectDir,
+      projectName: "no-pm",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+    });
+    const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+    expect(env).toContain("# PM_AGENT_ENABLED=true");
+    expect(env).not.toMatch(/^PM_AGENT_ENABLED=true/m);
+  });
+
+  it("leaves secrets blank when autoGenSecrets is false", () => {
+    const projectDir = join(tempDir, "manual-secrets");
+    const result = scaffold({
+      projectDir,
+      projectName: "manual-secrets",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      autoGenSecrets: false,
+    });
+    const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+    expect(env).toMatch(/^DASHBOARD_PASSWORD=$/m);
+    expect(env).toMatch(/^POSTGRES_PASSWORD=$/m);
+    expect(env).toMatch(/^GITHUB_WEBHOOK_SECRET=$/m);
+    expect(result.generatedSecrets).toEqual({});
+    expect(result.todos).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("DASHBOARD_PASSWORD"),
+        expect.stringContaining("POSTGRES_PASSWORD"),
+        expect.stringContaining("GITHUB_WEBHOOK_SECRET"),
+      ]),
+    );
+  });
+
+  it("returns license info in result when licenseKey decodes", () => {
+    const payload = Buffer.from(
+      JSON.stringify({ tier: "pro", features: ["slack-interface"] }),
+    ).toString("base64url");
+    const projectDir = join(tempDir, "lic");
+    const result = scaffold({
+      projectDir,
+      projectName: "lic",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      licenseKey: `x.${payload}.y`,
+    });
+    expect(result.license?.tier).toBe("pro");
+    expect(result.license?.features).toContain("slack-interface");
+  });
+
+  it("surfaces a TODO when license has slack-interface but no pmAgent provided", () => {
+    const payload = Buffer.from(
+      JSON.stringify({ tier: "pro", features: ["slack-interface"] }),
+    ).toString("base64url");
+    const projectDir = join(tempDir, "lic-todo");
+    const result = scaffold({
+      projectDir,
+      projectName: "lic-todo",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      licenseKey: `x.${payload}.y`,
+    });
+    expect(result.todos).toEqual(
+      expect.arrayContaining([expect.stringContaining("PM_AGENT_*")]),
+    );
   });
 });
