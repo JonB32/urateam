@@ -26,10 +26,18 @@ interface AuthRouterDeps {
   db: any;
   sso: SsoConfig;
   workos: WorkosClient;
+  /**
+   * Path prefix the dashboard is mounted under. Used for the post-logout
+   * redirect target so it lands on the actually-mounted login route rather
+   * than 404'ing at root. Empty = mounted at root.
+   */
+  basePath?: string;
 }
 
 export function createAuthRouter(deps: AuthRouterDeps): Hono {
   const app = new Hono();
+  const basePath = (deps.basePath ?? "").replace(/\/+$/, "");
+  const loginPath = `${basePath}/auth/login`;
 
   app.get("/auth/login", async (c) => {
     const next = validateNextPath(c.req.query("next"));
@@ -153,7 +161,7 @@ export function createAuthRouter(deps: AuthRouterDeps): Hono {
       sameSite: "Lax",
       secure: deps.sso.cookieSecure,
     });
-    return c.redirect("/auth/login", 302);
+    return c.redirect(loginPath, 302);
   });
 
   return app;

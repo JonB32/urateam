@@ -119,6 +119,15 @@ export function createDashboard(config: DashboardConfig): Hono {
   });
 
   // CSRF / Origin validation for state-changing requests
+  // Resolve the (possibly prefixed) auth paths once so we can match them
+  // exactly. Same value as `mountPrefix` below — duplicated here because
+  // this middleware is registered BEFORE the mountPrefix declaration in the
+  // call graph. Cheap to re-derive.
+  const csrfExemptBase = (basePath ?? "").replace(/\/+$/, "");
+  const csrfExemptPaths = new Set([
+    `${csrfExemptBase}/auth/login`,
+    `${csrfExemptBase}/auth/callback`,
+  ]);
   app.use("*", async (c, next) => {
     const method = c.req.method;
     // /auth/login and /auth/callback are GET-based OAuth handoffs with no
@@ -127,8 +136,7 @@ export function createDashboard(config: DashboardConfig): Hono {
     // embed a <form action="/auth/logout"> on a third-party site and force
     // a logout.
     const path = c.req.path;
-    const csrfExempt =
-      path === "/auth/login" || path === "/auth/callback";
+    const csrfExempt = csrfExemptPaths.has(path);
     if (
       ["POST", "PUT", "DELETE", "PATCH"].includes(method) &&
       !csrfExempt
@@ -189,11 +197,12 @@ export function createDashboard(config: DashboardConfig): Hono {
       db: config.db,
       sso: config.sso!,
       workos: config.workos,
+      basePath,
     });
     app.route(mountPrefix, authRouter);
     app.use(
       "*",
-      createSsoMiddleware({ db: config.db, sso: config.sso! }),
+      createSsoMiddleware({ db: config.db, sso: config.sso!, basePath }),
     );
   } else if (config.auth?.username && config.auth?.password) {
     app.use(
