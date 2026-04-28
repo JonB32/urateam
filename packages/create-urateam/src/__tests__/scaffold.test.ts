@@ -382,6 +382,42 @@ describe("decodeLicense", () => {
     const payload = Buffer.from(JSON.stringify({ tier: "rogue" })).toString("base64url");
     expect(decodeLicense(`x.${payload}.y`)?.tier).toBe("oss");
   });
+
+  it("expands Pro tier to all Pro features when JWT has no explicit features", async () => {
+    // A license issued with `ura license issue --tier pro` (no --features flag)
+    // gets a JWT with no `features` field. Runtime grants all Pro features
+    // implicitly via tier — scaffolder must match that or it'll skip
+    // tier-gated prompts (e.g. PM agent setup) for such licenses.
+    const { decodeLicense } = await import("../index.js");
+    const payload = Buffer.from(
+      JSON.stringify({ tier: "pro", sub: "cust", exp: 2_000_000_000 }),
+    ).toString("base64url");
+    const info = decodeLicense(`x.${payload}.y`);
+    expect(info?.tier).toBe("pro");
+    expect(info?.features).toEqual(
+      expect.arrayContaining(["slack-interface", "deep-review", "multi-repo"]),
+    );
+  });
+
+  it("expands Enterprise tier to all Enterprise features when JWT has no explicit features", async () => {
+    const { decodeLicense } = await import("../index.js");
+    const payload = Buffer.from(JSON.stringify({ tier: "enterprise" })).toString("base64url");
+    const info = decodeLicense(`x.${payload}.y`);
+    expect(info?.features).toEqual(
+      expect.arrayContaining(["slack-interface", "sso", "audit-log", "rbac"]),
+    );
+  });
+
+  it("honors an explicit features array even when shorter than the tier default", async () => {
+    // Operators can issue restricted licenses (e.g. Pro tier minus deep-review).
+    // The explicit list wins.
+    const { decodeLicense } = await import("../index.js");
+    const payload = Buffer.from(
+      JSON.stringify({ tier: "pro", features: ["multi-repo"] }),
+    ).toString("base64url");
+    const info = decodeLicense(`x.${payload}.y`);
+    expect(info?.features).toEqual(["multi-repo"]);
+  });
 });
 
 describe("scaffold — production options", () => {
@@ -467,7 +503,9 @@ describe("scaffold — production options", () => {
     expect(env).not.toMatch(/^PM_AGENT_ENABLED=true/m);
   });
 
-  it("leaves secrets blank when autoGenSecrets is false", () => {
+  it("leaves DASHBOARD/POSTGRES blank when autoGenSecrets is false", () => {
+    // GITHUB_WEBHOOK_SECRET is no longer auto-generated regardless — it's
+    // shared with GitHub's webhook config and prompted explicitly.
     const projectDir = join(tempDir, "manual-secrets");
     const result = scaffold({
       projectDir,
@@ -481,15 +519,46 @@ describe("scaffold — production options", () => {
     const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
     expect(env).toMatch(/^DASHBOARD_PASSWORD=$/m);
     expect(env).toMatch(/^POSTGRES_PASSWORD=$/m);
-    expect(env).toMatch(/^GITHUB_WEBHOOK_SECRET=$/m);
     expect(result.generatedSecrets).toEqual({});
     expect(result.todos).toEqual(
       expect.arrayContaining([
         expect.stringContaining("DASHBOARD_PASSWORD"),
         expect.stringContaining("POSTGRES_PASSWORD"),
-        expect.stringContaining("GITHUB_WEBHOOK_SECRET"),
       ]),
     );
+  });
+
+  it("never auto-generates GITHUB_WEBHOOK_SECRET (must come from GitHub side)", () => {
+    const projectDir = join(tempDir, "no-gh-secret-autogen");
+    const result = scaffold({
+      projectDir,
+      projectName: "x",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      autoGenSecrets: true, // even when on, GitHub secret stays blank
+    });
+    const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+    // Line is commented when blank, not bare assignment.
+    expect(env).toMatch(/^# GITHUB_WEBHOOK_SECRET=/m);
+    expect(env).not.toMatch(/^GITHUB_WEBHOOK_SECRET=\S/m);
+    expect(result.generatedSecrets.githubWebhookSecret).toBeUndefined();
+  });
+
+  it("emits GITHUB_WEBHOOK_SECRET as a real value when explicitly provided", () => {
+    const projectDir = join(tempDir, "gh-secret-set");
+    scaffold({
+      projectDir,
+      projectName: "x",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      githubWebhookSecret: "my-paste-from-github",
+    });
+    const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+    expect(env).toMatch(/^GITHUB_WEBHOOK_SECRET=my-paste-from-github$/m);
   });
 
   it("returns license info in result when licenseKey decodes", () => {

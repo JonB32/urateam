@@ -114,6 +114,34 @@ export interface ScaffoldResult {
 }
 
 /**
+ * Tier → implicit feature set, mirroring packages/core/src/license.ts.
+ * The runtime grants Pro tier ALL Pro features regardless of whether the
+ * JWT carries an explicit `features` array — so the scaffolder must do
+ * the same expansion or it'll skip tier-gated prompts for licenses
+ * issued without `--features`.
+ */
+const PRO_FEATURES = [
+  "slack-interface",
+  "conflict-detection",
+  "deep-review",
+  "approval-workflows",
+  "multi-repo",
+  "stage-models",
+  "advanced-automerge",
+];
+const ENTERPRISE_FEATURES = [
+  ...PRO_FEATURES,
+  "sso",
+  "audit-log",
+  "spend-caps",
+  "rbac",
+  "cost-dashboard",
+  "cost-roi",
+  "org-policy",
+  "pm-agent-governance",
+];
+
+/**
  * Decode a urateam license JWT payload WITHOUT verifying the signature.
  *
  * The scaffolder doesn't ship the public key (would bloat the package and
@@ -121,6 +149,11 @@ export interface ScaffoldResult {
  * just produces a wrong prompt flow which is recoverable by editing .env
  * after the fact. Production verification happens at runtime in the agent
  * via packages/core/src/license.ts against the embedded public key.
+ *
+ * If the JWT has no explicit `features` array, this expands by tier to
+ * match runtime semantics. An explicit (possibly trimmed) array in the
+ * JWT takes precedence — operators can ship Pro licenses with a subset
+ * of features and the scaffolder honors that.
  *
  * Returns null on any parse failure.
  */
@@ -142,9 +175,23 @@ export function decodeLicense(jwt: string | undefined | null): LicenseInfo | nul
     };
     const tier =
       payload.tier === "pro" || payload.tier === "enterprise" ? payload.tier : "oss";
+
+    // Honor an explicit features array (operators can issue restricted licenses).
+    // Otherwise expand by tier to match the runtime's tier-implicit feature set.
+    let features: string[];
+    if (Array.isArray(payload.features) && payload.features.length > 0) {
+      features = payload.features;
+    } else if (tier === "pro") {
+      features = [...PRO_FEATURES];
+    } else if (tier === "enterprise") {
+      features = [...ENTERPRISE_FEATURES];
+    } else {
+      features = [];
+    }
+
     return {
       tier,
-      features: payload.features ?? [],
+      features,
       customerId: payload.sub,
       expiresAt: payload.exp ? new Date(payload.exp * 1000) : undefined,
     };
@@ -230,7 +277,14 @@ function buildEnv(
   push("# GITHUB_APP_ID=");
   push("# GITHUB_PRIVATE_KEY_PATH=/run/gh-app.pem");
   push("# GITHUB_INSTALLATION_ID=");
-  push(`GITHUB_WEBHOOK_SECRET=${options.githubWebhookSecret}`);
+  // GITHUB_WEBHOOK_SECRET is shared with GitHub's webhook config — only emit
+  // when the operator has pasted a real value. Empty/missing means the
+  // PR-comment re-trigger feature is disabled, which is the expected default.
+  if (options.githubWebhookSecret) {
+    push(`GITHUB_WEBHOOK_SECRET=${options.githubWebhookSecret}`);
+  } else {
+    push("# GITHUB_WEBHOOK_SECRET=  # paste from GitHub webhook config (only needed for PR-comment re-runs)");
+  }
   blank();
 
   push("# === Database ===");
@@ -355,7 +409,12 @@ function resolveSecrets(options: ScaffoldOptions): {
 
   let dashboardPassword = options.dashboardPassword ?? "";
   let postgresPassword = options.postgresPassword ?? "";
-  let githubWebhookSecret = options.githubWebhookSecret ?? "";
+  // GITHUB_WEBHOOK_SECRET is NOT auto-generated. The secret is shared with
+  // GitHub's webhook config — operator either pastes the value GitHub generates
+  // in the webhook UI, OR provides their own and pastes that into both sides.
+  // Auto-generating one only here would mismatch GitHub's value and silently
+  // reject every incoming PR comment.
+  const githubWebhookSecret = options.githubWebhookSecret ?? "";
 
   if (autoGen) {
     // base64url avoids `+`, `/`, `=` which can trip strict env-file parsers
@@ -367,10 +426,6 @@ function resolveSecrets(options: ScaffoldOptions): {
     if (!postgresPassword) {
       postgresPassword = randomBytes(24).toString("base64url");
       generated.postgresPassword = postgresPassword;
-    }
-    if (!githubWebhookSecret) {
-      githubWebhookSecret = randomBytes(32).toString("hex");
-      generated.githubWebhookSecret = githubWebhookSecret;
     }
   }
 
@@ -486,10 +541,11 @@ export function scaffold(options: ScaffoldOptions): ScaffoldResult {
     if (!options.autoGenSecrets) {
       if (!options.dashboardPassword) todos.push("DASHBOARD_PASSWORD — fill in .env.");
       if (!options.postgresPassword) todos.push("POSTGRES_PASSWORD — fill in .env.");
-      if (!options.githubWebhookSecret) todos.push("GITHUB_WEBHOOK_SECRET — fill in .env.");
     }
-    // GITHUB_FEEDBACK_* are gated by GITHUB_WEBHOOK_SECRET at runtime — surface
-    // a TODO if feedback config is set but the secret is empty.
+    // GITHUB_WEBHOOK_SECRET is optional (only needed for PR-comment re-runs).
+    // No TODO when blank — operator who didn't paste it in Stage 6 doesn't want
+    // the feature. But if they DID set GITHUB_FEEDBACK_*, the missing secret
+    // makes those values dead — flag that.
     if (options.githubFeedback && !githubWebhookSecret) {
       todos.push(
         "GITHUB_WEBHOOK_SECRET — required for GITHUB_FEEDBACK_* to take effect; " +
@@ -682,7 +738,10 @@ async function main() {
   // --- Stage 5: license + tier-gated PM agent setup ---
   const stage5 = await prompts([
     {
-      type: "text",
+      // password type masks the JWT so it doesn't echo to scrollback / shell history.
+      // Decoded license summary printed below intentionally only shows tier + features,
+      // not the full JWT, so paste-into-terminal stays opaque.
+      type: "password",
       name: "licenseKey",
       message: "URATEAM_LICENSE_KEY (leave blank for OSS):",
     },
@@ -757,8 +816,15 @@ async function main() {
     }
   }
 
-  // --- Stage 6: notification webhooks (Slack / Discord — both optional) ---
+  // --- Stage 6: optional GitHub webhook secret + notification webhooks ---
   const stage6 = await prompts([
+    {
+      // Hidden input — secret is shared with GitHub's webhook config.
+      type: "password",
+      name: "githubWebhookSecret",
+      message:
+        "GITHUB_WEBHOOK_SECRET (paste from GitHub webhook config; leave blank to disable PR-comment re-runs):",
+    },
     {
       type: "text",
       name: "slackWebhookUrl",
@@ -834,11 +900,13 @@ async function main() {
   }
 
   // --- Stage 8: secret generation strategy ---
+  // GITHUB_WEBHOOK_SECRET intentionally NOT in this list — it must match
+  // GitHub's webhook config and is collected explicitly in Stage 6.
   const stage8 = await prompts({
     type: "confirm",
     name: "autoGen",
     message:
-      "Auto-generate POSTGRES_PASSWORD, DASHBOARD_PASSWORD, GITHUB_WEBHOOK_SECRET? (No → leave blank in .env)",
+      "Auto-generate POSTGRES_PASSWORD and DASHBOARD_PASSWORD? (No → leave blank in .env)",
     initial: true,
   });
 
@@ -860,6 +928,7 @@ async function main() {
     anthropicApiKey: stage4.anthropicApiKey,
     licenseKey: stage5.licenseKey,
     pmAgent,
+    githubWebhookSecret: stage6.githubWebhookSecret || undefined,
     slackWebhookUrl: stage6.slackWebhookUrl || undefined,
     discordWebhookUrl: stage6.discordWebhookUrl || undefined,
     agentProfiles,
