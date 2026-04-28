@@ -598,6 +598,39 @@ describe("scaffold — production options", () => {
     expect(result.license?.features).toContain("slack-interface");
   });
 
+  it("AGENT_BYPASS_PERMISSIONS=true uncommented in local mode", () => {
+    const projectDir = join(tempDir, "perm-local");
+    scaffold({
+      projectDir,
+      projectName: "perm-local",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      deployMode: "local",
+    });
+    const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+    expect(env).toMatch(/^AGENT_BYPASS_PERMISSIONS=true$/m);
+  });
+
+  it("AGENT_BYPASS_PERMISSIONS commented out in production mode", () => {
+    const projectDir = join(tempDir, "perm-prod");
+    scaffold({
+      projectDir,
+      projectName: "perm-prod",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      deployMode: "production",
+      domain: "x.example.com",
+      caddyEmail: "x@x.com",
+    });
+    const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+    expect(env).toMatch(/^# AGENT_BYPASS_PERMISSIONS=true/m);
+    expect(env).not.toMatch(/^AGENT_BYPASS_PERMISSIONS=true$/m);
+  });
+
   it("writes DASHBOARD_BASE_PATH when provided, comments out otherwise", () => {
     const projectDir = join(tempDir, "base-path");
     scaffold({

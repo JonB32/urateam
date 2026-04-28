@@ -312,6 +312,23 @@ function buildEnv(
   push(`MAX_CONCURRENT_RUNS=${options.maxConcurrentRuns}`);
   blank();
 
+  // AGENT_BYPASS_PERMISSIONS — Claude Code permission-mode override. Runtime
+  // logic at packages/core/src/executor/permissions.ts:
+  //   - root user (UID 0): all permission flags ignored (Claude Code refuses)
+  //   - else, env var unset: implement/reproduce=acceptEdits, test/review=default
+  //   - else, env var =true: bypassPermissions for all stages
+  // The hardened compose template runs the container as root, so this var is
+  // a no-op for production VPS deploys. For local `pnpm dev` (non-root), the
+  // test/review stages would hang on interactive prompts without this — local
+  // mode therefore defaults to true.
+  push("# === Agent permissions (Claude Code) ===");
+  if (options.deployMode === "local") {
+    push("AGENT_BYPASS_PERMISSIONS=true");
+  } else {
+    push("# AGENT_BYPASS_PERMISSIONS=true  # no-op in root containers; uncomment if running container as a non-root user");
+  }
+  blank();
+
   if (options.pmAgent) {
     push("# === PM Agent (Pro: slack-interface) ===");
     push("PM_AGENT_ENABLED=true");
