@@ -114,6 +114,34 @@ export interface ScaffoldResult {
 }
 
 /**
+ * Tier → implicit feature set, mirroring packages/core/src/license.ts.
+ * The runtime grants Pro tier ALL Pro features regardless of whether the
+ * JWT carries an explicit `features` array — so the scaffolder must do
+ * the same expansion or it'll skip tier-gated prompts for licenses
+ * issued without `--features`.
+ */
+const PRO_FEATURES = [
+  "slack-interface",
+  "conflict-detection",
+  "deep-review",
+  "approval-workflows",
+  "multi-repo",
+  "stage-models",
+  "advanced-automerge",
+];
+const ENTERPRISE_FEATURES = [
+  ...PRO_FEATURES,
+  "sso",
+  "audit-log",
+  "spend-caps",
+  "rbac",
+  "cost-dashboard",
+  "cost-roi",
+  "org-policy",
+  "pm-agent-governance",
+];
+
+/**
  * Decode a urateam license JWT payload WITHOUT verifying the signature.
  *
  * The scaffolder doesn't ship the public key (would bloat the package and
@@ -121,6 +149,11 @@ export interface ScaffoldResult {
  * just produces a wrong prompt flow which is recoverable by editing .env
  * after the fact. Production verification happens at runtime in the agent
  * via packages/core/src/license.ts against the embedded public key.
+ *
+ * If the JWT has no explicit `features` array, this expands by tier to
+ * match runtime semantics. An explicit (possibly trimmed) array in the
+ * JWT takes precedence — operators can ship Pro licenses with a subset
+ * of features and the scaffolder honors that.
  *
  * Returns null on any parse failure.
  */
@@ -142,9 +175,23 @@ export function decodeLicense(jwt: string | undefined | null): LicenseInfo | nul
     };
     const tier =
       payload.tier === "pro" || payload.tier === "enterprise" ? payload.tier : "oss";
+
+    // Honor an explicit features array (operators can issue restricted licenses).
+    // Otherwise expand by tier to match the runtime's tier-implicit feature set.
+    let features: string[];
+    if (Array.isArray(payload.features) && payload.features.length > 0) {
+      features = payload.features;
+    } else if (tier === "pro") {
+      features = [...PRO_FEATURES];
+    } else if (tier === "enterprise") {
+      features = [...ENTERPRISE_FEATURES];
+    } else {
+      features = [];
+    }
+
     return {
       tier,
-      features: payload.features ?? [],
+      features,
       customerId: payload.sub,
       expiresAt: payload.exp ? new Date(payload.exp * 1000) : undefined,
     };

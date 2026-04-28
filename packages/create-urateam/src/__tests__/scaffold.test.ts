@@ -382,6 +382,42 @@ describe("decodeLicense", () => {
     const payload = Buffer.from(JSON.stringify({ tier: "rogue" })).toString("base64url");
     expect(decodeLicense(`x.${payload}.y`)?.tier).toBe("oss");
   });
+
+  it("expands Pro tier to all Pro features when JWT has no explicit features", async () => {
+    // A license issued with `ura license issue --tier pro` (no --features flag)
+    // gets a JWT with no `features` field. Runtime grants all Pro features
+    // implicitly via tier — scaffolder must match that or it'll skip
+    // tier-gated prompts (e.g. PM agent setup) for such licenses.
+    const { decodeLicense } = await import("../index.js");
+    const payload = Buffer.from(
+      JSON.stringify({ tier: "pro", sub: "cust", exp: 2_000_000_000 }),
+    ).toString("base64url");
+    const info = decodeLicense(`x.${payload}.y`);
+    expect(info?.tier).toBe("pro");
+    expect(info?.features).toEqual(
+      expect.arrayContaining(["slack-interface", "deep-review", "multi-repo"]),
+    );
+  });
+
+  it("expands Enterprise tier to all Enterprise features when JWT has no explicit features", async () => {
+    const { decodeLicense } = await import("../index.js");
+    const payload = Buffer.from(JSON.stringify({ tier: "enterprise" })).toString("base64url");
+    const info = decodeLicense(`x.${payload}.y`);
+    expect(info?.features).toEqual(
+      expect.arrayContaining(["slack-interface", "sso", "audit-log", "rbac"]),
+    );
+  });
+
+  it("honors an explicit features array even when shorter than the tier default", async () => {
+    // Operators can issue restricted licenses (e.g. Pro tier minus deep-review).
+    // The explicit list wins.
+    const { decodeLicense } = await import("../index.js");
+    const payload = Buffer.from(
+      JSON.stringify({ tier: "pro", features: ["multi-repo"] }),
+    ).toString("base64url");
+    const info = decodeLicense(`x.${payload}.y`);
+    expect(info?.features).toEqual(["multi-repo"]);
+  });
 });
 
 describe("scaffold — production options", () => {
