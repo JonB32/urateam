@@ -555,7 +555,7 @@ describe("scaffold — production options", () => {
     expect(env).toContain("DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123/abc");
   });
 
-  it("writes URATEAM_AGENT_PROFILES as valid JSON when provided", () => {
+  it("writes URATEAM_AGENT_PROFILES as bare (unquoted) valid JSON", () => {
     const projectDir = join(tempDir, "profiles");
     scaffold({
       projectDir,
@@ -570,12 +570,57 @@ describe("scaffold — production options", () => {
       },
     });
     const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
-    const match = env.match(/^URATEAM_AGENT_PROFILES='(\{.*\})'$/m);
+    // Bare value (no surrounding quotes) — surrounding single-quotes break Docker
+    // Compose's env_file parser. Must not match a quoted variant.
+    const match = env.match(/^URATEAM_AGENT_PROFILES=(\{.*\})$/m);
     expect(match).not.toBeNull();
-    // The written value MUST be parseable JSON — that's the whole point of the wizard.
+    expect(env).not.toMatch(/^URATEAM_AGENT_PROFILES='/m);
+    expect(env).not.toMatch(/^URATEAM_AGENT_PROFILES="/m);
     const parsed = JSON.parse(match![1]);
     expect(parsed.test).toEqual({ maxTurns: 50, maxInputTokens: 80000 });
     expect(parsed.review).toEqual({ model: "claude-opus-4-7" });
+  });
+
+  it("URATEAM_AGENT_PROFILES survives Node 22 process.loadEnvFile round-trip", async () => {
+    // Integration test: the actual env-file parser must extract the JSON cleanly.
+    // Without this, the wizard silently breaks under docker-compose env_file
+    // (which has parser quirks similar to Node's). See PR #127 Sonnet review C1.
+    const { execFileSync } = await import("child_process");
+    const projectDir = join(tempDir, "loadenv");
+    scaffold({
+      projectDir,
+      projectName: "loadenv",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      agentProfiles: {
+        test: { maxTurns: 50, maxInputTokens: 80000 },
+      },
+    });
+    const envPath = join(projectDir, ".urateam", ".env");
+    const out = execFileSync(
+      "node",
+      [
+        `--env-file=${envPath}`,
+        "-e",
+        "console.log(JSON.stringify(JSON.parse(process.env.URATEAM_AGENT_PROFILES)))",
+      ],
+      { encoding: "utf-8" },
+    ).trim();
+    expect(JSON.parse(out)).toEqual({ test: { maxTurns: 50, maxInputTokens: 80000 } });
+  });
+
+  it("normalizeBasePath strips trailing slashes and ensures leading slash", async () => {
+    const { normalizeBasePath } = await import("../index.js");
+    expect(normalizeBasePath("/ateam")).toBe("/ateam");
+    expect(normalizeBasePath("/ateam/")).toBe("/ateam");
+    expect(normalizeBasePath("/ateam///")).toBe("/ateam");
+    expect(normalizeBasePath("ateam")).toBe("/ateam");
+    expect(normalizeBasePath("  /ateam/  ")).toBe("/ateam");
+    expect(normalizeBasePath("")).toBeUndefined();
+    expect(normalizeBasePath("///")).toBeUndefined();
+    expect(normalizeBasePath(undefined)).toBeUndefined();
   });
 
   it("writes GITHUB_FEEDBACK_* lines when githubFeedback is provided", () => {

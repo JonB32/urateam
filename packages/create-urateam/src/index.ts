@@ -325,9 +325,13 @@ function buildEnv(
 
   push("# === Per-stage agent budget overrides (urateam#38) ===");
   if (options.agentProfiles && Object.keys(options.agentProfiles).length > 0) {
-    push(`URATEAM_AGENT_PROFILES='${JSON.stringify(options.agentProfiles)}'`);
+    // Bare (unquoted) JSON. Surrounding single-quotes break Docker Compose's
+    // env_file parser — same gotcha as the env_file no-interpolation issue.
+    // Both Compose and Node 22 process.loadEnvFile read everything after `=`
+    // to EOL and JSON has no whitespace / `=` outside string literals.
+    push(`URATEAM_AGENT_PROFILES=${JSON.stringify(options.agentProfiles)}`);
   } else {
-    push("# URATEAM_AGENT_PROFILES='{\"test\":{\"maxTurns\":50,\"maxInputTokens\":80000}}'");
+    push('# URATEAM_AGENT_PROFILES={"test":{"maxTurns":50,"maxInputTokens":80000}}');
   }
   blank();
 
@@ -484,6 +488,14 @@ export function scaffold(options: ScaffoldOptions): ScaffoldResult {
       if (!options.postgresPassword) todos.push("POSTGRES_PASSWORD — fill in .env.");
       if (!options.githubWebhookSecret) todos.push("GITHUB_WEBHOOK_SECRET — fill in .env.");
     }
+    // GITHUB_FEEDBACK_* are gated by GITHUB_WEBHOOK_SECRET at runtime — surface
+    // a TODO if feedback config is set but the secret is empty.
+    if (options.githubFeedback && !githubWebhookSecret) {
+      todos.push(
+        "GITHUB_WEBHOOK_SECRET — required for GITHUB_FEEDBACK_* to take effect; " +
+          "feedback values without the secret are silently ignored at runtime.",
+      );
+    }
 
     const envContent = buildEnv({
       linearApiKey,
@@ -539,6 +551,20 @@ export function scaffold(options: ScaffoldOptions): ScaffoldResult {
   return { urateamDir, license, generatedSecrets: generated, todos };
 }
 
+/**
+ * Normalize a user-typed dashboard base path: strip trailing slashes, ensure
+ * leading slash, treat blank as undefined. Eliminates the "I typed /ateam/
+ * and now the dashboard 404s" footgun.
+ */
+export function normalizeBasePath(input: string | undefined | null): string | undefined {
+  if (!input) return undefined;
+  const trimmed = input.trim();
+  if (!trimmed) return undefined;
+  const noTrailingSlash = trimmed.replace(/\/+$/, "");
+  if (!noTrailingSlash) return undefined; // operator typed only `/` or `///`
+  return noTrailingSlash.startsWith("/") ? noTrailingSlash : `/${noTrailingSlash}`;
+}
+
 const URATEAM_GITIGNORE = `# urateam sidecar
 .urateam/.env
 .urateam/.env.*
@@ -561,6 +587,32 @@ async function main() {
   }
 
   const prompts = (await import("prompts")).default;
+
+  // Detect existing .env early so we can short-circuit before walking the
+  // operator through 8 stages of prompts that won't be applied. The
+  // scaffolder already preserves .env on re-run; without this, the prompts
+  // are pure UX waste.
+  const projectDirEarly = arg === "." ? process.cwd() : join(process.cwd(), arg);
+  const existingEnv = join(projectDirEarly, ".urateam", ".env");
+  if (existsSync(existingEnv)) {
+    console.log(
+      `\n  Existing .env detected at ${existingEnv}.\n` +
+        "  Re-running create-urateam will refresh template files (Dockerfile, docker-compose.yml,\n" +
+        "  Caddyfile, etc.) but will NOT touch your .env. To re-prompt for secrets, delete .env\n" +
+        "  first and re-run. Continuing with template-refresh only…\n",
+    );
+    // Use minimal stub options — scaffold() needs them but won't write .env.
+    scaffold({
+      projectDir: projectDirEarly,
+      projectName: arg === "." ? basename(projectDirEarly) || "my-project" : arg,
+      linearApiKey: "",
+      linearTeamId: "",
+      repoUrl: "",
+      defaultBranch: "main",
+    });
+    console.log(`  ✓ Template files refreshed in ${projectDirEarly}/.urateam\n`);
+    return;
+  }
 
   // --- Stage 1: Linear / repo basics ---
   const stage1 = await prompts([
@@ -740,16 +792,24 @@ async function main() {
         initial: false,
       });
       if (!wantStage.yes) continue;
+      // Min/max mirror the runtime ceilings in packages/core/src/executor/profiles.ts:96
+      // (MAX_TURNS_CEILING=500, MAX_INPUT_TOKENS_CEILING=500_000) so the wizard
+      // rejects out-of-range values at input time instead of letting the runtime
+      // silently drop them with a warn.
       const profile = await prompts([
         {
           type: "number",
           name: "maxTurns",
-          message: `  ${stage}.maxTurns (blank to keep default):`,
+          message: `  ${stage}.maxTurns (1–500, blank to keep default):`,
+          min: 1,
+          max: 500,
         },
         {
           type: "number",
           name: "maxInputTokens",
-          message: `  ${stage}.maxInputTokens (blank to keep default):`,
+          message: `  ${stage}.maxInputTokens (1–500000, blank to keep default):`,
+          min: 1,
+          max: 500_000,
         },
         { type: "text", name: "model", message: `  ${stage}.model (blank to keep default):` },
       ]);
@@ -796,7 +856,7 @@ async function main() {
     linearWebhookSecret: stage2.linearWebhookSecret,
     domain: stage3.domain,
     caddyEmail: stage3.caddyEmail,
-    dashboardBasePath: stage3.dashboardBasePath || undefined,
+    dashboardBasePath: normalizeBasePath(stage3.dashboardBasePath),
     anthropicApiKey: stage4.anthropicApiKey,
     licenseKey: stage5.licenseKey,
     pmAgent,

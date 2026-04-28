@@ -41,6 +41,8 @@ Two-way Slack integration:
    - `reactions:read` — read approval reactions on PM messages
    - `commands` — handle the `/pm` slash command
    - `app_mentions:read` — listen for `@urateam` mentions
+   - `channels:history` — required to receive `message.channels` events (the
+     bot reads natural-language messages in the PM channel)
 
 3. **Event Subscriptions** → toggle **Enable**.
    - Request URL: `https://<your-domain>/slack/events`
