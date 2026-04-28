@@ -83,8 +83,8 @@ export function layout(
 </head>
 <body>
   <nav>
-    <a class="brand" href="${bp}/">⚡ urateam</a>
-    <a href="${bp}/">Runs</a>
+    <a class="brand" href="${bp || "/"}">⚡ urateam</a>
+    <a href="${bp || "/"}">Runs</a>
     <a href="${bp}/tokens">Tokens</a>
     <a href="${bp}/errors">Errors</a>
     <a href="${bp}/audit">Audit</a>

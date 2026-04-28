@@ -70,7 +70,12 @@ export function runFeedView(runs: RunRow[]): string {
     )
     .join("\n");
 
-  return `<div id="run-feed" hx-get="${basePath}/" hx-trigger="every 5s" hx-swap="innerHTML" hx-target="#run-feed">
+  // basePath || "/" not basePath + "/" — Hono mounts the runs router at
+  // <basePath> (no trailing slash), so "/ateam/" 404s but "/ateam" matches.
+  // The empty-basePath case still resolves to "/" so root-mounted dashboards
+  // continue to work.
+  const pollUrl = basePath || "/";
+  return `<div id="run-feed" hx-get="${pollUrl}" hx-trigger="every 5s" hx-swap="innerHTML" hx-target="#run-feed">
   <div class="table-wrapper">
     <table>
       <thead>

@@ -71,7 +71,9 @@ describe("layout", () => {
       process.env.DASHBOARD_BASE_PATH = "/ateam";
       const html = layout("Test", "");
 
-      expect(html).toContain('<a href="/ateam/">Runs</a>');
+      // Runs href omits trailing slash so it matches Hono's mount-prefix
+      // routing — `/ateam/` 404s but `/ateam` matches the runs router's `/`.
+      expect(html).toContain('<a href="/ateam">Runs</a>');
       expect(html).toContain('<a href="/ateam/tokens">Tokens</a>');
       expect(html).toContain('<a href="/ateam/errors">Errors</a>');
       expect(html).toContain('<a href="/ateam/config">Config</a>');
