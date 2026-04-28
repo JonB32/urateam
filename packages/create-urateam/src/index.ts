@@ -25,6 +25,17 @@ export interface PmAgentOptions {
   dailyTokenBudget?: number;
 }
 
+export interface GithubFeedbackOptions {
+  /** Mention a reviewer @bot or paste the keyword in a PR comment to retrigger the pipeline. */
+  triggerKeyword?: string;
+  /** Comma-separated GitHub usernames whose comments are honored. Default: all. */
+  allowedReviewers?: string;
+  /** Comma-separated GitHub bot logins whose comments are honored (e.g. github-actions[bot]). */
+  botLogins?: string;
+  /** When false, only triggers on the explicit triggerKeyword. Default true. */
+  autoTrigger?: boolean;
+}
+
 export interface ScaffoldOptions {
   /** The project root directory. `.urateam/` will be created inside it. */
   projectDir: string;
@@ -51,6 +62,8 @@ export interface ScaffoldOptions {
   dashboardUser?: string;
   /** Dashboard basic-auth password. If omitted and autoGenSecrets is true, a fresh one is generated. */
   dashboardPassword?: string;
+  /** Path prefix the dashboard is mounted under (no trailing slash). Empty = root. */
+  dashboardBasePath?: string;
   /** Postgres password. If omitted and autoGenSecrets is true, a fresh one is generated. */
   postgresPassword?: string;
   /** GitHub webhook signing secret. If omitted and autoGenSecrets is true, a fresh one is generated. */
@@ -59,6 +72,17 @@ export interface ScaffoldOptions {
   maxConcurrentRuns?: number;
   /** Pro PM-agent setup. Only honored when license tier includes `slack-interface`. */
   pmAgent?: PmAgentOptions;
+  /** GitHub PR-comment-driven re-trigger config (only kicks in when GITHUB_WEBHOOK_SECRET is set). */
+  githubFeedback?: GithubFeedbackOptions;
+  /** Slack incoming-webhook URL for pipeline notifications (no Pro license needed). */
+  slackWebhookUrl?: string;
+  /** Discord webhook URL for pipeline notifications (no Pro license needed). */
+  discordWebhookUrl?: string;
+  /**
+   * Per-stage agent budget overrides. JSON-stringified at write time. Example:
+   * `{ test: { maxTurns: 50, maxInputTokens: 80000 } }`. See urateam#38.
+   */
+  agentProfiles?: Record<string, { maxTurns?: number; maxInputTokens?: number; model?: string }>;
   /**
    * When true (default), missing secret fields (DASHBOARD_PASSWORD, POSTGRES_PASSWORD,
    * GITHUB_WEBHOOK_SECRET) are auto-generated. When false, missing fields are written
@@ -155,6 +179,11 @@ function buildEnv(
     githubWebhookSecret: string;
     maxConcurrentRuns: number;
     pmAgent: PmAgentOptions | undefined;
+    dashboardBasePath: string;
+    githubFeedback: GithubFeedbackOptions | undefined;
+    slackWebhookUrl: string;
+    discordWebhookUrl: string;
+    agentProfiles: ScaffoldOptions["agentProfiles"];
   },
 ): string {
   const lines: string[] = [];
@@ -218,7 +247,11 @@ function buildEnv(
   push("# === Dashboard auth ===");
   push(`DASHBOARD_USER=${options.dashboardUser}`);
   push(`DASHBOARD_PASSWORD=${options.dashboardPassword}`);
-  push("# DASHBOARD_BASE_PATH=  # set with leading slash, no trailing, when behind a path prefix");
+  if (options.dashboardBasePath) {
+    push(`DASHBOARD_BASE_PATH=${options.dashboardBasePath}`);
+  } else {
+    push("# DASHBOARD_BASE_PATH=  # set with leading slash, no trailing, when behind a path prefix");
+  }
   blank();
 
   push("# === Concurrency ===");
@@ -247,12 +280,61 @@ function buildEnv(
     blank();
   }
 
+  push("# === GitHub PR-comment re-trigger (optional, gated by GITHUB_WEBHOOK_SECRET above) ===");
+  if (options.githubFeedback) {
+    if (options.githubFeedback.autoTrigger === false) {
+      push("GITHUB_FEEDBACK_AUTO_TRIGGER=false");
+    } else {
+      push("# GITHUB_FEEDBACK_AUTO_TRIGGER=true  # default — fire on any qualifying review/comment");
+    }
+    if (options.githubFeedback.triggerKeyword) {
+      push(`GITHUB_FEEDBACK_TRIGGER_KEYWORD=${options.githubFeedback.triggerKeyword}`);
+    } else {
+      push("# GITHUB_FEEDBACK_TRIGGER_KEYWORD=  # require this keyword in the comment to fire");
+    }
+    if (options.githubFeedback.allowedReviewers) {
+      push(`GITHUB_FEEDBACK_ALLOWED_REVIEWERS=${options.githubFeedback.allowedReviewers}`);
+    } else {
+      push("# GITHUB_FEEDBACK_ALLOWED_REVIEWERS=  # comma-separated GitHub usernames");
+    }
+    if (options.githubFeedback.botLogins) {
+      push(`GITHUB_FEEDBACK_BOT_LOGINS=${options.githubFeedback.botLogins}`);
+    } else {
+      push("# GITHUB_FEEDBACK_BOT_LOGINS=  # comma-separated bot logins, e.g. github-actions[bot]");
+    }
+  } else {
+    push("# GITHUB_FEEDBACK_AUTO_TRIGGER=true  # default — fire on any qualifying review/comment");
+    push("# GITHUB_FEEDBACK_TRIGGER_KEYWORD=  # require this keyword in the comment to fire");
+    push("# GITHUB_FEEDBACK_ALLOWED_REVIEWERS=  # comma-separated GitHub usernames");
+    push("# GITHUB_FEEDBACK_BOT_LOGINS=  # comma-separated bot logins, e.g. github-actions[bot]");
+  }
+  blank();
+
+  push("# === Pipeline notifications (no Pro license needed) ===");
+  if (options.slackWebhookUrl) {
+    push(`SLACK_WEBHOOK_URL=${options.slackWebhookUrl}`);
+  } else {
+    push("# SLACK_WEBHOOK_URL=  # Slack incoming-webhook for pipeline event posts");
+  }
+  if (options.discordWebhookUrl) {
+    push(`DISCORD_WEBHOOK_URL=${options.discordWebhookUrl}`);
+  } else {
+    push("# DISCORD_WEBHOOK_URL=  # Discord webhook for pipeline event posts");
+  }
+  blank();
+
+  push("# === Per-stage agent budget overrides (urateam#38) ===");
+  if (options.agentProfiles && Object.keys(options.agentProfiles).length > 0) {
+    push(`URATEAM_AGENT_PROFILES='${JSON.stringify(options.agentProfiles)}'`);
+  } else {
+    push("# URATEAM_AGENT_PROFILES='{\"test\":{\"maxTurns\":50,\"maxInputTokens\":80000}}'");
+  }
+  blank();
+
   push("# === Optional ===");
-  push("# SLACK_WEBHOOK_URL=  # incoming webhook for pipeline notifications (no Pro license needed)");
-  push("# DISCORD_WEBHOOK_URL=");
   push("# LOG_LEVEL=info");
   push("");
-  push("# Additional tunables (worktree TTL, agent profiles, repo clone dir, etc.)");
+  push("# Additional tunables (worktree TTL, repo clone dir, agent run dir, etc.)");
   push("# documented in .env.example next to this file. Keep that file as the");
   push("# canonical reference; this .env is generated from prompts.");
   return lines.join("\n") + "\n";
@@ -416,10 +498,15 @@ export function scaffold(options: ScaffoldOptions): ScaffoldResult {
       licenseKey: options.licenseKey ?? "",
       dashboardUser: options.dashboardUser ?? "admin",
       dashboardPassword,
+      dashboardBasePath: options.dashboardBasePath ?? "",
       postgresPassword,
       githubWebhookSecret,
       maxConcurrentRuns: options.maxConcurrentRuns ?? 3,
       pmAgent: options.pmAgent,
+      githubFeedback: options.githubFeedback,
+      slackWebhookUrl: options.slackWebhookUrl ?? "",
+      discordWebhookUrl: options.discordWebhookUrl ?? "",
+      agentProfiles: options.agentProfiles,
     });
     writeFileSync(envPath, envContent);
   }
@@ -487,7 +574,7 @@ async function main() {
     process.exit(1);
   }
 
-  // --- Stage 2: deploy mode + Linear webhook secret ---
+  // --- Stage 2: deploy mode + Linear webhook secret (hidden input) ---
   const stage2 = await prompts([
     {
       type: "select",
@@ -499,21 +586,28 @@ async function main() {
       ],
     },
     {
-      type: "text",
+      // password type masks input so the secret doesn't land in scrollback / shell history
+      type: "password",
       name: "linearWebhookSecret",
       message:
         "LINEAR_WEBHOOK_SECRET (paste from Linear webhook config; leave blank to fill in later):",
     },
   ]);
 
-  // --- Stage 3: production-only details (domain / caddy email) ---
+  // --- Stage 3: production-only details (domain / caddy email / dashboard base path) ---
   const stage3 =
     stage2.deployMode === "production"
       ? await prompts([
           { type: "text", name: "domain", message: "Public domain (e.g. urateam.example.com):" },
           { type: "text", name: "caddyEmail", message: "Email for Let's Encrypt:" },
+          {
+            type: "text",
+            name: "dashboardBasePath",
+            message:
+              "DASHBOARD_BASE_PATH (leading slash, no trailing — leave blank if dashboard is at root):",
+          },
         ])
-      : { domain: undefined, caddyEmail: undefined };
+      : { domain: undefined, caddyEmail: undefined, dashboardBasePath: undefined };
 
   // --- Stage 4: Anthropic auth choice ---
   const stage4 = await prompts([
@@ -562,10 +656,16 @@ async function main() {
     license.tier !== "oss" &&
     license.features.includes("slack-interface")
   ) {
+    console.log(
+      "\n  Your license includes the `slack-interface` feature (PM agent + Slack /pm slash commands).\n" +
+        "  You can configure it now if you have your Slack app credentials handy, or skip and add\n" +
+        "  the PM_AGENT_* + SLACK_* lines to .env later. Setup walkthrough:\n" +
+        "  https://github.com/JonB32/urateam/blob/main/docs/slack-setup.md\n",
+    );
     const setupNow = await prompts({
       type: "confirm",
       name: "setup",
-      message: "Set up PM agent + Slack interface now? (you can skip and fill in later)",
+      message: "Set up PM agent + Slack interface now?",
       initial: false,
     });
     if (setupNow.setup) {
@@ -605,8 +705,76 @@ async function main() {
     }
   }
 
-  // --- Stage 6: secret generation strategy ---
-  const stage6 = await prompts({
+  // --- Stage 6: notification webhooks (Slack / Discord — both optional) ---
+  const stage6 = await prompts([
+    {
+      type: "text",
+      name: "slackWebhookUrl",
+      message:
+        "SLACK_WEBHOOK_URL (incoming-webhook for pipeline events; leave blank to skip):",
+    },
+    {
+      type: "text",
+      name: "discordWebhookUrl",
+      message: "DISCORD_WEBHOOK_URL (leave blank to skip):",
+    },
+  ]);
+
+  // --- Stage 7: per-stage agent profile overrides (wizard) ---
+  const stage7Customize = await prompts({
+    type: "confirm",
+    name: "customize",
+    message:
+      "Customize per-stage agent budgets (URATEAM_AGENT_PROFILES)? Most operators skip this.",
+    initial: false,
+  });
+  let agentProfiles: ScaffoldOptions["agentProfiles"] | undefined;
+  if (stage7Customize.customize) {
+    agentProfiles = {};
+    const stages = ["implement", "test", "review"];
+    for (const stage of stages) {
+      const wantStage = await prompts({
+        type: "confirm",
+        name: "yes",
+        message: `Override budget for the \`${stage}\` stage?`,
+        initial: false,
+      });
+      if (!wantStage.yes) continue;
+      const profile = await prompts([
+        {
+          type: "number",
+          name: "maxTurns",
+          message: `  ${stage}.maxTurns (blank to keep default):`,
+        },
+        {
+          type: "number",
+          name: "maxInputTokens",
+          message: `  ${stage}.maxInputTokens (blank to keep default):`,
+        },
+        { type: "text", name: "model", message: `  ${stage}.model (blank to keep default):` },
+      ]);
+      const entry: { maxTurns?: number; maxInputTokens?: number; model?: string } = {};
+      if (typeof profile.maxTurns === "number") entry.maxTurns = profile.maxTurns;
+      if (typeof profile.maxInputTokens === "number") entry.maxInputTokens = profile.maxInputTokens;
+      if (profile.model) entry.model = profile.model;
+      if (Object.keys(entry).length > 0) agentProfiles[stage] = entry;
+    }
+    if (Object.keys(agentProfiles).length === 0) {
+      agentProfiles = undefined; // all stages skipped — don't write a `{}` JSON
+    } else {
+      // Round-trip-validate the JSON we'd write so a typo doesn't get persisted as broken
+      // syntax that the agent would crash on at runtime.
+      try {
+        JSON.parse(JSON.stringify(agentProfiles));
+      } catch (e) {
+        console.error("Internal: agent profiles JSON failed to round-trip — skipping.", e);
+        agentProfiles = undefined;
+      }
+    }
+  }
+
+  // --- Stage 8: secret generation strategy ---
+  const stage8 = await prompts({
     type: "confirm",
     name: "autoGen",
     message:
@@ -628,10 +796,14 @@ async function main() {
     linearWebhookSecret: stage2.linearWebhookSecret,
     domain: stage3.domain,
     caddyEmail: stage3.caddyEmail,
+    dashboardBasePath: stage3.dashboardBasePath || undefined,
     anthropicApiKey: stage4.anthropicApiKey,
     licenseKey: stage5.licenseKey,
     pmAgent,
-    autoGenSecrets: stage6.autoGen,
+    slackWebhookUrl: stage6.slackWebhookUrl || undefined,
+    discordWebhookUrl: stage6.discordWebhookUrl || undefined,
+    agentProfiles,
+    autoGenSecrets: stage8.autoGen,
   });
 
   // --- Next steps printout ---
@@ -671,22 +843,41 @@ async function main() {
     console.log("");
   }
 
+  // Detail any .env updates the operator must do before bringing the stack up.
+  if (result.todos.length > 0) {
+    console.log("  Before starting the stack, edit .urateam/.env to fill in:");
+    for (const todo of result.todos) {
+      console.log(`    • ${todo}`);
+    }
+    console.log("");
+  }
+
   console.log("  Next:");
   if (arg !== ".") console.log(`    cd ${arg}`);
   console.log("    cd .urateam");
   if (result.todos.length > 0) {
-    console.log("    # edit .env to fill in the TODOs above before continuing");
+    console.log("    # ↑ open .env in your editor and fill in the TODOs above first");
   }
   if (stage2.deployMode === "production") {
     console.log("    docker compose up -d --build");
     if (stage4.anthropicAuth === "cli") {
-      console.log("    docker compose exec agent claude login");
+      console.log("    docker compose exec agent claude login    # device-flow auth");
     }
-    console.log("    docker compose exec agent gh auth login");
+    console.log("    docker compose exec agent gh auth login   # device-flow auth");
+    console.log("");
+    console.log("  After the stack is up:");
+    console.log(`    1. Add a webhook in Linear → Settings → API → Webhooks`);
+    console.log(`         URL: https://${stage3.domain || "<your-domain>"}/webhooks/linear`);
+    console.log(`         Subscribe to: Issue state changes`);
+    console.log(`         Copy the secret → paste into .env as LINEAR_WEBHOOK_SECRET → restart the stack`);
+    console.log(`    2. Open the dashboard at https://${stage3.domain || "<your-domain>"} (admin / your-generated-password)`);
+    console.log(`    3. Move a Linear issue to Todo with a pipeline label to trigger your first run`);
   } else {
     console.log("    pnpm install");
     console.log("    ura dev");
   }
+  console.log("\n  Slack / PM agent setup walkthrough:");
+  console.log("    https://github.com/JonB32/urateam/blob/main/docs/slack-setup.md");
   console.log("\n  See CLAUDE.md in the project root for agent context.\n");
 }
 
