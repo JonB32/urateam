@@ -510,6 +510,140 @@ describe("scaffold — production options", () => {
     expect(result.license?.features).toContain("slack-interface");
   });
 
+  it("writes DASHBOARD_BASE_PATH when provided, comments out otherwise", () => {
+    const projectDir = join(tempDir, "base-path");
+    scaffold({
+      projectDir,
+      projectName: "base-path",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      dashboardBasePath: "/ateam",
+    });
+    const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+    expect(env).toMatch(/^DASHBOARD_BASE_PATH=\/ateam$/m);
+
+    // And without it: line stays commented.
+    const projectDir2 = join(tempDir, "no-base-path");
+    scaffold({
+      projectDir: projectDir2,
+      projectName: "no-base-path",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+    });
+    const env2 = readFileSync(join(projectDir2, ".urateam", ".env"), "utf-8");
+    expect(env2).toMatch(/^# DASHBOARD_BASE_PATH=/m);
+  });
+
+  it("writes SLACK_WEBHOOK_URL and DISCORD_WEBHOOK_URL when provided", () => {
+    const projectDir = join(tempDir, "notif");
+    scaffold({
+      projectDir,
+      projectName: "notif",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      slackWebhookUrl: "https://hooks.slack.com/services/AAA/BBB/CCC",
+      discordWebhookUrl: "https://discord.com/api/webhooks/123/abc",
+    });
+    const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+    expect(env).toContain("SLACK_WEBHOOK_URL=https://hooks.slack.com/services/AAA/BBB/CCC");
+    expect(env).toContain("DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123/abc");
+  });
+
+  it("writes URATEAM_AGENT_PROFILES as bare (unquoted) valid JSON", () => {
+    const projectDir = join(tempDir, "profiles");
+    scaffold({
+      projectDir,
+      projectName: "profiles",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      agentProfiles: {
+        test: { maxTurns: 50, maxInputTokens: 80000 },
+        review: { model: "claude-opus-4-7" },
+      },
+    });
+    const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+    // Bare value (no surrounding quotes) — surrounding single-quotes break Docker
+    // Compose's env_file parser. Must not match a quoted variant.
+    const match = env.match(/^URATEAM_AGENT_PROFILES=(\{.*\})$/m);
+    expect(match).not.toBeNull();
+    expect(env).not.toMatch(/^URATEAM_AGENT_PROFILES='/m);
+    expect(env).not.toMatch(/^URATEAM_AGENT_PROFILES="/m);
+    const parsed = JSON.parse(match![1]);
+    expect(parsed.test).toEqual({ maxTurns: 50, maxInputTokens: 80000 });
+    expect(parsed.review).toEqual({ model: "claude-opus-4-7" });
+  });
+
+  it("URATEAM_AGENT_PROFILES survives Node 22 process.loadEnvFile round-trip", async () => {
+    // Integration test: the actual env-file parser must extract the JSON cleanly.
+    // Without this, the wizard silently breaks under docker-compose env_file
+    // (which has parser quirks similar to Node's). See PR #127 Sonnet review C1.
+    const { execFileSync } = await import("child_process");
+    const projectDir = join(tempDir, "loadenv");
+    scaffold({
+      projectDir,
+      projectName: "loadenv",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      agentProfiles: {
+        test: { maxTurns: 50, maxInputTokens: 80000 },
+      },
+    });
+    const envPath = join(projectDir, ".urateam", ".env");
+    const out = execFileSync(
+      "node",
+      [
+        `--env-file=${envPath}`,
+        "-e",
+        "console.log(JSON.stringify(JSON.parse(process.env.URATEAM_AGENT_PROFILES)))",
+      ],
+      { encoding: "utf-8" },
+    ).trim();
+    expect(JSON.parse(out)).toEqual({ test: { maxTurns: 50, maxInputTokens: 80000 } });
+  });
+
+  it("normalizeBasePath strips trailing slashes and ensures leading slash", async () => {
+    const { normalizeBasePath } = await import("../index.js");
+    expect(normalizeBasePath("/ateam")).toBe("/ateam");
+    expect(normalizeBasePath("/ateam/")).toBe("/ateam");
+    expect(normalizeBasePath("/ateam///")).toBe("/ateam");
+    expect(normalizeBasePath("ateam")).toBe("/ateam");
+    expect(normalizeBasePath("  /ateam/  ")).toBe("/ateam");
+    expect(normalizeBasePath("")).toBeUndefined();
+    expect(normalizeBasePath("///")).toBeUndefined();
+    expect(normalizeBasePath(undefined)).toBeUndefined();
+  });
+
+  it("writes GITHUB_FEEDBACK_* lines when githubFeedback is provided", () => {
+    const projectDir = join(tempDir, "fb");
+    scaffold({
+      projectDir,
+      projectName: "fb",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+      githubFeedback: {
+        triggerKeyword: "/retry",
+        allowedReviewers: "alice,bob",
+        autoTrigger: false,
+      },
+    });
+    const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
+    expect(env).toContain("GITHUB_FEEDBACK_AUTO_TRIGGER=false");
+    expect(env).toContain("GITHUB_FEEDBACK_TRIGGER_KEYWORD=/retry");
+    expect(env).toContain("GITHUB_FEEDBACK_ALLOWED_REVIEWERS=alice,bob");
+  });
+
   it("surfaces a TODO when license has slack-interface but no pmAgent provided", () => {
     const payload = Buffer.from(
       JSON.stringify({ tier: "pro", features: ["slack-interface"] }),
