@@ -598,6 +598,51 @@ describe("scaffold — production options", () => {
     expect(result.license?.features).toContain("slack-interface");
   });
 
+  it("Dockerfile bakes in the system-wide gh→git credential helper", () => {
+    const projectDir = join(tempDir, "git-helper");
+    scaffold({
+      projectDir,
+      projectName: "git-helper",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+    });
+    const dockerfile = readFileSync(
+      join(projectDir, ".urateam", "Dockerfile"),
+      "utf-8",
+    );
+    // System-wide config (/etc/gitconfig) survives container restarts WITHOUT
+    // a volume mount, so git operations against private repos keep working
+    // after `gh auth login` — even across `docker compose down/up` cycles.
+    expect(dockerfile).toMatch(/git config --system credential\.helper/);
+    expect(dockerfile).toContain("!gh auth git-credential");
+  });
+
+  it("docker-compose has CADDY_EMAIL in caddy environment + bind-mount for credentials.json", () => {
+    const projectDir = join(tempDir, "compose-vars");
+    scaffold({
+      projectDir,
+      projectName: "compose-vars",
+      linearApiKey: "x",
+      linearTeamId: "t",
+      repoUrl: "https://github.com/o/r",
+      defaultBranch: "main",
+    });
+    const compose = readFileSync(
+      join(projectDir, ".urateam", "docker-compose.yml"),
+      "utf-8",
+    );
+    expect(compose).toMatch(/CADDY_EMAIL: \$\{CADDY_EMAIL\}/);
+    // Bind-mount instead of named volume — credentials.json needs cross-restart
+    // persistence and named volumes don't bind-mount single files.
+    expect(compose).toMatch(
+      /\$\{HOME\}\/\.claude\/\.credentials\.json:\/root\/\.claude\/\.credentials\.json:rw/,
+    );
+    // Old approach (named claude-config volume) should NOT be present.
+    expect(compose).not.toMatch(/claude-config:/);
+  });
+
   it("AGENT_BYPASS_PERMISSIONS=true uncommented in local mode", () => {
     const projectDir = join(tempDir, "perm-local");
     scaffold({

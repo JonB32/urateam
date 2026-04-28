@@ -92,6 +92,12 @@ Compose template ships a hardened three-service stack:
 
 ### Deploy
 
+The order matters: `claude login` runs against the **host's** `~/.claude/`
+directory, which is bind-mounted into the agent container. The credentials
+file must exist on the host before `docker compose up`, otherwise compose
+creates an empty *directory* at the bind-mount path and Claude Code's
+preflight will fail.
+
 ```bash
 # 1. On the VPS, clone or scp this project
 cd /opt/<project>/.urateam
@@ -99,37 +105,61 @@ cd /opt/<project>/.urateam
 # 2. Copy and fill in env
 cp .env.example .env
 # At minimum set: DOMAIN, CADDY_EMAIL, POSTGRES_PASSWORD (openssl rand -base64 32),
-# ANTHROPIC_API_KEY, URATEAM_LICENSE_KEY (for Pro), LINEAR_*, REPO_*,
-# DASHBOARD_PASSWORD.
+# URATEAM_LICENSE_KEY (for Pro), LINEAR_*, REPO_*, DASHBOARD_PASSWORD.
+# If you'll use ANTHROPIC_API_KEY (headless API auth), set it now and skip step 3.
 
-# 3. Bring up the stack
+# 3. (Subscription Anthropic auth only) Run `claude login` once against the
+#    host's ~/.claude/. Uses the agent image as a one-off container so you
+#    don't need claude-code installed on the host.
+mkdir -p ~/.claude
+docker compose run --rm -it --entrypoint "" \
+  -v ~/.claude:/root/.claude \
+  agent claude login
+# Device flow — paste URL into laptop browser, enter code. The login writes
+# ~/.claude/.credentials.json on the host, which docker-compose.yml then
+# bind-mounts into the agent container.
+
+# 4. Build + bring up the stack
 docker compose up -d --build
 
-# 4. Authenticate Claude Code CLI inside the container (skip if you set
-#    ANTHROPIC_API_KEY in .env). Login is persisted in a docker volume,
-#    so this only has to run once per deployment.
-docker compose exec agent claude login
-
-# 5. Authenticate gh CLI inside the container (required for PR creation
-#    unless you wired GITHUB_APP_ID / GITHUB_PRIVATE_KEY_PATH /
-#    GITHUB_INSTALLATION_ID in .env). Also persisted across rebuilds.
+# 5. Authenticate gh CLI inside the running container. Required for git
+#    clone of private repos and PR creation. Persisted in the gh-config
+#    volume — combined with the system-wide credential helper baked into
+#    the Dockerfile, git operations Just Work after this one-time login.
 docker compose exec agent gh auth login
+# Pick: GitHub.com → HTTPS → "Authenticate Git? Yes" → web browser device flow
 
-# 4. Tail logs to verify license, webhooks, dashboard
+# 6. Tail logs to verify license, webhooks, dashboard
 docker compose logs -f agent
 ```
 
 After the first run, Caddy will request and store a Let's Encrypt cert for
 `$DOMAIN`. The dashboard is reachable at `https://$DOMAIN`, webhooks at
-`https://$DOMAIN/webhooks/linear`.
+`https://$DOMAIN/webhooks/linear` (NOT under `DASHBOARD_BASE_PATH` — webhook
+routes are server-level, not dashboard-level, even if the dashboard is
+mounted under a path prefix like `/ateam`).
 
 ### Wiring Linear
 
 In Linear → Workspace settings → API → Webhooks → Create:
 
-- URL: `https://$DOMAIN/webhooks/linear`
+- URL: `https://$DOMAIN/webhooks/linear`  ⚠ NOT `https://$DOMAIN/$DASHBOARD_BASE_PATH/webhooks/linear` — webhook routes are server-level, not dashboard-level. Even if your dashboard is mounted under `/ateam`, the webhook stays at root.
 - Secret: paste `LINEAR_WEBHOOK_SECRET` from `.env`
 - Subscribe to: Issue state changes (and any others your pipelines key off of).
+
+### Postgres password gotcha
+
+Postgres only honors `POSTGRES_PASSWORD` on **first init** when its data
+directory is empty. If you change the password in `.env` after the first
+`docker compose up`, the agent will fail with `password authentication
+failed for user "urateam"` because the password baked into the existing
+`pgdata` volume is the original one.
+
+To recover (destructive — wipes pipeline run history):
+```bash
+docker compose down -v   # -v drops pgdata + agent-runs + agent-repos
+docker compose up -d
+```
 
 ### Re-deploy
 
