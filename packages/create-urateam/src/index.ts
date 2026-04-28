@@ -167,12 +167,15 @@ const URATEAM_GITIGNORE = `# urateam sidecar
 
 // CLI entrypoint — only runs when executed directly (not when imported for testing)
 async function main() {
-  const arg = process.argv[2];
-  if (!arg) {
-    console.error("Usage: create-urateam <project-name-or-dot>");
-    console.error("  create-urateam my-project   # creates new directory");
-    console.error("  create-urateam .            # adds .urateam/ to current directory");
-    process.exit(1);
+  // Default: scaffold .urateam/ into the current directory (sidecar mode).
+  // Pass a directory name to scaffold into a fresh subdirectory instead.
+  const arg = process.argv[2] ?? ".";
+  if (arg === "--help" || arg === "-h") {
+    console.log("Usage: create-urateam [project-name]");
+    console.log("  create-urateam              # adds .urateam/ to current directory (default)");
+    console.log("  create-urateam .            # same as above");
+    console.log("  create-urateam my-project   # creates new directory and adds .urateam/ inside");
+    process.exit(0);
   }
 
   const prompts = (await import("prompts")).default;
