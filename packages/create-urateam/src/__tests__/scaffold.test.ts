@@ -35,6 +35,7 @@ describe("scaffold — sidecar pattern", () => {
       expect(existsSync(join(projectDir, ".urateam", ".env.example"))).toBe(true);
       expect(existsSync(join(projectDir, ".urateam", "docker-compose.yml"))).toBe(true);
       expect(existsSync(join(projectDir, ".urateam", "Dockerfile"))).toBe(true);
+      expect(existsSync(join(projectDir, ".urateam", "Caddyfile"))).toBe(true);
       expect(existsSync(join(projectDir, ".urateam", "README.md"))).toBe(true);
     });
 

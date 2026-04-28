@@ -7,10 +7,18 @@ to implement features, fix bugs, and create PRs automatically.
 
 ## Setup
 
-1. Fill in `.env` with your Linear API key, webhook secret, team ID, and repo URL
+Two paths: pick one.
+
+### Local dev (your laptop)
+
+1. Copy `.env.example` to `.env` and fill in. NEVER commit `.env`.
 2. Install dependencies: `pnpm install`
-3. **Authenticate Claude** (OSS path only — see [Claude auth lifecycle](#claude-auth-lifecycle-oss-tier) below): `claude login`
-4. Start the agent: `pnpm dev` (SQLite, local dev) or `pnpm start` (production)
+3. **Authenticate Claude** (OSS path only — see [Claude auth lifecycle](#claude-auth-lifecycle-oss-tier) below): `claude login`. Skip if you set `ANTHROPIC_API_KEY`.
+4. Start the agent: `pnpm dev`
+
+### Production VPS
+
+Skip the `pnpm install` / `pnpm dev` steps and jump straight to [Production deploy](#production-deploy-via-docker-compose) — Docker Compose handles everything.
 
 ## Claude auth lifecycle (OSS tier)
 
@@ -44,22 +52,92 @@ Use that variant when re-authing inside a running container.
 have session-lifetime semantics, so this whole concern goes away. See the
 [urateam docs](https://github.com/JonB32/urateam) for upgrade paths.
 
-## Expose the webhook
+## Expose the webhook (local dev only)
 
-The agent listens on `http://localhost:3000/webhooks/linear`. To receive
-webhooks from Linear, expose this port via ngrok or a reverse proxy:
+The agent listens on `http://localhost:3000/webhooks/linear`. For local
+development, expose via ngrok:
 
 ```bash
 ngrok http 3000
 ```
 
 Configure the ngrok URL as a webhook in Linear settings with the
-`LINEAR_WEBHOOK_SECRET` from your `.env`.
+`LINEAR_WEBHOOK_SECRET` from your `.env`. For production, see
+[Production deploy](#production-deploy-via-docker-compose) — Caddy
+handles HTTPS termination directly and you wire Linear to your real domain.
 
 ## Dashboard
 
 The ops dashboard runs on `http://localhost:3001`. Credentials from
 `DASHBOARD_USER` / `DASHBOARD_PASSWORD` in `.env`.
+
+## Production deploy via docker compose
+
+Compose template ships a hardened three-service stack:
+
+- **caddy** — reverse proxy on :80/:443 with automatic Let's Encrypt certs.
+  Routes `/webhooks/*` and `/slack/*` to the agent (:3000), everything else
+  to the dashboard (:3001).
+- **agent** — `ura start`. No public ports; reachable only via Caddy.
+- **postgres** — internal-only network, no published ports. Password from
+  `POSTGRES_PASSWORD` (compose refuses to start without it).
+
+### Pre-flight
+
+1. **Provision a VPS** (Hetzner, DigitalOcean, Linode, Fly, etc.). 4 GB RAM
+   minimum for `MAX_CONCURRENT_RUNS=3`.
+2. **Point a domain** (e.g. `urateam.your-domain.com`) at the VPS IP. Caddy needs
+   ports 80 + 443 open for ACME challenges.
+3. **Install Docker** and the Compose plugin on the box.
+
+### Deploy
+
+```bash
+# 1. On the VPS, clone or scp this project
+cd /opt/<project>/.urateam
+
+# 2. Copy and fill in env
+cp .env.example .env
+# At minimum set: DOMAIN, CADDY_EMAIL, POSTGRES_PASSWORD (openssl rand -base64 32),
+# ANTHROPIC_API_KEY, URATEAM_LICENSE_KEY (for Pro), LINEAR_*, REPO_*,
+# DASHBOARD_PASSWORD.
+
+# 3. Bring up the stack
+docker compose up -d --build
+
+# 4. Authenticate gh CLI inside the container (required for PR creation
+#    unless you wired GITHUB_APP_ID / GITHUB_PRIVATE_KEY_PATH /
+#    GITHUB_INSTALLATION_ID in .env).
+docker compose exec agent gh auth login
+
+# 4. Tail logs to verify license, webhooks, dashboard
+docker compose logs -f agent
+```
+
+After the first run, Caddy will request and store a Let's Encrypt cert for
+`$DOMAIN`. The dashboard is reachable at `https://$DOMAIN`, webhooks at
+`https://$DOMAIN/webhooks/linear`.
+
+### Wiring Linear
+
+In Linear → Workspace settings → API → Webhooks → Create:
+
+- URL: `https://$DOMAIN/webhooks/linear`
+- Secret: paste `LINEAR_WEBHOOK_SECRET` from `.env`
+- Subscribe to: Issue state changes (and any others your pipelines key off of).
+
+### Re-deploy
+
+```bash
+git pull && docker compose up -d --build
+```
+
+### Backups
+
+`pgdata` and `agent-runs` are named docker volumes. For backups, snapshot the
+host volume directory or use `docker run --rm -v pgdata:/data … pg_dump` style
+sidecars. Workspace dirs (`/var/agent-runs`, `/var/agent-repos`) auto-clean
+older than `WORKTREE_TTL_HOURS` (default 24h).
 
 ## How it works
 

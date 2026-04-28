@@ -1,0 +1,36 @@
+# urateam reverse proxy + auto-HTTPS via Let's Encrypt.
+#
+# Caddy routes:
+#   - /webhooks/*  → agent:3000 (Linear, GitHub webhook receivers)
+#   - /slack/*     → agent:3000 (Slack events + slash commands, optional PM agent)
+#   - /health      → agent:3000 (liveness probe)
+#   - everything else → agent:3001 (the ops dashboard)
+#
+# DOMAIN is read from .env; required for cert issuance.
+# Ports 80 and 443 must be reachable from the public internet for ACME.
+
+{
+    email {$CADDY_EMAIL}
+}
+
+{$DOMAIN} {
+    encode zstd gzip
+
+    handle /webhooks/* {
+        reverse_proxy agent:3000
+    }
+    handle /slack/* {
+        reverse_proxy agent:3000
+    }
+    handle /health {
+        reverse_proxy agent:3000
+    }
+    handle {
+        reverse_proxy agent:3001
+    }
+
+    log {
+        output stdout
+        format console
+    }
+}
