@@ -255,7 +255,13 @@ describe("createDashboard — basePath navigation links", () => {
     expect(res.status).toBe(404);
   });
 
-  it("static files served at <basePath>/static/* when basePath is set", async () => {
+  it("static style.css actually serves at <basePath>/static/style.css", async () => {
+    // Strict version — actually fetch the real CSS file (committed to the
+    // repo at packages/dashboard/src/static/style.css; in dev tests the
+    // module dir resolves to src/, where the file lives next to dist/).
+    // Pre-fix: serveStatic joined c.req.path directly with root, so the
+    // lookup fell out as `<root>/ateam/static/style.css` (404). This test
+    // would fail without rewriteRequestPath.
     const app = createDashboard({
       db: mockDb,
       pipelineConfigs: {},
@@ -263,22 +269,33 @@ describe("createDashboard — basePath navigation links", () => {
       auth: AUTH,
       basePath: "/ateam",
     });
-    const res = await app.request("/ateam/static/nonexistent.css", {
+    const res = await app.request("/ateam/static/style.css", {
       headers: authHeader,
     });
-    // Static middleware should respond with 200 (file found) or 404 (file
-    // missing) — both prove the route MATCHED. The miss case must NOT be a
-    // dashboard layout 404 (which would mean the static middleware didn't
-    // match at all). Assert the response isn't HTML to distinguish.
-    expect([200, 404]).toContain(res.status);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body.length).toBeGreaterThan(100); // sanity — it's the real CSS, not an empty file
     const contentType = res.headers.get("content-type") ?? "";
-    expect(contentType).not.toMatch(/text\/html/);
+    expect(contentType).toMatch(/text\/css/);
 
-    // Bare /static/ path must NOT match when basePath is set.
-    const resBare = await app.request("/static/nonexistent.css", {
+    // Bare /static/style.css must NOT match when basePath is set.
+    const resBare = await app.request("/static/style.css", {
       headers: authHeader,
     });
     expect(resBare.status).toBe(404);
+  });
+
+  it("static style.css serves at /static/style.css when basePath is empty (root mount)", async () => {
+    const app = createDashboard({
+      db: mockDb,
+      pipelineConfigs: {},
+      repoConfigs: {},
+      auth: AUTH,
+    });
+    const res = await app.request("/static/style.css", { headers: authHeader });
+    expect(res.status).toBe(200);
+    const contentType = res.headers.get("content-type") ?? "";
+    expect(contentType).toMatch(/text\/css/);
   });
 
   it("nav links have no double slashes when basePath is '/'", async () => {
