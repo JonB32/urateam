@@ -7,6 +7,7 @@ services:
       - "443:443"
     environment:
       DOMAIN: ${DOMAIN}
+      CADDY_EMAIL: ${CADDY_EMAIL}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
@@ -33,9 +34,17 @@ services:
     volumes:
       - agent-runs:/var/agent-runs
       - agent-repos:/var/agent-repos
-      # Persist the `claude` and `gh` CLI login state across rebuilds so
-      # operators don't have to re-auth every `docker compose up --build`.
-      - claude-config:/root/.config/claude
+      # Claude OAuth credentials — bind-mounted rw so the SDK can auto-refresh
+      # tokens. Run `claude login` against the host's ~/.claude/ before first
+      # `docker compose up` (see README "Production deploy"). Bind-mounting a
+      # single file is more reliable than a named volume for `~/.claude/`
+      # because Claude Code splits state between `~/.claude/` (a dir) and
+      # `~/.claude.json` (a file at home root) — only the credentials file is
+      # what needs cross-restart persistence.
+      - ${HOME}/.claude/.credentials.json:/root/.claude/.credentials.json:rw
+      # gh CLI persists its OAuth token here. Combined with the system-wide
+      # git credential helper baked into the Dockerfile, git operations Just
+      # Work without per-restart re-auth.
       - gh-config:/root/.config/gh
     networks:
       - frontend
@@ -63,5 +72,4 @@ volumes:
   agent-repos:
   caddy-data:
   caddy-config:
-  claude-config:
   gh-config:

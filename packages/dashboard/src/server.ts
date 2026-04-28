@@ -119,6 +119,15 @@ export function createDashboard(config: DashboardConfig): Hono {
   });
 
   // CSRF / Origin validation for state-changing requests
+  // Resolve the (possibly prefixed) auth paths once so we can match them
+  // exactly. Same value as `mountPrefix` below — duplicated here because
+  // this middleware is registered BEFORE the mountPrefix declaration in the
+  // call graph. Cheap to re-derive.
+  const csrfExemptBase = (basePath ?? "").replace(/\/+$/, "");
+  const csrfExemptPaths = new Set([
+    `${csrfExemptBase}/auth/login`,
+    `${csrfExemptBase}/auth/callback`,
+  ]);
   app.use("*", async (c, next) => {
     const method = c.req.method;
     // /auth/login and /auth/callback are GET-based OAuth handoffs with no
@@ -127,8 +136,7 @@ export function createDashboard(config: DashboardConfig): Hono {
     // embed a <form action="/auth/logout"> on a third-party site and force
     // a logout.
     const path = c.req.path;
-    const csrfExempt =
-      path === "/auth/login" || path === "/auth/callback";
+    const csrfExempt = csrfExemptPaths.has(path);
     if (
       ["POST", "PUT", "DELETE", "PATCH"].includes(method) &&
       !csrfExempt
@@ -164,6 +172,19 @@ export function createDashboard(config: DashboardConfig): Hono {
     );
   }
 
+  // Mount-prefix used for ALL sub-routers and the static-file middleware.
+  // Hono's `app.route(prefix, subApp)` mounts the sub-app such that its
+  // internal routes are accessible under <prefix>/<route>. With `/ateam` set,
+  // the runs router's `/` becomes `/ateam`, `/runs/:id` becomes
+  // `/ateam/runs/:id`, etc. Empty basePath → mount at root.
+  // Without this, DASHBOARD_BASE_PATH only affected layout link generation
+  // but routes still mounted at `/` — operators reverse-proxying `/ateam`
+  // to the dashboard hit 404 on every request. urateam#130 reproduction:
+  //   Caddy: handle { reverse_proxy agent:3001 }
+  //   Operator visits https://host/ateam → Caddy forwards as `GET /ateam`
+  //   Dashboard pre-fix: no route at /ateam → 404
+  const mountPrefix = basePath || "/";
+
   if (ssoActive) {
     if (!config.workos) {
       throw new Error(
@@ -176,11 +197,12 @@ export function createDashboard(config: DashboardConfig): Hono {
       db: config.db,
       sso: config.sso!,
       workos: config.workos,
+      basePath,
     });
-    app.route("/", authRouter);
+    app.route(mountPrefix, authRouter);
     app.use(
       "*",
-      createSsoMiddleware({ db: config.db, sso: config.sso! }),
+      createSsoMiddleware({ db: config.db, sso: config.sso!, basePath }),
     );
   } else if (config.auth?.username && config.auth?.password) {
     app.use(
@@ -210,30 +232,36 @@ export function createDashboard(config: DashboardConfig): Hono {
   // join lands at dist/static/ — where the build script copies src/static/
   // before publishing.
   const dashboardModuleDir = dirname(fileURLToPath(import.meta.url));
-  app.use("/static/*", serveStatic({ root: join(dashboardModuleDir, "static") }));
+  // Static middleware needs to see the prefixed path too — operator visiting
+  // /ateam/static/foo.css needs to hit serveStatic. Hono's `app.use` doesn't
+  // share prefix with `app.route`, so we plumb basePath in explicitly here.
+  const staticPath = basePath ? `${basePath}/static/*` : "/static/*";
+  app.use(staticPath, serveStatic({ root: join(dashboardModuleDir, "static") }));
 
-  // Mount routes — pass basePath so every layout() call uses the correct prefix.
+  // Mount each sub-router at the basePath prefix. basePath also continues to
+  // get passed INTO each router so layout() emits correct hrefs — the two
+  // concerns (mount vs. link generation) are separate but share the value.
   const runsRouter = createRunsRouter(config.db, basePath);
-  app.route("/", runsRouter);
+  app.route(mountPrefix, runsRouter);
 
   const tokensRouter = createTokensRouter(config.db, basePath);
-  app.route("/", tokensRouter);
+  app.route(mountPrefix, tokensRouter);
 
   const errorsRouter = createErrorsRouter(config.db, basePath);
-  app.route("/", errorsRouter);
+  app.route(mountPrefix, errorsRouter);
 
   const configRouter = createConfigRouter(
     config.pipelineConfigs,
     config.repoConfigs,
     basePath,
   );
-  app.route("/", configRouter);
+  app.route(mountPrefix, configRouter);
 
   const coordinationRouter = createCoordinationRouter(config.db, basePath);
-  app.route("/", coordinationRouter);
+  app.route(mountPrefix, coordinationRouter);
 
   const auditRouter = createAuditRouter(config.db, basePath);
-  app.route("/", auditRouter);
+  app.route(mountPrefix, auditRouter);
 
   const costRouter = createCostRouter({
     db: config.db,
@@ -241,10 +269,10 @@ export function createDashboard(config: DashboardConfig): Hono {
     pipelineConfigs: config.pipelineConfigs,
     basePath,
   });
-  app.route("/", costRouter);
+  app.route(mountPrefix, costRouter);
 
   const usersRouter = createUsersRouter({ db: config.db, basePath });
-  app.route("/", usersRouter);
+  app.route(mountPrefix, usersRouter);
 
   return app;
 }

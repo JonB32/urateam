@@ -50,6 +50,15 @@ Omit to allow any email your IdP authenticates.
 - Back in the WorkOS dashboard, add `https://urateam.acme.com/auth/callback`
   as an allowed redirect URI for the connection.
 
+> **When using DASHBOARD_BASE_PATH**
+>
+> If you serve the dashboard under a path prefix (e.g. `DASHBOARD_BASE_PATH=/ateam`),
+> the SSO routes mount under that prefix too. Both `redirectUri` in your config
+> AND the WorkOS-side allowed redirect URI must include the prefix:
+> `https://urateam.acme.com/ateam/auth/callback`.
+> Without this, post-login redirects 404 and you'll see a "page not found"
+> instead of landing on the dashboard.
+
 ### 6. Restart urateam
 - The dashboard should now redirect anonymous visitors to `/auth/login`,
   which forwards them through WorkOS to your IdP.

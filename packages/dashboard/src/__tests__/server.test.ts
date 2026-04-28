@@ -147,7 +147,11 @@ describe("createDashboard — basePath navigation links", () => {
       basePath: "/ateam",
     });
 
-    const res = await app.request("/", { headers: authHeader });
+    // urateam#130: when basePath is set, routes mount at <basePath>/...,
+    // so the request path must include the prefix. Pre-fix dashboards
+    // returned 404 here because every router was mounted at `/` regardless
+    // of basePath.
+    const res = await app.request("/ateam", { headers: authHeader });
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain('href="/ateam/tokens"');
@@ -165,7 +169,7 @@ describe("createDashboard — basePath navigation links", () => {
       basePath: "/ateam",
     });
 
-    const res = await app.request("/tokens", { headers: authHeader });
+    const res = await app.request("/ateam/tokens", { headers: authHeader });
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain('href="/ateam/tokens"');
@@ -181,11 +185,100 @@ describe("createDashboard — basePath navigation links", () => {
       basePath: "/ateam",
     });
 
-    const res = await app.request("/errors", { headers: authHeader });
+    const res = await app.request("/ateam/errors", { headers: authHeader });
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain('href="/ateam/tokens"');
     expect(html).toContain('href="/ateam/errors"');
+  });
+
+  it("SSO middleware redirects to <basePath>/auth/login when no cookie + basePath set", async () => {
+    // Regression test for the bug surfaced in PR #130 review: SSO middleware
+    // hard-coded `/auth/login` as the redirect target, which 404s when the
+    // dashboard mounts under a basePath.
+    const { createSsoMiddleware } = await import("../middleware/sso.js");
+    const { Hono } = await import("hono");
+    const app = new Hono();
+    const fakeSso = {
+      enabled: true,
+      cookieName: "session",
+      cookieSecure: true,
+      stateSigningSecret: "x",
+      workosApiKey: "x",
+      workosClientId: "x",
+      redirectUri: "x",
+      sessionDurationHours: 8,
+    };
+    app.use("*", createSsoMiddleware({ db: createMockDb(), sso: fakeSso, basePath: "/ateam" }));
+    app.get("/ateam/runs", (c) => c.text("ok"));
+
+    const res = await app.request("/ateam/runs");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toContain("/ateam/auth/login");
+    expect(res.headers.get("location")).not.toMatch(/^\/auth\/login/);
+  });
+
+  it("SSO middleware exempts <basePath>/auth/* from auth check", async () => {
+    const { createSsoMiddleware } = await import("../middleware/sso.js");
+    const { Hono } = await import("hono");
+    const app = new Hono();
+    const fakeSso = {
+      enabled: true,
+      cookieName: "session",
+      cookieSecure: true,
+      stateSigningSecret: "x",
+      workosApiKey: "x",
+      workosClientId: "x",
+      redirectUri: "x",
+      sessionDurationHours: 8,
+    };
+    app.use("*", createSsoMiddleware({ db: createMockDb(), sso: fakeSso, basePath: "/ateam" }));
+    app.get("/ateam/auth/login", (c) => c.text("login-page"));
+
+    const res = await app.request("/ateam/auth/login");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("login-page");
+  });
+
+  it("returns 404 at root when basePath is set (routes only at the prefix)", async () => {
+    // The flip side of mounting at basePath: bare `/` no longer matches
+    // any route. Ensures operators don't accidentally point Caddy at the
+    // wrong path and get a misleading 200.
+    const app = createDashboard({
+      db: mockDb,
+      pipelineConfigs: {},
+      repoConfigs: {},
+      auth: AUTH,
+      basePath: "/ateam",
+    });
+    const res = await app.request("/", { headers: authHeader });
+    expect(res.status).toBe(404);
+  });
+
+  it("static files served at <basePath>/static/* when basePath is set", async () => {
+    const app = createDashboard({
+      db: mockDb,
+      pipelineConfigs: {},
+      repoConfigs: {},
+      auth: AUTH,
+      basePath: "/ateam",
+    });
+    const res = await app.request("/ateam/static/nonexistent.css", {
+      headers: authHeader,
+    });
+    // Static middleware should respond with 200 (file found) or 404 (file
+    // missing) — both prove the route MATCHED. The miss case must NOT be a
+    // dashboard layout 404 (which would mean the static middleware didn't
+    // match at all). Assert the response isn't HTML to distinguish.
+    expect([200, 404]).toContain(res.status);
+    const contentType = res.headers.get("content-type") ?? "";
+    expect(contentType).not.toMatch(/text\/html/);
+
+    // Bare /static/ path must NOT match when basePath is set.
+    const resBare = await app.request("/static/nonexistent.css", {
+      headers: authHeader,
+    });
+    expect(resBare.status).toBe(404);
   });
 
   it("nav links have no double slashes when basePath is '/'", async () => {
@@ -232,7 +325,9 @@ describe("createDashboard — basePath navigation links", () => {
       basePath: "/ateam/",
     });
 
-    const res = await app.request("/", { headers: authHeader });
+    // The trailing slash is stripped before mount-prefix resolution, so the
+    // routes are at /ateam/* and the request must address them there.
+    const res = await app.request("/ateam", { headers: authHeader });
     expect(res.status).toBe(200);
     const html = await res.text();
     // Should be /ateam/tokens, not /ateam//tokens
@@ -265,7 +360,7 @@ describe("createDashboard — basePath navigation links", () => {
         // no basePath in config — should fall back to env var
       });
 
-      const res = await app.request("/", { headers: authHeader });
+      const res = await app.request("/ateam", { headers: authHeader });
       expect(res.status).toBe(200);
       const html = await res.text();
       expect(html).toContain('href="/ateam/tokens"');
@@ -282,7 +377,7 @@ describe("createDashboard — basePath navigation links", () => {
         basePath: "/ateam",
       });
 
-      const res = await app.request("/", { headers: authHeader });
+      const res = await app.request("/ateam", { headers: authHeader });
       expect(res.status).toBe(200);
       const html = await res.text();
       expect(html).toContain('href="/ateam/tokens"');

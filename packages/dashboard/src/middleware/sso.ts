@@ -11,6 +11,12 @@ import type { SsoConfig } from "@urateam/core";
 interface SsoMiddlewareDeps {
   db: any;
   sso: SsoConfig;
+  /**
+   * Path prefix the dashboard is mounted under (e.g. `/ateam`). Must match
+   * the value passed to createDashboard so the redirect target lands on the
+   * actually-mounted auth router. Empty string = mounted at root.
+   */
+  basePath?: string;
 }
 
 // CSRF note: the session cookie uses SameSite=Lax. This prevents
@@ -20,15 +26,21 @@ interface SsoMiddlewareDeps {
 export function createSsoMiddleware(
   deps: SsoMiddlewareDeps,
 ): MiddlewareHandler {
+  // Normalize: strip trailing slashes so we don't get /ateam//auth/login.
+  const basePath = (deps.basePath ?? "").replace(/\/+$/, "");
+  const authPrefix = `${basePath}/auth/`;
+  const webhookPrefix = `${basePath}/webhooks/`;
+  const loginPath = `${basePath}/auth/login`;
+
   return async (c, next) => {
     const path = c.req.path;
-    if (path.startsWith("/auth/")) return next();
-    if (path.startsWith("/webhooks/")) return next();
+    if (path.startsWith(authPrefix)) return next();
+    if (path.startsWith(webhookPrefix)) return next();
 
     const cookie = getCookie(c, deps.sso.cookieName);
     if (!cookie) {
       return c.redirect(
-        `/auth/login?next=${encodeURIComponent(path)}`,
+        `${loginPath}?next=${encodeURIComponent(path)}`,
         302,
       );
     }
@@ -43,7 +55,7 @@ export function createSsoMiddleware(
         secure: deps.sso.cookieSecure,
       });
       return c.redirect(
-        `/auth/login?next=${encodeURIComponent(path)}`,
+        `${loginPath}?next=${encodeURIComponent(path)}`,
         302,
       );
     }
@@ -58,7 +70,7 @@ export function createSsoMiddleware(
         sameSite: "Lax",
         secure: deps.sso.cookieSecure,
       });
-      return c.redirect(`/auth/login`, 302);
+      return c.redirect(loginPath, 302);
     }
 
     c.set("user", user);

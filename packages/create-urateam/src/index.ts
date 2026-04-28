@@ -1075,9 +1075,16 @@ async function main() {
     console.log("  After the stack is up:");
     console.log(`    1. Add a webhook in Linear → Settings → API → Webhooks`);
     console.log(`         URL: https://${stage3.domain || "<your-domain>"}/webhooks/linear`);
+    if (stage3.dashboardBasePath) {
+      console.log(`         ⚠ NOT https://${stage3.domain || "<your-domain>"}${stage3.dashboardBasePath}/webhooks/linear`);
+      console.log(`         (webhook routes are server-level, not under DASHBOARD_BASE_PATH)`);
+    }
     console.log(`         Subscribe to: Issue state changes`);
     console.log(`         Copy the secret → paste into .env as LINEAR_WEBHOOK_SECRET → restart the stack`);
-    console.log(`    2. Open the dashboard at https://${stage3.domain || "<your-domain>"} (admin / your-generated-password)`);
+    const dashboardUrl = stage3.dashboardBasePath
+      ? `https://${stage3.domain || "<your-domain>"}${stage3.dashboardBasePath}`
+      : `https://${stage3.domain || "<your-domain>"}`;
+    console.log(`    2. Open the dashboard at ${dashboardUrl} (admin / your-generated-password)`);
     console.log(`    3. Move a Linear issue to Todo with a pipeline label to trigger your first run`);
   } else {
     console.log("    pnpm install");
