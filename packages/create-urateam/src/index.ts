@@ -176,6 +176,10 @@ function buildEnv(
   push("# === Repository (REQUIRED) ===");
   push(`REPO_URL=${options.repoUrl}`);
   push(`REPO_DEFAULT_BRANCH=${options.defaultBranch}`);
+  // REPO_TEAM_ID is the map key for repoConfigs[teamId] — defaulted to
+  // LINEAR_TEAM_ID for single-team / single-repo setups (the env-var path).
+  // Multi-repo Pro deployments use repos.config.ts instead and can ignore
+  // this var. See packages/cli/src/commands/start.ts:50.
   push(`REPO_TEAM_ID=${options.linearTeamId}`);
   blank();
 
