@@ -163,7 +163,13 @@ function buildEnv(
 
   push("# === Linear (REQUIRED) ===");
   push(`LINEAR_API_KEY=${options.linearApiKey}`);
-  push(`LINEAR_WEBHOOK_SECRET=${options.linearWebhookSecret}`);
+  // Comment out when blank so the runtime's "is required" check fails fast
+  // with the right message instead of silently treating "" as a valid secret.
+  if (options.linearWebhookSecret) {
+    push(`LINEAR_WEBHOOK_SECRET=${options.linearWebhookSecret}`);
+  } else {
+    push("# LINEAR_WEBHOOK_SECRET=  # paste from Linear's webhook config UI");
+  }
   push(`LINEAR_TEAM_ID=${options.linearTeamId}`);
   blank();
 
@@ -241,6 +247,10 @@ function buildEnv(
   push("# SLACK_WEBHOOK_URL=  # incoming webhook for pipeline notifications (no Pro license needed)");
   push("# DISCORD_WEBHOOK_URL=");
   push("# LOG_LEVEL=info");
+  push("");
+  push("# Additional tunables (worktree TTL, agent profiles, repo clone dir, etc.)");
+  push("# documented in .env.example next to this file. Keep that file as the");
+  push("# canonical reference; this .env is generated from prompts.");
   return lines.join("\n") + "\n";
 }
 
@@ -258,12 +268,14 @@ function resolveSecrets(options: ScaffoldOptions): {
   let githubWebhookSecret = options.githubWebhookSecret ?? "";
 
   if (autoGen) {
+    // base64url avoids `+`, `/`, `=` which can trip strict env-file parsers
+    // and a few HMAC validators in the wild.
     if (!dashboardPassword) {
-      dashboardPassword = randomBytes(18).toString("base64");
+      dashboardPassword = randomBytes(18).toString("base64url");
       generated.dashboardPassword = dashboardPassword;
     }
     if (!postgresPassword) {
-      postgresPassword = randomBytes(24).toString("base64");
+      postgresPassword = randomBytes(24).toString("base64url");
       generated.postgresPassword = postgresPassword;
     }
     if (!githubWebhookSecret) {
@@ -529,8 +541,15 @@ async function main() {
 
   if (license) {
     console.log(
-      `\n  License decoded: tier=${license.tier}, features=[${license.features.join(", ")}]\n`,
+      `\n  License decoded: tier=${license.tier}, features=[${license.features.join(", ")}]`,
     );
+    if (license.expiresAt && license.expiresAt.getTime() < Date.now()) {
+      console.warn(
+        `  ⚠ License expired at ${license.expiresAt.toISOString()} — runtime will reject ` +
+          "it and fall back to OSS tier. Renew before deploying.",
+      );
+    }
+    console.log("");
   }
 
   let pmAgent: PmAgentOptions | undefined;
@@ -571,6 +590,13 @@ async function main() {
           teamIds: pmPrompts.teamIds || stage1.linearTeamId,
           dailyTokenBudget: pmPrompts.dailyTokenBudget ?? 5_000_000,
         };
+      } else if (pmPrompts.slackBotToken || pmPrompts.slackSigningSecret || pmPrompts.slackChannelId) {
+        // Partial input — warn loudly so the operator doesn't think they configured PM.
+        console.warn(
+          "\n  ⚠ PM agent setup incomplete — at least one of SLACK_BOT_TOKEN, " +
+            "SLACK_SIGNING_SECRET, PM_AGENT_SLACK_CHANNEL_ID was blank. The PM_AGENT_* " +
+            "block in .env has been left commented out; fill it in by hand to enable.\n",
+        );
       }
     }
   }
@@ -644,6 +670,9 @@ async function main() {
   console.log("  Next:");
   if (arg !== ".") console.log(`    cd ${arg}`);
   console.log("    cd .urateam");
+  if (result.todos.length > 0) {
+    console.log("    # edit .env to fill in the TODOs above before continuing");
+  }
   if (stage2.deployMode === "production") {
     console.log("    docker compose up -d --build");
     if (stage4.anthropicAuth === "cli") {

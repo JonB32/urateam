@@ -118,8 +118,8 @@ describe("scaffold — sidecar pattern", () => {
       scaffold(baseOptions(projectDir, "my-project"));
 
       const env = readFileSync(join(projectDir, ".urateam", ".env"), "utf-8");
-      // base64-encoded 18 random bytes = 24 chars (with 0 padding)
-      const match = env.match(/DASHBOARD_PASSWORD=([A-Za-z0-9+/=]+)/);
+      // base64url-encoded 18 random bytes = 24 chars, no padding, no `+` or `/`
+      const match = env.match(/DASHBOARD_PASSWORD=([A-Za-z0-9_-]+)/);
       expect(match).not.toBeNull();
       expect(match![1].length).toBeGreaterThanOrEqual(20);
     });
