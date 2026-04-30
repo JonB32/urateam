@@ -129,7 +129,7 @@ export function createRunsRouter(
 
     const canRetry = isFeatureLicensed("rbac")
       ? canAccess((user?.role ?? "viewer") as Role, "runs.retry")
-      : true;
+      : false;
     const content = runDetailView(run, stages, logs, page, totalLogs, canRetry);
     return c.html(layout(`Run ${id}`, content, effectiveBasePath, { userEmail: user?.email }));
   });

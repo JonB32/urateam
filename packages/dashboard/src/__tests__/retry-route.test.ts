@@ -129,3 +129,25 @@ describe("POST /runs/:id/retry", () => {
     });
   });
 });
+
+describe("GET /runs/:id retry button visibility", () => {
+  it("hides retry control when rbac is unlicensed", async () => {
+    // No license installed (afterEach in this file already calls restoreLicense)
+    const app = appWith("operator");
+    const res = await app.request("/runs/run_1");
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).not.toContain("/runs/run_1/retry");
+    expect(html).not.toContain("<dialog");
+  });
+
+  it("shows retry control when rbac is licensed and role permits", async () => {
+    await installTestProLicense("enterprise");
+    const app = appWith("operator");
+    const res = await app.request("/runs/run_1");
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("/runs/run_1/retry");
+    expect(html).toContain("<dialog");
+  });
+});
