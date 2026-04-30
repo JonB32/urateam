@@ -171,6 +171,7 @@ export function createRunsRouter(
             issueId: run.issueId,
             issueTitle: run.issueTitle,
             repoUrl: run.repoUrl,
+            parentRunId: id,
           });
         }
       } catch (err) {

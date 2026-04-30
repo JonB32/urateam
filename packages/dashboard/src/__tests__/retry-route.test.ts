@@ -95,6 +95,26 @@ describe("POST /runs/:id/retry", () => {
       expect(retry).toBeDefined();
     });
 
+    it("operator retrying a failed run with no resumePayload → runner.start called with parentRunId", async () => {
+      // run_1 has no resumePayload (default fixture in beforeEach)
+      const runner = {
+        resume: vi.fn(),
+        start: vi.fn().mockResolvedValue(undefined),
+      };
+      const app = appWith("operator", runner);
+      const res = await app.request("/runs/run_1/retry", { method: "POST" });
+      expect(res.status).toBe(302);
+      expect(runner.start).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issueId: "BEC-42",
+          issueTitle: "fix bug",
+          repoUrl: "https://github.com/acme/api",
+          parentRunId: "run_1",
+        }),
+      );
+      expect(runner.resume).not.toHaveBeenCalled();
+    });
+
     it("admin → 302, runner.resume called (with resumePayload)", async () => {
       await db
         .update(pipelineRuns)
