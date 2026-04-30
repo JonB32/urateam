@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
 import { preflightClaudeAuth } from "../lib/preflight-claude-auth.js";
+import { repoPluginsFromEnv } from "../lib/repo-plugins-from-env.js";
 
 export const devCommand = new Command("dev")
   .description("Start local development server (webhook + dashboard)")
@@ -39,6 +40,9 @@ export const devCommand = new Command("dev")
             : undefined,
         };
       }
+
+      const pluginCfg = repoPluginsFromEnv();
+      if (pluginCfg) repoEntry.plugins = pluginCfg;
 
       repoConfigs[process.env.REPO_TEAM_ID] = repoEntry;
     }
