@@ -285,6 +285,32 @@ describe("createDashboard — basePath navigation links", () => {
     expect(resBare.status).toBe(404);
   });
 
+  it("static dialog.js actually serves at <basePath>/static/dialog.js", async () => {
+    // Mirrors the style.css test: ensures the dialog-trigger script is
+    // reachable under a non-empty basePath. Without it the retry-confirm
+    // modal silently fails to open in production.
+    const app = createDashboard({
+      db: mockDb,
+      pipelineConfigs: {},
+      repoConfigs: {},
+      auth: AUTH,
+      basePath: "/ateam",
+    });
+    const res = await app.request("/ateam/static/dialog.js", {
+      headers: authHeader,
+    });
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body.length).toBeGreaterThan(0);
+    expect(body).toContain("data-open-dialog");
+
+    // Bare /static/dialog.js must NOT match when basePath is set.
+    const resBare = await app.request("/static/dialog.js", {
+      headers: authHeader,
+    });
+    expect(resBare.status).toBe(404);
+  });
+
   it("HTMX poll URL has no trailing slash when basePath is set (avoids 404 every 5s)", async () => {
     // urateam#131 follow-up: run-feed.ts used to emit hx-get="${basePath}/"
     // which produced "/ateam/" for non-empty basePath — Hono mounts the runs
@@ -343,6 +369,20 @@ describe("createDashboard — basePath navigation links", () => {
     expect(res.status).toBe(200);
     const contentType = res.headers.get("content-type") ?? "";
     expect(contentType).toMatch(/text\/css/);
+  });
+
+  it("static dialog.js serves at /static/dialog.js when basePath is empty (root mount)", async () => {
+    const app = createDashboard({
+      db: mockDb,
+      pipelineConfigs: {},
+      repoConfigs: {},
+      auth: AUTH,
+    });
+    const res = await app.request("/static/dialog.js", { headers: authHeader });
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body.length).toBeGreaterThan(0);
+    expect(body).toContain("data-open-dialog");
   });
 
   it("nav links have no double slashes when basePath is '/'", async () => {
