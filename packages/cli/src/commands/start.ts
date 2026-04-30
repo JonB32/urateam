@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
 import { preflightClaudeAuth } from "../lib/preflight-claude-auth.js";
+import { repoPluginsFromEnv } from "../lib/repo-plugins-from-env.js";
 
 export const startCommand = new Command("start")
   .description("Start production server (webhook + dashboard)")
@@ -68,6 +69,13 @@ export const startCommand = new Command("start")
             : undefined,
         };
       }
+
+      // Plugin / MCP exclusions from env (urateam#134). Operators on the
+      // env-var-driven repoConfig path can opt out of auto-detected plugins
+      // when those plugins' own workflows conflict with urateam's pipeline
+      // (e.g., superpowers triggering rogue branch creation).
+      const pluginCfg = repoPluginsFromEnv();
+      if (pluginCfg) repoEntry.plugins = pluginCfg;
 
       repoConfigs[process.env.REPO_TEAM_ID] = repoEntry;
     }

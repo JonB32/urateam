@@ -66,7 +66,11 @@ describe("consumeAgentStream — stall watchdog (urateam#122)", () => {
       const stalled = err as StageStalledError;
       expect(stalled.lastStats.turns).toBe(1);
       expect(stalled.lastStats.outputTokens).toBe(12);
-      expect(stalled.stalledForMs).toBeGreaterThanOrEqual(200);
+      // Node timers can fire 1–2ms early under CI load; loosen the lower bound
+      // so the assertion still proves the watchdog stalled "around" 200ms
+      // without flaking on Node's setTimeout jitter. (Saw 199ms on GitHub
+      // Actions; PR #135 unrelated CI block.)
+      expect(stalled.stalledForMs).toBeGreaterThanOrEqual(180);
     }
   });
 
