@@ -65,6 +65,9 @@ describe("layout", () => {
     it("should include HTMX script", () => {
       const html = layout("Test", "");
       expect(html).toContain('<script src="https://unpkg.com/htmx.org@2.0.0"></script>');
+      // Companion: the dialog-trigger script must also load (deferred,
+      // same-origin) so retry-confirm modal opens under CSP `script-src 'self'`.
+      expect(html).toContain('/static/dialog.js" defer');
     });
 
     it("should include navigation links with basePath", () => {
@@ -155,18 +158,21 @@ describe("layout", () => {
       delete process.env.DASHBOARD_BASE_PATH;
       const html = layout("Test", "");
       expect(html).toContain('href="/static/style.css"');
+      expect(html).toContain('src="/static/dialog.js"');
     });
 
     it("should use correct path for CSS with basePath /ateam", () => {
       process.env.DASHBOARD_BASE_PATH = "/ateam";
       const html = layout("Test", "");
       expect(html).toContain('href="/ateam/static/style.css"');
+      expect(html).toContain('src="/ateam/static/dialog.js"');
     });
 
     it("should use correct path for CSS with custom basePath", () => {
       process.env.DASHBOARD_BASE_PATH = "/myapp";
       const html = layout("Test", "");
       expect(html).toContain('href="/myapp/static/style.css"');
+      expect(html).toContain('src="/myapp/static/dialog.js"');
     });
   });
 });

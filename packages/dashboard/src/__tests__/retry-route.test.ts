@@ -95,6 +95,26 @@ describe("POST /runs/:id/retry", () => {
       expect(retry).toBeDefined();
     });
 
+    it("operator retrying a failed run with no resumePayload → runner.start called with parentRunId", async () => {
+      // run_1 has no resumePayload (default fixture in beforeEach)
+      const runner = {
+        resume: vi.fn(),
+        start: vi.fn().mockResolvedValue(undefined),
+      };
+      const app = appWith("operator", runner);
+      const res = await app.request("/runs/run_1/retry", { method: "POST" });
+      expect(res.status).toBe(302);
+      expect(runner.start).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issueId: "BEC-42",
+          issueTitle: "fix bug",
+          repoUrl: "https://github.com/acme/api",
+          parentRunId: "run_1",
+        }),
+      );
+      expect(runner.resume).not.toHaveBeenCalled();
+    });
+
     it("admin → 302, runner.resume called (with resumePayload)", async () => {
       await db
         .update(pipelineRuns)
@@ -127,5 +147,27 @@ describe("POST /runs/:id/retry", () => {
       });
       expect(res.status).toBe(404);
     });
+  });
+});
+
+describe("GET /runs/:id retry button visibility", () => {
+  it("hides retry control when rbac is unlicensed", async () => {
+    // No license installed (afterEach in this file already calls restoreLicense)
+    const app = appWith("operator");
+    const res = await app.request("/runs/run_1");
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).not.toContain("/runs/run_1/retry");
+    expect(html).not.toContain("<dialog");
+  });
+
+  it("shows retry control when rbac is licensed and role permits", async () => {
+    await installTestProLicense("enterprise");
+    const app = appWith("operator");
+    const res = await app.request("/runs/run_1");
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("/runs/run_1/retry");
+    expect(html).toContain("<dialog");
   });
 });

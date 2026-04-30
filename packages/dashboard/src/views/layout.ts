@@ -80,6 +80,7 @@ export function layout(
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="${bp}/static/style.css">
   <script src="https://unpkg.com/htmx.org@2.0.0"></script>
+  <script src="${bp}/static/dialog.js" defer></script>
 </head>
 <body>
   <nav>
