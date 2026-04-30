@@ -102,9 +102,29 @@ export function runDetailView(
       ${run.prUrl ? `<a href="${escapeHtml(run.prUrl)}" target="_blank" rel="noopener" style="font-size:0.875rem;">↗ Pull Request</a>` : ""}
       ${
         canRetry && (run.status === "failed" || run.status === "retriable")
-          ? `<form method="post" action="${basePath}/runs/${encodeURIComponent(run.id)}/retry" hx-post="${basePath}/runs/${encodeURIComponent(run.id)}/retry" hx-headers='{"HX-Request":"true"}' style="display:inline;margin:0;">
-          <button type="submit" class="button-primary">Retry</button>
-        </form>`
+          ? (() => {
+              const dialogId = `retry-confirm-${run.id}`;
+              const action = `${basePath}/runs/${encodeURIComponent(run.id)}/retry`;
+              return `<button
+                type="button"
+                class="button-primary"
+                data-open-dialog="${escapeHtml(dialogId)}"
+              >Retry</button>
+              <dialog id="${escapeHtml(dialogId)}" class="retry-confirm-dialog">
+                <h3 style="margin-top:0;">Retry this run?</h3>
+                <p style="margin:0.5rem 0 1rem;color:var(--color-text-muted);">
+                  A new pipeline run will be queued, linked to this run as its parent.
+                </p>
+                <div style="display:flex;gap:0.5rem;justify-content:flex-end;">
+                  <form method="dialog" style="margin:0;">
+                    <button type="submit" class="button-secondary">Cancel</button>
+                  </form>
+                  <form method="post" action="${action}" hx-post="${action}" hx-headers='{"HX-Request":"true"}' style="margin:0;">
+                    <button type="submit" class="button-primary">Confirm retry</button>
+                  </form>
+                </div>
+              </dialog>`;
+            })()
           : ""
       }
     </div>
