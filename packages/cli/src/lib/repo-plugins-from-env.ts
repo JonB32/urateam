@@ -6,20 +6,30 @@ import type { PluginConfig } from "@urateam/core";
  * honor the same opt-out knobs.
  *
  * Recognized env vars:
- *   REPO_EXCLUDE_PLUGINS=<csv>       Plugin names/paths to exclude from
- *                                    auto-detection (e.g. "superpowers"
+ *   REPO_EXCLUDE_PLUGINS=<csv>       Plugin paths to exclude from auto-
+ *                                    detection. Matched against
+ *                                    `PluginRecommendation.path` in
+ *                                    mcp-resolver.ts (e.g. "superpowers"
  *                                    when the plugin's own workflow
  *                                    conflicts with urateam's branch
  *                                    management — see urateam#134).
- *   REPO_EXCLUDE_MCP_SERVERS=<csv>   MCP server names to exclude.
+ *   REPO_EXCLUDE_MCP_SERVERS=<csv>   MCP server names to exclude. Matched
+ *                                    against `McpRecommendation.name`.
  *   REPO_DISABLE_PLUGIN_AUTODETECT=true
  *                                    Disable all auto-detection. Equivalent
- *                                    to setting `autoDetect: false` in a
- *                                    repos.config.ts plugin config.
+ *                                    to `autoDetect: false` in repos.config.ts.
+ *                                    Strict literal "true" only; opt-in
+ *                                    flag (default = autoDetect on), so
+ *                                    follows the codebase's `=== "true"`
+ *                                    convention for opt-in env booleans.
  *
  * Returns `undefined` when none of the above are set, so the resulting
  * RepoConfig stays free of an empty `plugins` field.
  */
+function parseCsv(raw: string): string[] {
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
 export function repoPluginsFromEnv(): PluginConfig | undefined {
   const excludePluginsRaw = process.env.REPO_EXCLUDE_PLUGINS;
   const excludeMcpRaw = process.env.REPO_EXCLUDE_MCP_SERVERS;
@@ -31,17 +41,11 @@ export function repoPluginsFromEnv(): PluginConfig | undefined {
 
   const config: PluginConfig = {};
   if (excludePluginsRaw) {
-    const excludePlugins = excludePluginsRaw
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const excludePlugins = parseCsv(excludePluginsRaw);
     if (excludePlugins.length > 0) config.excludePlugins = excludePlugins;
   }
   if (excludeMcpRaw) {
-    const excludeMcpServers = excludeMcpRaw
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const excludeMcpServers = parseCsv(excludeMcpRaw);
     if (excludeMcpServers.length > 0) config.excludeMcpServers = excludeMcpServers;
   }
   if (autoDetectDisabled) config.autoDetect = false;

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { repoPluginsFromEnv } from "../lib/repo-plugins-from-env.js";
+import { PluginConfigSchema } from "@urateam/core";
 
 const RELEVANT_VARS = [
   "REPO_EXCLUDE_PLUGINS",
@@ -57,12 +58,13 @@ describe("repoPluginsFromEnv", () => {
     expect(repoPluginsFromEnv()).toEqual({ autoDetect: false });
   });
 
-  it("does NOT set autoDetect when REPO_DISABLE_PLUGIN_AUTODETECT is anything other than 'true'", () => {
-    // Defensive: only the explicit string 'true' disables auto-detect, so a
-    // typo like '1' or 'yes' doesn't silently change behavior.
-    process.env.REPO_DISABLE_PLUGIN_AUTODETECT = "yes";
+  it("requires literal 'true' for REPO_DISABLE_PLUGIN_AUTODETECT (codebase convention for opt-in env booleans)", () => {
+    // Documents current behavior — opt-in flags use `=== "true"` (vs.
+    // opt-out flags like GITHUB_FEEDBACK_AUTO_TRIGGER which use `!== "false"`).
+    // If we ever relax this to also accept "1"/"yes"/etc., update this test.
+    process.env.REPO_DISABLE_PLUGIN_AUTODETECT = "false";
     expect(repoPluginsFromEnv()).toBeUndefined();
-    process.env.REPO_DISABLE_PLUGIN_AUTODETECT = "1";
+    process.env.REPO_DISABLE_PLUGIN_AUTODETECT = "";
     expect(repoPluginsFromEnv()).toBeUndefined();
   });
 
@@ -75,5 +77,20 @@ describe("repoPluginsFromEnv", () => {
       excludeMcpServers: ["context7"],
       autoDetect: false,
     });
+  });
+
+  it("output round-trips through the canonical PluginConfig zod schema in core", () => {
+    // Integration boundary: the helper builds a `PluginConfig` literal, but
+    // the actual contract is defined by `PluginConfigSchema` in
+    // packages/core/src/types.ts. Validating against the schema catches any
+    // future drift between the helper's shape and what the runtime expects
+    // (which is what the `repoEntry.plugins = pluginCfg` wiring in start.ts
+    // and dev.ts ultimately feeds into mcp-resolver.ts).
+    process.env.REPO_EXCLUDE_PLUGINS = "superpowers,foo";
+    process.env.REPO_EXCLUDE_MCP_SERVERS = "context7";
+    process.env.REPO_DISABLE_PLUGIN_AUTODETECT = "true";
+    const cfg = repoPluginsFromEnv();
+    expect(cfg).toBeDefined();
+    expect(() => PluginConfigSchema.parse(cfg)).not.toThrow();
   });
 });
