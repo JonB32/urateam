@@ -22,6 +22,8 @@ notes call out when a change affects only a single package.
 - `@urateam/core`: `startTodoIssues` short-circuits when the budget is blocked, so orphaned Todo issues don't bypass the cap.
 - `pipeline_runs` table gains a `linear_team_id` column (nullable for legacy rows), populated from the Linear webhook payload at run creation time and from the parent run for review-feedback runs.
 - New `budget_alerts` table with `UNIQUE(date, scope, threshold)` for persistent alert dedup.
+- `@urateam/dashboard`: retry button on the run-detail view now opens a native `<dialog>` confirmation modal before submitting the POST. CSP-compliant via a small static `dialog.js` (BEC-133).
+- `@urateam/dashboard`: retried runs now link back to their parent via `parentRunId` so the run-feed shows the lineage. Only applies to the `runner.start()` retry branch — `runner.resume()` continues to update the same row in place (BEC-133).
 
 ### Changed
 - `pm/budget.ts`: `checkBudgetGuards` is replaced by `evaluateBudget`, which returns per-scope breakdowns (`ScopeBudget[]`) and a `worstTier` / `promoteBlocked` / `blockReason` verdict. Installs that don't configure `budgets` keep the existing single-global behavior with the addition of threshold alerts on the global scope. The previous silent 80% promotion-block gate is replaced with a 100% hard gate plus explicit 50/80 warnings. `checkBudgetGuards` remains as a thin backward-compat shim.
@@ -30,6 +32,9 @@ notes call out when a change affects only a single package.
 - **Breaking (license)**: tier enum renamed from `free | pro | team | enterprise` to `oss | pro | enterprise`. The `team` tier is removed. Code reading `LicenseStatus.tier` should expect `"oss"` where it previously expected `"free"`.
 - **Breaking (license)**: `URATEAM_LICENSE_KEY` must now be a valid Ed25519-signed JWT issued by urateam. Existing placeholder keys will fail validation; the system falls back to OSS mode and logs a warning at startup.
 - `LicenseStatus` interface gains `features: Set<string>`, `customerId`, `expiresAt`, `seats`, and `invalidReason` fields. The `key` field is removed.
+
+### Fixed
+- `@urateam/dashboard`: retry button is now hidden in unlicensed deployments. The route's 404 enforcement was already correct; the view's `canRetry` flag was inconsistently defaulting to `true` (BEC-133).
 
 ## [0.1.6] - 2026-04-13
 
