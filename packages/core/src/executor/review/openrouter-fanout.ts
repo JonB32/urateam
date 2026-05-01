@@ -51,7 +51,7 @@ export class OpenRouterFanoutProvider implements ReviewProvider {
         outputTokens: 0,
         durationMs: 0,
         errorMessage: err.message,
-        truncatedFiles: prompt.truncatedFiles || undefined,
+        truncatedFiles: prompt.truncatedFiles > 0 ? prompt.truncatedFiles : undefined,
       };
     });
   }
