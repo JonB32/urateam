@@ -79,6 +79,19 @@ End.`;
   it("throws when schema validation fails", () => {
     expect(() => parseReviewFindings('{"findings":[{"bad":true}]}')).toThrow();
   });
+
+  it("ignores { inside string literals before the real envelope", () => {
+    const raw = `I noticed "a {problem}" here. {"findings":[]}`;
+    expect(parseReviewFindings(raw)).toEqual([]);
+  });
+
+  it("handles \\uXXXX escapes inside string literals", () => {
+    // " is a double-quote; the scanner must not terminate the string here.
+    const raw = `Model output: { "findings": [{ "severity": "warning", "file": "a\\u0022.ts", "line": 1, "category": "x", "description": "d", "fix": "f" }] }`;
+    const findings = parseReviewFindings(raw);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].file).toContain('"');
+  });
 });
 
 describe("estimateTokens", () => {

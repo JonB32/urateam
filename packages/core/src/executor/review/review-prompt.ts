@@ -59,6 +59,7 @@ export function buildReviewPrompt(input: BuildPromptInput): BuiltPrompt {
     estimateTokens(intentBlock) +
     estimateTokens(diffBlock);
   let remaining = maxInputTokens - fixedTokens;
+  if (remaining < 0) remaining = 0;
   const includedFiles: typeof files = [];
   let truncatedFiles = 0;
   for (const f of files) {
@@ -97,19 +98,20 @@ function extractFirstJsonObject(s: string): string | null {
   let depth = 0;
   let start = -1;
   let inString = false;
-  let escape = false;
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
-    if (escape) {
-      escape = false;
-      continue;
-    }
     if (inString) {
       if (c === "\\") {
-        escape = true;
-      } else if (c === '"') {
-        inString = false;
+        // Handle JSON escapes: skip next char, plus 4 more for \uXXXX
+        const next = s[i + 1];
+        if (next === "u") {
+          i += 5;  // \u + 4 hex digits
+        } else {
+          i += 1;  // any other single-char escape
+        }
+        continue;
       }
+      if (c === '"') inString = false;
       continue;
     }
     if (c === '"') {
