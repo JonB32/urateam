@@ -17,11 +17,8 @@ import { validateHandoff } from "../executor/validate.js";
 import { isFeatureLicensed } from "../license.js";
 import { checkRequirements, buildRalphContext } from "../executor/ralph.js";
 import { checkTestQuality } from "../executor/test-quality.js";
-import {
-  runDeepReview,
-  buildDeepReviewContext,
-  deepFindingsToReviewFindings,
-} from "../executor/deep-review.js";
+import { buildDeepReviewContext } from "../executor/deep-review.js";
+import { runReviewProviders } from "./review-providers-runner.js";
 import { extractHandoff } from "../executor/extract-handoff.js";
 import { DEFAULT_AGENT_CLAUDE_MD } from "../executor/agent-config.js";
 import { generatePRDescription } from "./pr-description.js";
@@ -1394,8 +1391,49 @@ export class PipelineRunner {
             break;
           }
 
-          runLog.info({ drPass, passLimit }, "deep review: running parallel sub-agents");
-          const deepResult = await runDeepReview(handoff, worktreePath);
+          runLog.info({ drPass, passLimit }, "deep review: running review providers");
+
+          // Resolve owner/repo for fanout PR comment posting. The PR is created
+          // *after* this loop, so prNumber is null here — fanout comments will
+          // not be posted on the deep-review pass; only persistence occurs.
+          let ownerForReview = "";
+          let repoForReview = "";
+          try {
+            const parsed = parseRepoUrl(repoConfig.url);
+            ownerForReview = parsed.owner;
+            repoForReview = parsed.repo;
+          } catch {
+            // non-GitHub URL — fanout still runs, just no comment posting.
+          }
+          const octokitForReview = this.githubConfig
+            ? await createGitHubClient(this.githubConfig)
+            : ({} as unknown as Awaited<ReturnType<typeof createGitHubClient>>);
+
+          // Gate fanout to drPass===1 by passing an empty env on subsequent
+          // passes — getEnabledProviders then returns only the agentic provider.
+          const reviewCtx = {
+            runId,
+            // No stage_run row exists for this deep-review iteration yet —
+            // runReviewProviders skips persistence when stageRunId is empty.
+            stageRunId: "",
+            workdir: worktreePath,
+            handoff,
+            baseRef: repoConfig.defaultBranch ?? "main",
+            prNumber: null,
+          };
+          const reviewResult = await runReviewProviders(reviewCtx, {
+            env: drPass === 1 ? process.env : ({} as NodeJS.ProcessEnv),
+            db: this.db as AnyDb,
+            octokit: octokitForReview,
+            owner: ownerForReview,
+            repo: repoForReview,
+          });
+
+          const deepResult = {
+            findings: reviewResult.agenticFindings,
+            inputTokens: reviewResult.totalInputTokens,
+            outputTokens: reviewResult.totalOutputTokens,
+          };
 
           run.totalInputTokens += deepResult.inputTokens;
           run.totalOutputTokens += deepResult.outputTokens;
@@ -1422,8 +1460,26 @@ export class PipelineRunner {
           }
           previousFindingsCount = findingsCount;
 
-          // Re-run implement stage with deep review context
-          const deepReviewContext = buildDeepReviewContext(drPass, deepResult.findings, handoff);
+          // Re-run implement stage with deep review context. The agentic
+          // review provider already converts DeepReviewFinding -> ReviewFinding
+          // and encodes the source agent as `category = "<agent>:<category>"`;
+          // recover it here so the context prompt groups findings correctly.
+          const deepFindingsForContext = deepResult.findings.map((f) => {
+            const colon = f.category.indexOf(":");
+            const prefix = colon > 0 ? f.category.slice(0, colon) : "quality";
+            const agent: "reuse" | "quality" | "efficiency" =
+              prefix === "reuse" || prefix === "efficiency" ? prefix : "quality";
+            return {
+              agent,
+              severity: f.severity,
+              file: f.file,
+              line: f.line,
+              category: colon > 0 ? f.category.slice(colon + 1) : f.category,
+              description: f.description,
+              fix: f.fix,
+            };
+          });
+          const deepReviewContext = buildDeepReviewContext(drPass, deepFindingsForContext, handoff);
           runLog.info({ drPass }, "deep review: re-running implement stage");
 
           const drImplementResult = await executeStage({
@@ -1512,13 +1568,14 @@ export class PipelineRunner {
           // Merge deep review findings into handoff context so downstream logic
           // (e.g. auto-merge gate) can see them as standard ReviewFindings.
           if (handoff && deepResult.findings.length > 0) {
-            const asReviewFindings = deepFindingsToReviewFindings(deepResult.findings);
+            // deepResult.findings is already ReviewFinding[] (the agentic
+            // provider wrapper performs the conversion before returning).
             const existingFindings = handoff.context.reviewFindings ?? [];
             handoff = {
               ...handoff,
               context: {
                 ...handoff.context,
-                reviewFindings: [...existingFindings, ...asReviewFindings],
+                reviewFindings: [...existingFindings, ...deepResult.findings],
               },
             };
           }
