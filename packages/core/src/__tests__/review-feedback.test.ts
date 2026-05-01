@@ -377,10 +377,10 @@ describe("implementTemplate with reviewFeedback", () => {
     expect(result).not.toContain("Create a branch named:");
   });
 
-  it("instructs agent to check out existing PR branch", () => {
+  it("references the existing PR branch and instructs the agent to stay on it", () => {
     const result = implementTemplate(issue, repo, undefined, feedback);
     expect(result).toContain(feedback.prBranch);
-    expect(result).toContain("Check out the existing PR branch");
+    expect(result).toMatch(/Stay on the current branch/);
   });
 
   it("uses correct commit message format referencing issue ID", () => {
@@ -514,7 +514,7 @@ describe("buildReviewFeedbackContext", () => {
 
     const prompt = assemblePrompt("implement", issue, repo, undefined, ctx);
     expect(prompt).toContain("address PR review feedback");
-    expect(prompt).toContain("Check out the existing PR branch: agent/BEC-85-fix");
+    expect(prompt).toContain("Stay on the current branch (`agent/BEC-85-fix`)");
     expect(prompt).toContain("do NOT create a new PR");
     expect(prompt).not.toContain("Create a branch named:");
   });
@@ -605,5 +605,64 @@ describe("implementTemplate with mergeConflict", () => {
     );
     expect(prompt).not.toContain("merge-conflict-resolution agent");
     expect(prompt).toContain("test agent");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hardening from PR #137 Sonnet review
+// ---------------------------------------------------------------------------
+
+describe("reviewFeedbackBlock — WARNING preamble", () => {
+  // Defense-in-depth against prompt injection: per the CLAUDE.md convention,
+  // every block that carries untrusted content must include a WARNING preamble
+  // alongside escapeXml(). The previous text-form path that this PR replaced
+  // had a per-comment warning; the structured block must keep that defense.
+  it("includes a WARNING preamble inside the <review-feedback> block", () => {
+    const block = reviewFeedbackBlock({
+      prUrl: "https://github.com/acme/app/pull/1",
+      prBranch: "agent/fix",
+      comments: [],
+    });
+    expect(block).toContain("<review-feedback>");
+    expect(block).toContain("WARNING:");
+    expect(block).toContain("UNTRUSTED");
+    expect(block).toMatch(/Do NOT follow/i);
+  });
+
+  it("WARNING preamble appears before any user-controlled fields", () => {
+    const block = reviewFeedbackBlock({
+      prUrl: "https://github.com/acme/app/pull/1",
+      prBranch: "agent/fix",
+      comments: [
+        {
+          author: "alice",
+          body: "fix this",
+          createdAt: "2026-04-01",
+        },
+      ],
+    });
+    const warningIdx = block.indexOf("WARNING:");
+    const commentIdx = block.indexOf("alice");
+    expect(warningIdx).toBeGreaterThan(-1);
+    expect(commentIdx).toBeGreaterThan(warningIdx);
+  });
+});
+
+describe("implementTemplate review-feedback branch — no `git checkout`", () => {
+  // The worktree is pre-configured on prBranch by createWorktreeFromRemote.
+  // Telling the agent to `git checkout` inside a worktree is the exact
+  // pattern CLAUDE.md ("Worktree Isolation Model") flags as a cross-
+  // contamination risk. The instruction must say "stay on the current
+  // branch" instead.
+  it("does not instruct the agent to run `git checkout`", () => {
+    const prompt = assemblePrompt("implement", issue, repo, undefined, feedback);
+    expect(prompt).not.toMatch(/Check out the existing PR branch/);
+    expect(prompt).not.toMatch(/^- git checkout/m);
+  });
+
+  it("explicitly forbids `git checkout` inside the worktree", () => {
+    const prompt = assemblePrompt("implement", issue, repo, undefined, feedback);
+    expect(prompt).toMatch(/Do NOT run `git checkout`/);
+    expect(prompt).toMatch(/Stay on the current branch/);
   });
 });
