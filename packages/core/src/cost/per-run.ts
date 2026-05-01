@@ -18,10 +18,22 @@ interface PipelineRunRow {
   runType?: string | null;
 }
 
+/** Per-model token row from review_model_runs. */
+export interface ModelRunRow {
+  modelId: string;
+  inputTokens: number;
+  outputTokens: number;
+}
+
 interface StageRunRow {
   stage: string;
   inputTokens: number;
   outputTokens: number;
+  /**
+   * When present (BEC-134), cost is computed per model instead of using the
+   * stage-level token totals against a single configured model.
+   */
+  modelRuns?: ModelRunRow[];
 }
 
 interface CostConfig {
@@ -54,15 +66,27 @@ export function computeRunCost(
   let inputTokens = 0;
   let outputTokens = 0;
   for (const s of stages) {
-    const modelName =
-      pc?.stageModels?.[s.stage] ??
-      pc?.profile?.model ??
-      "claude-sonnet-4-6";
-    const rate = resolveModelRate(modelName, config);
-    dollars += (s.inputTokens * rate.inputPerMillion) / 1_000_000;
-    dollars += (s.outputTokens * rate.outputPerMillion) / 1_000_000;
-    inputTokens += s.inputTokens;
-    outputTokens += s.outputTokens;
+    if (s.modelRuns && s.modelRuns.length > 0) {
+      // BEC-134: per-model pricing using review_model_runs rows.
+      for (const mr of s.modelRuns) {
+        const rate = resolveModelRate(mr.modelId, config);
+        dollars += (mr.inputTokens * rate.inputPerMillion) / 1_000_000;
+        dollars += (mr.outputTokens * rate.outputPerMillion) / 1_000_000;
+        inputTokens += mr.inputTokens;
+        outputTokens += mr.outputTokens;
+      }
+    } else {
+      // Fallback: stage-level tokens against the configured model for this stage.
+      const modelName =
+        pc?.stageModels?.[s.stage] ??
+        pc?.profile?.model ??
+        "claude-sonnet-4-6";
+      const rate = resolveModelRate(modelName, config);
+      dollars += (s.inputTokens * rate.inputPerMillion) / 1_000_000;
+      dollars += (s.outputTokens * rate.outputPerMillion) / 1_000_000;
+      inputTokens += s.inputTokens;
+      outputTokens += s.outputTokens;
+    }
   }
   const timeSavedHours =
     run.status === "completed" && run.runType !== "review-feedback"

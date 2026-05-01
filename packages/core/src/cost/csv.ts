@@ -1,6 +1,6 @@
 import type { AnyDb } from "../db/client.js";
 import { and, gte, lt, inArray } from "drizzle-orm";
-import { pipelineRuns, stageRuns } from "../db/schema.js";
+import { pipelineRuns, stageRuns, reviewModelRuns } from "../db/schema.js";
 import { computeRunCost } from "./per-run.js";
 import { isFeatureLicensed } from "../license.js";
 import { createLogger } from "../logger.js";
@@ -79,10 +79,26 @@ export async function* streamCostCsv(
     .select()
     .from(stageRuns)
     .where(inArray(stageRuns.pipelineRunId, runIds));
+
+  // BEC-134: fetch per-model rows and attach them to their parent stage_run.
+  const stageIds = stages.map((s: any) => s.id);
+  const modelRunRows = stageIds.length > 0
+    ? await db.select().from(reviewModelRuns).where(
+        inArray(reviewModelRuns.stageRunId, stageIds),
+      )
+    : [];
+  const modelRunsByStage = new Map<string, any[]>();
+  for (const mr of modelRunRows) {
+    const arr = modelRunsByStage.get(mr.stageRunId) ?? [];
+    arr.push(mr);
+    modelRunsByStage.set(mr.stageRunId, arr);
+  }
+
   const stagesByRun = new Map<string, any[]>();
   for (const s of stages) {
+    const enriched = { ...s, modelRuns: modelRunsByStage.get(s.id) ?? [] };
     const arr = stagesByRun.get(s.pipelineRunId) ?? [];
-    arr.push(s);
+    arr.push(enriched);
     stagesByRun.set(s.pipelineRunId, arr);
   }
 

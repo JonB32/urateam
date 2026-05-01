@@ -113,6 +113,7 @@ vi.mock("../executor/executor.js", () => ({
         turns: 2,
         handoffArtifact: makeHandoffArtifact(runId, issueId, stage),
         handoffIsStructured: true,
+        stageRunId: `mock-${runId}-${stage}`,
       } satisfies StageResult;
     },
   ),

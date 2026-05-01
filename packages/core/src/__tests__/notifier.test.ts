@@ -25,6 +25,7 @@ function makeStageResult(overrides: Partial<StageResult> = {}): StageResult {
     inputTokens: 1000,
     outputTokens: 500,
     turns: 5,
+    stageRunId: "test-stage-run-id",
     ...overrides,
   };
 }

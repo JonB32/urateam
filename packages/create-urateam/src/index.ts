@@ -89,6 +89,10 @@ export interface ScaffoldOptions {
    * blank in .env so the operator can fill them in by hand.
    */
   autoGenSecrets?: boolean;
+  /** OpenRouter API key for multi-model review fanout (BEC-134). */
+  openrouterApiKey?: string;
+  /** Ordered list of model slugs for the review fanout (BEC-134). Written as REVIEW_MODELS=<csv>. */
+  reviewModels?: string[];
 }
 
 export interface LicenseInfo {
@@ -231,6 +235,8 @@ function buildEnv(
     slackWebhookUrl: string;
     discordWebhookUrl: string;
     agentProfiles: ScaffoldOptions["agentProfiles"];
+    openrouterApiKey: string;
+    reviewModels: string[];
   },
 ): string {
   const lines: string[] = [];
@@ -405,6 +411,13 @@ function buildEnv(
     push('# URATEAM_AGENT_PROFILES={"test":{"maxTurns":50,"maxInputTokens":80000}}');
   }
   blank();
+
+  if (options.openrouterApiKey && options.reviewModels && options.reviewModels.length > 0) {
+    push("");
+    push("# OpenRouter multi-model review fanout (BEC-134)");
+    push(`OPENROUTER_API_KEY=${options.openrouterApiKey}`);
+    push(`REVIEW_MODELS=${options.reviewModels.join(",")}`);
+  }
 
   push("# === Optional ===");
   push("# LOG_LEVEL=info");
@@ -594,6 +607,8 @@ export function scaffold(options: ScaffoldOptions): ScaffoldResult {
       slackWebhookUrl: options.slackWebhookUrl ?? "",
       discordWebhookUrl: options.discordWebhookUrl ?? "",
       agentProfiles: options.agentProfiles,
+      openrouterApiKey: options.openrouterApiKey ?? "",
+      reviewModels: options.reviewModels ?? [],
     });
     writeFileSync(envPath, envContent);
   }

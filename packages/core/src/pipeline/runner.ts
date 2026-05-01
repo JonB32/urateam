@@ -18,11 +18,10 @@ import { validateHandoff } from "../executor/validate.js";
 import { isFeatureLicensed } from "../license.js";
 import { checkRequirements, buildRalphContext } from "../executor/ralph.js";
 import { checkTestQuality } from "../executor/test-quality.js";
-import {
-  runDeepReview,
-  buildDeepReviewContext,
-  deepFindingsToReviewFindings,
-} from "../executor/deep-review.js";
+import { buildDeepReviewContext } from "../executor/deep-review.js";
+import { runReviewProviders } from "./review-providers-runner.js";
+import { postFanoutCommentsToPR } from "../executor/review/post-fanout-comments.js";
+import type { ReviewModelRun } from "../executor/review/review-provider.js";
 import { extractHandoff } from "../executor/extract-handoff.js";
 import { DEFAULT_AGENT_CLAUDE_MD } from "../executor/agent-config.js";
 import { generatePRDescription } from "./pr-description.js";
@@ -787,6 +786,17 @@ export class PipelineRunner {
       // Track cumulative files modified across all stages for coordination
       let allModifiedFiles: string[] = [];
 
+      // Track the most recent review stage_run id so the deep-review fanout
+      // can persist its `review_model_runs` rows against the right stage row.
+      // Updated after every executeStage("review", ...) call across the main
+      // stage loop, the review-fix loop, and the deep-review loop.
+      let lastReviewStageRunId = "";
+
+      // Fanout runs captured from the deep-review block (BEC-134). The PR
+      // doesn't exist yet when fanout runs, so we hold the runs in-memory
+      // and post one labeled comment per non-agentic run AFTER PR creation.
+      let pendingFanoutRuns: ReviewModelRun[] = [];
+
       // Track RALPH satisfaction state across the pipeline for draft PR decision
       let ralphSatisfied = true;
       let ralphGaps: string[] = [];
@@ -875,6 +885,12 @@ export class PipelineRunner {
           devcontainerSession,
           stageModels: config.stageModels,
         });
+
+        // BEC-134: track the most recent review stage_run id so fanout
+        // persistence can reuse it.
+        if (stageType === "review") {
+          lastReviewStageRunId = result.stageRunId;
+        }
 
         // RALPH loop for implement stage — iteratively harden against requirements.
         // Tokens are tracked via a flag to prevent double-counting at the outer
@@ -1283,6 +1299,11 @@ export class PipelineRunner {
               stageModels: config.stageModels,
             });
 
+            // BEC-134: track latest review stage_run id for fanout persistence.
+            if (fixStage === "review") {
+              lastReviewStageRunId = fixResult.stageRunId;
+            }
+
             run.totalInputTokens += fixResult.inputTokens;
             run.totalOutputTokens += fixResult.outputTokens;
 
@@ -1426,8 +1447,41 @@ export class PipelineRunner {
             break;
           }
 
-          runLog.info({ drPass, passLimit }, "deep review: running parallel sub-agents");
-          const deepResult = await runDeepReview(handoff, worktreePath);
+          runLog.info({ drPass, passLimit }, "deep review: running review providers");
+
+          // Gate fanout to drPass===1 by passing an empty env on subsequent
+          // passes — getEnabledProviders then returns only the agentic provider.
+          // BEC-134: associate review_model_runs rows with the most recent
+          // review stage_run row (from the main stage loop or review-fix loop).
+          // PR doesn't exist yet here, so prNumber stays null; the runner posts
+          // fanout PR comments after PR creation using `pendingFanoutRuns`.
+          const reviewCtx = {
+            runId,
+            stageRunId: lastReviewStageRunId,
+            workdir: worktreePath,
+            handoff,
+            baseRef: repoConfig.defaultBranch ?? "main",
+            prNumber: null,
+          };
+          const reviewResult = await runReviewProviders(reviewCtx, {
+            env: drPass === 1 ? process.env : ({} as NodeJS.ProcessEnv),
+            db: this.db as AnyDb,
+          });
+
+          // BEC-134: capture fanout (non-agentic) runs from the first deep-review
+          // pass for posting to the PR after creation. Subsequent passes have an
+          // empty env (agentic-only), so no fanout runs to capture there.
+          if (drPass === 1) {
+            pendingFanoutRuns = reviewResult.allRuns.filter(
+              (r) => r.providerId !== "agentic",
+            );
+          }
+
+          const deepResult = {
+            findings: reviewResult.agenticFindings,
+            inputTokens: reviewResult.totalInputTokens,
+            outputTokens: reviewResult.totalOutputTokens,
+          };
 
           run.totalInputTokens += deepResult.inputTokens;
           run.totalOutputTokens += deepResult.outputTokens;
@@ -1454,8 +1508,26 @@ export class PipelineRunner {
           }
           previousFindingsCount = findingsCount;
 
-          // Re-run implement stage with deep review context
-          const deepReviewContext = buildDeepReviewContext(drPass, deepResult.findings, handoff);
+          // Re-run implement stage with deep review context. The agentic
+          // review provider already converts DeepReviewFinding -> ReviewFinding
+          // and encodes the source agent as `category = "<agent>:<category>"`;
+          // recover it here so the context prompt groups findings correctly.
+          const deepFindingsForContext = deepResult.findings.map((f) => {
+            const colon = f.category.indexOf(":");
+            const prefix = colon > 0 ? f.category.slice(0, colon) : "quality";
+            const agent: "reuse" | "quality" | "efficiency" =
+              prefix === "reuse" || prefix === "efficiency" ? prefix : "quality";
+            return {
+              agent,
+              severity: f.severity,
+              file: f.file,
+              line: f.line,
+              category: colon > 0 ? f.category.slice(colon + 1) : f.category,
+              description: f.description,
+              fix: f.fix,
+            };
+          });
+          const deepReviewContext = buildDeepReviewContext(drPass, deepFindingsForContext, handoff);
           runLog.info({ drPass }, "deep review: re-running implement stage");
 
           const drImplementResult = await executeStage({
@@ -1515,6 +1587,10 @@ export class PipelineRunner {
             stageModels: config.stageModels,
           });
 
+          // BEC-134: refresh latest review stage_run id for any subsequent
+          // fanout persistence inside this loop.
+          lastReviewStageRunId = drReviewResult.stageRunId;
+
           run.totalInputTokens += drReviewResult.inputTokens;
           run.totalOutputTokens += drReviewResult.outputTokens;
 
@@ -1544,13 +1620,14 @@ export class PipelineRunner {
           // Merge deep review findings into handoff context so downstream logic
           // (e.g. auto-merge gate) can see them as standard ReviewFindings.
           if (handoff && deepResult.findings.length > 0) {
-            const asReviewFindings = deepFindingsToReviewFindings(deepResult.findings);
+            // deepResult.findings is already ReviewFinding[] (the agentic
+            // provider wrapper performs the conversion before returning).
             const existingFindings = handoff.context.reviewFindings ?? [];
             handoff = {
               ...handoff,
               context: {
                 ...handoff.context,
-                reviewFindings: [...existingFindings, ...asReviewFindings],
+                reviewFindings: [...existingFindings, ...deepResult.findings],
               },
             };
           }
@@ -1851,6 +1928,45 @@ export class PipelineRunner {
               teams: reviewerRequest.teams,
             }),
           );
+        }
+
+        // BEC-134: Post fanout (per-model) review comments on the PR. Best-effort —
+        // failures never block the pipeline. Requires the GitHub App for Octokit
+        // access; the gh-CLI/GitLab paths skip this (parity gap accepted for v1).
+        if (
+          prUrl &&
+          pendingFanoutRuns.length > 0 &&
+          !isGitLab &&
+          this.githubConfig
+        ) {
+          const fanoutPrNumberMatch = prUrl.match(/\/pull\/(\d+)/);
+          const fanoutPrNumber = fanoutPrNumberMatch
+            ? parseInt(fanoutPrNumberMatch[1]!, 10)
+            : null;
+          if (fanoutPrNumber !== null) {
+            try {
+              const { owner: fanoutOwner, repo: fanoutRepo } = parseRepoUrl(
+                repoConfig.url,
+              );
+              const fanoutOctokit = await createGitHubClient(this.githubConfig);
+              await postFanoutCommentsToPR(
+                fanoutOctokit,
+                fanoutOwner,
+                fanoutRepo,
+                fanoutPrNumber,
+                pendingFanoutRuns,
+              );
+              runLog.info(
+                { prNumber: fanoutPrNumber, count: pendingFanoutRuns.length },
+                "fanout: posted per-model PR comments",
+              );
+            } catch (err) {
+              runLog.warn(
+                { err: err instanceof Error ? err.message : String(err) },
+                "fanout: post-fanout-comments failed — continuing",
+              );
+            }
+          }
         }
 
         // 4. Flag for human review when conflicts could not be auto-resolved

@@ -53,7 +53,7 @@ describe("SlackNotifier", () => {
     const notifier = new SlackNotifier();
     await notifier.onPipelineStart(makeRun());
     await notifier.onStageComplete(makeRun(), "test", {
-      status: "completed", inputTokens: 100, outputTokens: 50, turns: 3,
+      status: "completed", inputTokens: 100, outputTokens: 50, turns: 3, stageRunId: "sr1",
     });
     await notifier.onPipelineComplete(makeRun(), {
       prUrl: "https://example.com/pr/1", totalInputTokens: 1000, totalOutputTokens: 500, stagesCompleted: 3,
@@ -77,7 +77,7 @@ describe("SlackNotifier", () => {
   it("sends stage complete payload", async () => {
     const notifier = new SlackNotifier("https://hooks.slack.com/test");
     await notifier.onStageComplete(makeRun(), "implement", {
-      status: "completed", inputTokens: 1000, outputTokens: 500, turns: 5,
+      status: "completed", inputTokens: 1000, outputTokens: 500, turns: 5, stageRunId: "sr2",
     });
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);

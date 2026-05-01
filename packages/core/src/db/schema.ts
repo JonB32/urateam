@@ -224,3 +224,21 @@ export const costRollupsDaily = sqliteTable("cost_rollups_daily", {
 }, (t) => [
   unique().on(t.date, t.pipelineKey, t.linearTeamId, t.repoUrl),
 ]);
+
+/** BEC-134: per-model results from review-stage fanout. */
+export const reviewModelRuns = sqliteTable("review_model_runs", {
+  id: text("id").primaryKey(),
+  stageRunId: text("stage_run_id")
+    .notNull()
+    .references(() => stageRuns.id),
+  providerId: text("provider_id").notNull(),
+  modelId: text("model_id").notNull(),
+  status: text("status").notNull(),
+  inputTokens: integer("input_tokens").notNull().default(0),
+  outputTokens: integer("output_tokens").notNull().default(0),
+  durationMs: integer("duration_ms").notNull().default(0),
+  errorMessage: text("error_message"),
+  truncatedFiles: integer("truncated_files").notNull().default(0),
+  startedAt: crossTimestamp("started_at"),
+  completedAt: crossTimestamp("completed_at"),
+});

@@ -227,6 +227,7 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       inputTokens,
       outputTokens,
       turns,
+      stageRunId,
     };
   } catch (error) {
     const errorMessage =
@@ -258,6 +259,7 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       outputTokens,
       turns,
       errorMessage,
+      stageRunId,
     };
   }
 }
