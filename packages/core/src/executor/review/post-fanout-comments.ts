@@ -1,6 +1,9 @@
 import type { Octokit } from "@octokit/rest";
 import { addPRComment } from "../../repo/github.js";
 import type { ReviewModelRun } from "./review-provider.js";
+import { createLogger } from "../../logger.js";
+
+const log = createLogger({ component: "PostFanoutComments" });
 
 export async function postFanoutCommentsToPR(
   octokit: Octokit,
@@ -9,9 +12,20 @@ export async function postFanoutCommentsToPR(
   prNumber: number,
   runs: ReviewModelRun[],
 ): Promise<void> {
-  for (const run of runs) {
-    await addPRComment(octokit, owner, repo, prNumber, renderRunMarkdown(run));
-  }
+  const results = await Promise.allSettled(
+    runs.map((run) =>
+      addPRComment(octokit, owner, repo, prNumber, renderRunMarkdown(run)),
+    ),
+  );
+  results.forEach((res, i) => {
+    if (res.status === "rejected") {
+      const err = res.reason instanceof Error ? res.reason.message : String(res.reason);
+      log.warn(
+        { modelId: runs[i].modelId, err },
+        "failed to post fanout PR comment",
+      );
+    }
+  });
 }
 
 function renderRunMarkdown(run: ReviewModelRun): string {
@@ -33,7 +47,7 @@ function renderRunMarkdown(run: ReviewModelRun): string {
           "|---|---|---|---|---|",
           ...run.findings.map(
             (f) =>
-              `| ${f.severity} | ${escapePipe(f.file)} | ${f.line} | ${escapePipe(f.category)} | ${escapePipe(f.description)} |`,
+              `| ${f.severity} | ${escapeCell(f.file)} | ${f.line} | ${escapeCell(f.category)} | ${escapeCell(f.description)} |`,
           ),
         ].join("\n");
   const truncationNote =
@@ -49,6 +63,6 @@ function renderRunMarkdown(run: ReviewModelRun): string {
   ].join("");
 }
 
-function escapePipe(s: string): string {
-  return s.replace(/\|/g, "\\|");
+function escapeCell(s: string): string {
+  return s.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 }

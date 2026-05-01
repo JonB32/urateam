@@ -70,4 +70,37 @@ describe("postFanoutCommentsToPR", () => {
     expect(body).toContain("input truncated");
     expect(body).toContain("3");
   });
+
+  it("escapes newlines and pipes in description cells", async () => {
+    const { postFanoutCommentsToPR } = await import(
+      "../executor/review/post-fanout-comments.js"
+    );
+    const runWithNewline: ReviewModelRun = {
+      ...completedRun,
+      findings: [
+        { severity: "warning", file: "a.ts", line: 1, category: "quality",
+          description: "first line\nsecond line | with pipe", fix: "f" },
+      ],
+    };
+    await postFanoutCommentsToPR({} as never, "o", "r", 1, [runWithNewline]);
+    const body = (addPRComment.mock.calls[0][4] as string);
+    expect(body).not.toMatch(/first line\nsecond line/);  // newline must be replaced
+    expect(body).toContain("first line second line \\| with pipe");
+  });
+
+  it("continues posting remaining runs when one addPRComment rejects", async () => {
+    const { postFanoutCommentsToPR } = await import(
+      "../executor/review/post-fanout-comments.js"
+    );
+    addPRComment
+      .mockRejectedValueOnce(new Error("rate limit"))
+      .mockResolvedValueOnce(undefined);
+
+    // Should not throw
+    await expect(
+      postFanoutCommentsToPR({} as never, "o", "r", 1, [completedRun, failedRun]),
+    ).resolves.toBeUndefined();
+    // Both addPRComment calls were attempted
+    expect(addPRComment).toHaveBeenCalledTimes(2);
+  });
 });
