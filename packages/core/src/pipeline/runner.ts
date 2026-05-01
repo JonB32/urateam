@@ -19,6 +19,8 @@ import { checkRequirements, buildRalphContext } from "../executor/ralph.js";
 import { checkTestQuality } from "../executor/test-quality.js";
 import { buildDeepReviewContext } from "../executor/deep-review.js";
 import { runReviewProviders } from "./review-providers-runner.js";
+import { postFanoutCommentsToPR } from "../executor/review/post-fanout-comments.js";
+import type { ReviewModelRun } from "../executor/review/review-provider.js";
 import { extractHandoff } from "../executor/extract-handoff.js";
 import { DEFAULT_AGENT_CLAUDE_MD } from "../executor/agent-config.js";
 import { generatePRDescription } from "./pr-description.js";
@@ -752,6 +754,17 @@ export class PipelineRunner {
       // Track cumulative files modified across all stages for coordination
       let allModifiedFiles: string[] = [];
 
+      // Track the most recent review stage_run id so the deep-review fanout
+      // can persist its `review_model_runs` rows against the right stage row.
+      // Updated after every executeStage("review", ...) call across the main
+      // stage loop, the review-fix loop, and the deep-review loop.
+      let lastReviewStageRunId = "";
+
+      // Fanout runs captured from the deep-review block (BEC-134). The PR
+      // doesn't exist yet when fanout runs, so we hold the runs in-memory
+      // and post one labeled comment per non-agentic run AFTER PR creation.
+      let pendingFanoutRuns: ReviewModelRun[] = [];
+
       // Track RALPH satisfaction state across the pipeline for draft PR decision
       let ralphSatisfied = true;
       let ralphGaps: string[] = [];
@@ -840,6 +853,12 @@ export class PipelineRunner {
           devcontainerSession,
           stageModels: config.stageModels,
         });
+
+        // BEC-134: track the most recent review stage_run id so fanout
+        // persistence can reuse it.
+        if (stageType === "review" && result.stageRunId) {
+          lastReviewStageRunId = result.stageRunId;
+        }
 
         // RALPH loop for implement stage — iteratively harden against requirements.
         // Tokens are tracked via a flag to prevent double-counting at the outer
@@ -1248,6 +1267,11 @@ export class PipelineRunner {
               stageModels: config.stageModels,
             });
 
+            // BEC-134: track latest review stage_run id for fanout persistence.
+            if (fixStage === "review" && fixResult.stageRunId) {
+              lastReviewStageRunId = fixResult.stageRunId;
+            }
+
             run.totalInputTokens += fixResult.inputTokens;
             run.totalOutputTokens += fixResult.outputTokens;
 
@@ -1411,11 +1435,13 @@ export class PipelineRunner {
 
           // Gate fanout to drPass===1 by passing an empty env on subsequent
           // passes — getEnabledProviders then returns only the agentic provider.
+          // BEC-134: associate review_model_runs rows with the most recent
+          // review stage_run row (from the main stage loop or review-fix loop).
+          // PR doesn't exist yet here, so prNumber stays null; the runner posts
+          // fanout PR comments after PR creation using `pendingFanoutRuns`.
           const reviewCtx = {
             runId,
-            // No stage_run row exists for this deep-review iteration yet —
-            // runReviewProviders skips persistence when stageRunId is empty.
-            stageRunId: "",
+            stageRunId: lastReviewStageRunId,
             workdir: worktreePath,
             handoff,
             baseRef: repoConfig.defaultBranch ?? "main",
@@ -1428,6 +1454,15 @@ export class PipelineRunner {
             owner: ownerForReview,
             repo: repoForReview,
           });
+
+          // BEC-134: capture fanout (non-agentic) runs from the first deep-review
+          // pass for posting to the PR after creation. Subsequent passes have an
+          // empty env (agentic-only), so no fanout runs to capture there.
+          if (drPass === 1) {
+            pendingFanoutRuns = reviewResult.allRuns.filter(
+              (r) => r.providerId !== "agentic",
+            );
+          }
 
           const deepResult = {
             findings: reviewResult.agenticFindings,
@@ -1538,6 +1573,12 @@ export class PipelineRunner {
             devcontainerSession,
             stageModels: config.stageModels,
           });
+
+          // BEC-134: refresh latest review stage_run id for any subsequent
+          // fanout persistence inside this loop.
+          if (drReviewResult.stageRunId) {
+            lastReviewStageRunId = drReviewResult.stageRunId;
+          }
 
           run.totalInputTokens += drReviewResult.inputTokens;
           run.totalOutputTokens += drReviewResult.outputTokens;
@@ -1885,6 +1926,45 @@ export class PipelineRunner {
               teams: reviewerRequest.teams,
             }),
           );
+        }
+
+        // BEC-134: Post fanout (per-model) review comments on the PR. Best-effort —
+        // failures never block the pipeline. Requires the GitHub App for Octokit
+        // access; the gh-CLI/GitLab paths skip this (parity gap accepted for v1).
+        if (
+          prUrl &&
+          pendingFanoutRuns.length > 0 &&
+          !isGitLab &&
+          this.githubConfig
+        ) {
+          const fanoutPrNumberMatch = prUrl.match(/\/pull\/(\d+)/);
+          const fanoutPrNumber = fanoutPrNumberMatch
+            ? parseInt(fanoutPrNumberMatch[1]!, 10)
+            : null;
+          if (fanoutPrNumber !== null) {
+            try {
+              const { owner: fanoutOwner, repo: fanoutRepo } = parseRepoUrl(
+                repoConfig.url,
+              );
+              const fanoutOctokit = await createGitHubClient(this.githubConfig);
+              await postFanoutCommentsToPR(
+                fanoutOctokit,
+                fanoutOwner,
+                fanoutRepo,
+                fanoutPrNumber,
+                pendingFanoutRuns,
+              );
+              runLog.info(
+                { prNumber: fanoutPrNumber, count: pendingFanoutRuns.length },
+                "fanout: posted per-model PR comments",
+              );
+            } catch (err) {
+              runLog.warn(
+                { err: err instanceof Error ? err.message : String(err) },
+                "fanout: post-fanout-comments failed — continuing",
+              );
+            }
+          }
         }
 
         // 4. Flag for human review when conflicts could not be auto-resolved

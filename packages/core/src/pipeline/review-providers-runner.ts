@@ -6,7 +6,6 @@ import {
 } from "../executor/review/review-provider.js";
 import { insertReviewModelRuns } from "../db/review-model-runs.js";
 import type { AnyDb } from "../db/client.js";
-import { postFanoutCommentsToPR } from "../executor/review/post-fanout-comments.js";
 import type { ReviewFinding } from "../types.js";
 import { createLogger } from "../logger.js";
 
@@ -15,6 +14,8 @@ const log = createLogger({ component: "ReviewProvidersRunner" });
 export interface RunReviewProvidersOpts {
   env: NodeJS.ProcessEnv;
   db: AnyDb;
+  /** Reserved for future use — the runner posts fanout PR comments itself
+   *  after PR creation (BEC-134), so the helper no longer needs Octokit. */
   octokit: Octokit;
   owner: string;
   repo: string;
@@ -28,16 +29,20 @@ export interface RunReviewProvidersResult {
 }
 
 /**
- * Runs all enabled review providers in sequence, persists their per-model
- * results to `review_model_runs`, and (when a PR exists) posts a fanout
- * advisory comment per non-agentic run.
+ * Runs all enabled review providers in sequence and persists their per-model
+ * results to `review_model_runs` when a stage_run row id is provided.
  *
  * Provider failures are caught and recorded as advisory `failed` runs rather
  * than rethrown, so a flaky third-party model can never fail the pipeline.
  *
- * Persistence and comment-posting are skipped when `ctx.stageRunId === ""`
- * (the runner does not always have a stage_run row to associate the rows
- * with — see runner.ts comment near the deep-review loop).
+ * Persistence is skipped when `ctx.stageRunId === ""` (callers without an
+ * associated stage_runs row).
+ *
+ * BEC-134: this helper no longer posts fanout PR comments. The runner posts
+ * them itself AFTER PR creation, since the PR doesn't exist yet at the point
+ * fanout runs (deep-review block, before the push/PR phase). Callers receive
+ * `allRuns` and can pass non-agentic runs to `postFanoutCommentsToPR` once
+ * `prNumber` is known.
  */
 export async function runReviewProviders(
   ctx: ReviewContext,
@@ -81,18 +86,6 @@ export async function runReviewProviders(
     log.warn(
       "runReviewProviders called without stageRunId; skipping per-model persistence",
     );
-  }
-
-  const fanoutRuns = allRuns.filter((r) => r.providerId !== "agentic");
-  if (ctx.prNumber !== null && fanoutRuns.length > 0) {
-    try {
-      await postFanoutCommentsToPR(opts.octokit, opts.owner, opts.repo, ctx.prNumber, fanoutRuns);
-    } catch (err) {
-      log.warn(
-        { err: err instanceof Error ? err.message : String(err) },
-        "post-fanout-comments failed — continuing",
-      );
-    }
   }
 
   const agenticFindings = allRuns

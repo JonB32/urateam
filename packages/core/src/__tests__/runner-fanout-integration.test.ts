@@ -32,7 +32,7 @@ describe("runner fanout integration", () => {
     postFanoutCommentsToPRMock.mockReset();
   });
 
-  it("runs fanout once per stage execution and posts comments", async () => {
+  it("runs fanout once per stage execution and persists rows; runner posts comments separately", async () => {
     fanoutRunReview.mockResolvedValue([
       {
         modelId: "anthropic/claude-3.5-sonnet",
@@ -74,15 +74,18 @@ describe("runner fanout integration", () => {
     expect(insertReviewModelRunsMock).toHaveBeenCalledOnce();
     const persisted = insertReviewModelRunsMock.mock.calls[0][2] as Array<{ providerId: string }>;
     expect(persisted).toHaveLength(2);
-    expect(postFanoutCommentsToPRMock).toHaveBeenCalledOnce();
-    const postedRuns = postFanoutCommentsToPRMock.mock.calls[0][4] as Array<{ providerId: string }>;
-    expect(postedRuns.every((r) => r.providerId === "openrouter")).toBe(true);
+    // BEC-134: helper no longer posts; the runner posts after PR creation
+    // using `result.allRuns` filtered to non-agentic.
+    expect(postFanoutCommentsToPRMock).not.toHaveBeenCalled();
+    const fanoutFromResult = result.allRuns.filter((r) => r.providerId !== "agentic");
+    expect(fanoutFromResult).toHaveLength(1);
+    expect(fanoutFromResult[0]!.providerId).toBe("openrouter");
     expect(result.agenticFindings).toHaveLength(0);
     expect(result.totalInputTokens).toBe(2);
     expect(result.totalOutputTokens).toBe(2);
   });
 
-  it("does not post comments when prNumber is null", async () => {
+  it("does not post comments (helper never posts post-BEC-134)", async () => {
     fanoutRunReview.mockResolvedValue([]);
     agenticRunReview.mockResolvedValue([]);
     const { runReviewProviders } = await import("../pipeline/review-providers-runner.js");

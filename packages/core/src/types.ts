@@ -316,6 +316,10 @@ export interface StageResult {
   outputTokens: number;
   turns: number;
   errorMessage?: string;
+  /** ID of the `stage_runs` row created for this execution. Used by callers that
+   *  need to associate per-stage artifacts (e.g. `review_model_runs`) with the
+   *  same row the executor inserted. Always populated by `executeStage`. */
+  stageRunId?: string;
 }
 
 // --- Pipeline Run ---
