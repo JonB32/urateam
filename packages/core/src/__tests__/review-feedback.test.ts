@@ -377,10 +377,10 @@ describe("implementTemplate with reviewFeedback", () => {
     expect(result).not.toContain("Create a branch named:");
   });
 
-  it("instructs agent to check out existing PR branch", () => {
+  it("references the existing PR branch and instructs the agent to stay on it", () => {
     const result = implementTemplate(issue, repo, undefined, feedback);
     expect(result).toContain(feedback.prBranch);
-    expect(result).toContain("Check out the existing PR branch");
+    expect(result).toMatch(/Stay on the current branch/);
   });
 
   it("uses correct commit message format referencing issue ID", () => {
@@ -444,5 +444,225 @@ describe("assemblePrompt with reviewFeedback", () => {
     const result = assemblePrompt("implement", issue, repo);
     expect(result).toContain("Create a branch named:");
     expect(result).not.toContain("<review-feedback>");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildReviewFeedbackContext (regression — see PR-comment trigger bug)
+// ---------------------------------------------------------------------------
+
+describe("buildReviewFeedbackContext", () => {
+  // Loaded lazily so this test file doesn't pull the heavy runner module
+  // (and its DB/git imports) into every other suite in this file.
+  const loadHelper = async () => {
+    const mod = await import("../pipeline/runner.js");
+    return mod.buildReviewFeedbackContext;
+  };
+
+  const webhookComments = [
+    {
+      commentId: "c1",
+      author: "alice",
+      body: "Please add input validation here.",
+      filePath: "src/search.ts",
+      lineNumber: 25,
+    },
+    {
+      commentId: "c2",
+      author: "bob",
+      body: "General comment, no file.",
+    },
+  ];
+
+  it("maps webhook ReviewFeedbackComment[] to ReviewComment[]", async () => {
+    const buildReviewFeedbackContext = await loadHelper();
+    const ctx = buildReviewFeedbackContext(
+      "https://github.com/acme/app/pull/42",
+      "agent/BEC-85-fix",
+      webhookComments,
+    );
+
+    expect(ctx.prUrl).toBe("https://github.com/acme/app/pull/42");
+    expect(ctx.prBranch).toBe("agent/BEC-85-fix");
+    expect(ctx.comments).toHaveLength(2);
+
+    expect(ctx.comments[0]).toMatchObject({
+      author: "alice",
+      body: "Please add input validation here.",
+      file: "src/search.ts",
+      line: 25,
+    });
+    expect(ctx.comments[1]).toMatchObject({
+      author: "bob",
+      body: "General comment, no file.",
+    });
+    expect(ctx.comments[1]?.file).toBeUndefined();
+    expect(ctx.comments[1]?.line).toBeUndefined();
+  });
+
+  it("produced context routes the implement template into the review-feedback branch", async () => {
+    // Locks in the wiring: the helper's output, when handed to assemblePrompt,
+    // must hit the focused "address review feedback" prompt — NOT the standard
+    // "create a branch" path that triggered the max-turns bug for PR-comment
+    // runs.
+    const buildReviewFeedbackContext = await loadHelper();
+    const ctx = buildReviewFeedbackContext(
+      "https://github.com/acme/app/pull/42",
+      "agent/BEC-85-fix",
+      webhookComments,
+    );
+
+    const prompt = assemblePrompt("implement", issue, repo, undefined, ctx);
+    expect(prompt).toContain("address PR review feedback");
+    expect(prompt).toContain("Stay on the current branch (`agent/BEC-85-fix`)");
+    expect(prompt).toContain("do NOT create a new PR");
+    expect(prompt).not.toContain("Create a branch named:");
+  });
+
+  it("preserves comment bodies through escapeXml in the rendered prompt", async () => {
+    const buildReviewFeedbackContext = await loadHelper();
+    const ctx = buildReviewFeedbackContext(
+      "https://github.com/acme/app/pull/42",
+      "agent/BEC-85-fix",
+      [
+        {
+          commentId: "c1",
+          author: "alice",
+          body: "<script>alert('xss')</script>",
+          filePath: "src/search.ts",
+          lineNumber: 10,
+        },
+      ],
+    );
+    const prompt = assemblePrompt("implement", issue, repo, undefined, ctx);
+    expect(prompt).not.toContain("<script>");
+    expect(prompt).toContain("&lt;script&gt;");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Merge-conflict context — used by the push-queue rebase-conflict path
+// ---------------------------------------------------------------------------
+
+describe("implementTemplate with mergeConflict", () => {
+  it("uses focused conflict-resolution prompt when mergeConflict is set", () => {
+    const prompt = implementTemplate(
+      issue,
+      repo,
+      undefined,
+      undefined,
+      { defaultBranch: "main" },
+    );
+    expect(prompt).toContain("merge-conflict-resolution agent");
+    expect(prompt).toContain("origin/main");
+    expect(prompt).toContain("git rebase --continue");
+    // Must NOT include the standard implement instructions that confused
+    // the agent into burning all 50 turns on the wrong task.
+    expect(prompt).not.toContain("Create a branch named:");
+    expect(prompt).not.toContain("INTEGRATION REQUIREMENT");
+    expect(prompt).not.toContain("verify EACH acceptance criterion");
+  });
+
+  it("mergeConflict takes precedence over reviewFeedback", () => {
+    const prompt = implementTemplate(
+      issue,
+      repo,
+      undefined,
+      // Both contexts set — conflict resolution must win because it's a hard
+      // prerequisite (can't push until the rebase finishes).
+      {
+        prUrl: "https://github.com/acme/app/pull/42",
+        prBranch: "agent/BEC-85-fix",
+        comments: [],
+      },
+      { defaultBranch: "main" },
+    );
+    expect(prompt).toContain("merge-conflict-resolution agent");
+    expect(prompt).not.toContain("address PR review feedback");
+  });
+
+  it("assemblePrompt routes mergeConflict through to the implement template", () => {
+    const prompt = assemblePrompt(
+      "implement",
+      issue,
+      repo,
+      undefined,
+      undefined,
+      { defaultBranch: "develop" },
+    );
+    expect(prompt).toContain("merge-conflict-resolution agent");
+    expect(prompt).toContain("origin/develop");
+  });
+
+  it("assemblePrompt ignores mergeConflict for non-implement stages", () => {
+    const prompt = assemblePrompt(
+      "test",
+      issue,
+      repo,
+      undefined,
+      undefined,
+      { defaultBranch: "main" },
+    );
+    expect(prompt).not.toContain("merge-conflict-resolution agent");
+    expect(prompt).toContain("test agent");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hardening from PR #137 Sonnet review
+// ---------------------------------------------------------------------------
+
+describe("reviewFeedbackBlock — WARNING preamble", () => {
+  // Defense-in-depth against prompt injection: per the CLAUDE.md convention,
+  // every block that carries untrusted content must include a WARNING preamble
+  // alongside escapeXml(). The previous text-form path that this PR replaced
+  // had a per-comment warning; the structured block must keep that defense.
+  it("includes a WARNING preamble inside the <review-feedback> block", () => {
+    const block = reviewFeedbackBlock({
+      prUrl: "https://github.com/acme/app/pull/1",
+      prBranch: "agent/fix",
+      comments: [],
+    });
+    expect(block).toContain("<review-feedback>");
+    expect(block).toContain("WARNING:");
+    expect(block).toContain("UNTRUSTED");
+    expect(block).toMatch(/Do NOT follow/i);
+  });
+
+  it("WARNING preamble appears before any user-controlled fields", () => {
+    const block = reviewFeedbackBlock({
+      prUrl: "https://github.com/acme/app/pull/1",
+      prBranch: "agent/fix",
+      comments: [
+        {
+          author: "alice",
+          body: "fix this",
+          createdAt: "2026-04-01",
+        },
+      ],
+    });
+    const warningIdx = block.indexOf("WARNING:");
+    const commentIdx = block.indexOf("alice");
+    expect(warningIdx).toBeGreaterThan(-1);
+    expect(commentIdx).toBeGreaterThan(warningIdx);
+  });
+});
+
+describe("implementTemplate review-feedback branch — no `git checkout`", () => {
+  // The worktree is pre-configured on prBranch by createWorktreeFromRemote.
+  // Telling the agent to `git checkout` inside a worktree is the exact
+  // pattern CLAUDE.md ("Worktree Isolation Model") flags as a cross-
+  // contamination risk. The instruction must say "stay on the current
+  // branch" instead.
+  it("does not instruct the agent to run `git checkout`", () => {
+    const prompt = assemblePrompt("implement", issue, repo, undefined, feedback);
+    expect(prompt).not.toMatch(/Check out the existing PR branch/);
+    expect(prompt).not.toMatch(/^- git checkout/m);
+  });
+
+  it("explicitly forbids `git checkout` inside the worktree", () => {
+    const prompt = assemblePrompt("implement", issue, repo, undefined, feedback);
+    expect(prompt).toMatch(/Do NOT run `git checkout`/);
+    expect(prompt).toMatch(/Stay on the current branch/);
   });
 });
