@@ -64,7 +64,7 @@ describe("review_model_runs migration (sqlite)", () => {
 });
 
 describe("insertReviewModelRuns", () => {
-  it("writes one row per ReviewModelRun", () => {
+  it("writes one row per ReviewModelRun", async () => {
     const sqliteDb = new Database(":memory:");
     runMigrationsSqlite(sqliteDb);
     sqliteDb.prepare(
@@ -75,7 +75,7 @@ describe("insertReviewModelRuns", () => {
     ).run("s1", "p1", "review", "completed", Math.floor(Date.now() / 1000));
 
     const db = drizzleSqlite(sqliteDb);
-    insertReviewModelRuns(db, "s1", [
+    await insertReviewModelRuns(db, "s1", [
       {
         modelId: "anthropic/claude-3.5-sonnet",
         providerId: "openrouter",
