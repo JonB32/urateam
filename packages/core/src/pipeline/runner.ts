@@ -856,7 +856,7 @@ export class PipelineRunner {
 
         // BEC-134: track the most recent review stage_run id so fanout
         // persistence can reuse it.
-        if (stageType === "review" && result.stageRunId) {
+        if (stageType === "review") {
           lastReviewStageRunId = result.stageRunId;
         }
 
@@ -1268,7 +1268,7 @@ export class PipelineRunner {
             });
 
             // BEC-134: track latest review stage_run id for fanout persistence.
-            if (fixStage === "review" && fixResult.stageRunId) {
+            if (fixStage === "review") {
               lastReviewStageRunId = fixResult.stageRunId;
             }
 
@@ -1417,22 +1417,6 @@ export class PipelineRunner {
 
           runLog.info({ drPass, passLimit }, "deep review: running review providers");
 
-          // Resolve owner/repo for fanout PR comment posting. The PR is created
-          // *after* this loop, so prNumber is null here — fanout comments will
-          // not be posted on the deep-review pass; only persistence occurs.
-          let ownerForReview = "";
-          let repoForReview = "";
-          try {
-            const parsed = parseRepoUrl(repoConfig.url);
-            ownerForReview = parsed.owner;
-            repoForReview = parsed.repo;
-          } catch {
-            // non-GitHub URL — fanout still runs, just no comment posting.
-          }
-          const octokitForReview = this.githubConfig
-            ? await createGitHubClient(this.githubConfig)
-            : ({} as unknown as Awaited<ReturnType<typeof createGitHubClient>>);
-
           // Gate fanout to drPass===1 by passing an empty env on subsequent
           // passes — getEnabledProviders then returns only the agentic provider.
           // BEC-134: associate review_model_runs rows with the most recent
@@ -1450,9 +1434,6 @@ export class PipelineRunner {
           const reviewResult = await runReviewProviders(reviewCtx, {
             env: drPass === 1 ? process.env : ({} as NodeJS.ProcessEnv),
             db: this.db as AnyDb,
-            octokit: octokitForReview,
-            owner: ownerForReview,
-            repo: repoForReview,
           });
 
           // BEC-134: capture fanout (non-agentic) runs from the first deep-review
@@ -1576,9 +1557,7 @@ export class PipelineRunner {
 
           // BEC-134: refresh latest review stage_run id for any subsequent
           // fanout persistence inside this loop.
-          if (drReviewResult.stageRunId) {
-            lastReviewStageRunId = drReviewResult.stageRunId;
-          }
+          lastReviewStageRunId = drReviewResult.stageRunId;
 
           run.totalInputTokens += drReviewResult.inputTokens;
           run.totalOutputTokens += drReviewResult.outputTokens;

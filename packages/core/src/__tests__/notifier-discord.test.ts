@@ -49,7 +49,7 @@ describe("DiscordNotifier", () => {
     const notifier = new DiscordNotifier();
     await notifier.onPipelineStart(makeRun());
     await notifier.onStageComplete(makeRun(), "test", {
-      status: "completed", inputTokens: 100, outputTokens: 50, turns: 3,
+      status: "completed", inputTokens: 100, outputTokens: 50, turns: 3, stageRunId: "sr1",
     });
     await notifier.onPipelineComplete(makeRun(), {
       prUrl: "https://example.com/pr/1", totalInputTokens: 1000, totalOutputTokens: 500, stagesCompleted: 3,
@@ -71,14 +71,14 @@ describe("DiscordNotifier", () => {
 
     // Stage complete (success) -> green (0x00ff00)
     await notifier.onStageComplete(makeRun(), "implement", {
-      status: "completed", inputTokens: 100, outputTokens: 50, turns: 3,
+      status: "completed", inputTokens: 100, outputTokens: 50, turns: 3, stageRunId: "sr2",
     });
     body = JSON.parse(mockFetch.mock.calls[1][1].body);
     expect(body.embeds[0].color).toBe(0x00ff00);
 
     // Stage complete (failed) -> red (0xff0000)
     await notifier.onStageComplete(makeRun(), "test", {
-      status: "failed", inputTokens: 100, outputTokens: 50, turns: 3, errorMessage: "oops",
+      status: "failed", inputTokens: 100, outputTokens: 50, turns: 3, errorMessage: "oops", stageRunId: "sr3",
     });
     body = JSON.parse(mockFetch.mock.calls[2][1].body);
     expect(body.embeds[0].color).toBe(0xff0000);

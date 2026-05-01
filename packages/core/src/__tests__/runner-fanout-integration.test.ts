@@ -64,9 +64,6 @@ describe("runner fanout integration", () => {
     const result = await runReviewProviders(ctx, {
       env: { REVIEW_MODELS: "anthropic/claude-3.5-sonnet", OPENROUTER_API_KEY: "sk-or" },
       db: {} as never,
-      octokit: {} as never,
-      owner: "o",
-      repo: "r",
     });
 
     expect(agenticRunReview).toHaveBeenCalledOnce();
@@ -96,7 +93,7 @@ describe("runner fanout integration", () => {
           context: { issueIntent: "x", constraints: [], assumptions: [] },
           tokenBudget: { contextTokensUsed: 0, recommendedMaxTurns: 0 } },
         baseRef: "main", prNumber: null },
-      { env: {}, db: {} as never, octokit: {} as never, owner: "o", repo: "r" },
+      { env: {}, db: {} as never },
     );
     expect(postFanoutCommentsToPRMock).not.toHaveBeenCalled();
   });
@@ -116,7 +113,7 @@ describe("runner fanout integration", () => {
           tokenBudget: { contextTokensUsed: 0, recommendedMaxTurns: 0 } },
         baseRef: "main", prNumber: 1 },
       { env: { REVIEW_MODELS: "x", OPENROUTER_API_KEY: "k" },
-        db: {} as never, octokit: {} as never, owner: "o", repo: "r" },
+        db: {} as never },
     );
     expect(result.agenticFindings).toEqual([]);
   });

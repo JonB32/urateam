@@ -1,4 +1,3 @@
-import type { Octokit } from "@octokit/rest";
 import {
   getEnabledProviders,
   type ReviewContext,
@@ -14,11 +13,6 @@ const log = createLogger({ component: "ReviewProvidersRunner" });
 export interface RunReviewProvidersOpts {
   env: NodeJS.ProcessEnv;
   db: AnyDb;
-  /** Reserved for future use — the runner posts fanout PR comments itself
-   *  after PR creation (BEC-134), so the helper no longer needs Octokit. */
-  octokit: Octokit;
-  owner: string;
-  repo: string;
 }
 
 export interface RunReviewProvidersResult {
