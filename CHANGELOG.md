@@ -35,6 +35,10 @@ notes call out when a change affects only a single package.
 
 ### Fixed
 - `@urateam/dashboard`: retry button is now hidden in unlicensed deployments. The route's 404 enforcement was already correct; the view's `canRetry` flag was inconsistently defaulting to `true` (BEC-133).
+- `@urateam/core`: PR-comment-triggered review-feedback runs no longer fail with `Reached maximum number of turns (50)`. The runner was passing review comments as a `ralphContext` text suffix while the implement template fell through to the standard "create branch + implement issue from scratch" prompt — agent saw a contradictory prompt and burned all 50 turns. `executeFeedbackPipeline` now builds a structured `ReviewFeedbackContext` (via the new exported `buildReviewFeedbackContext()` helper) and routes it into the implement template's dedicated review-feedback branch (#137).
+- `@urateam/core`: rebase-conflict resolution in the push-queue path no longer reuses the standard implement template. New `MergeConflictContext` type + dedicated template branch — focuses narrowly on `git status` / resolve markers / `git rebase --continue`; strips out issue data, INTEGRATION REQUIREMENT, acceptance-criteria verification, and build/test runs that were burning the agent's turn budget on irrelevant work (#137).
+- `@urateam/core`: `reviewFeedbackBlock` now includes a `WARNING:` preamble inside `<review-feedback>`, matching the convention used by `<issue-data>` and `<previous-stage-context>`. Restores the in-band instruction-isolation defense that the previous text-form path provided (#137).
+- `@urateam/core`: review-feedback implement template no longer instructs the agent to `git checkout` the PR branch. The worktree is already on the right branch via `createWorktreeFromRemote`, and per CLAUDE.md "Worktree Isolation Model", running `git checkout` inside a worktree can corrupt other concurrent runs sharing the same `.git`. Replaced with explicit "stay on current branch — do NOT run `git checkout`" (#137).
 
 ## [0.1.6] - 2026-04-13
 
