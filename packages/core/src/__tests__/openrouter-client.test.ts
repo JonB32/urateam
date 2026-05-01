@@ -41,6 +41,8 @@ describe("OpenRouterClient", () => {
     const headers = (init as RequestInit).headers as Record<string, string>;
     expect(headers["Authorization"]).toBe("Bearer sk-or-test");
     expect(headers["Content-Type"]).toBe("application/json");
+    expect(headers["HTTP-Referer"]).toBe("https://urateams.com");
+    expect(headers["X-Title"]).toBe("urateam");
   });
 
   it("throws on non-2xx with status and snippet of body", async () => {

@@ -38,7 +38,7 @@ export class OpenRouterClient {
       body: JSON.stringify({
         model: modelId,
         messages,
-        max_tokens: opts.maxTokens,
+        ...(opts.maxTokens !== undefined && { max_tokens: opts.maxTokens }),
       }),
       signal: opts.signal,
     });
