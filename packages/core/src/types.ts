@@ -276,6 +276,18 @@ export const ReviewFeedbackContextSchema = z.object({
 });
 export type ReviewFeedbackContext = z.infer<typeof ReviewFeedbackContextSchema>;
 
+// --- Merge Conflict Context ---
+// Used when the push-queue rebase hits conflicts and we run the implement
+// agent purely to resolve them. Routes the implement template into a focused
+// "resolve conflicts and continue rebase" prompt instead of the standard
+// "implement issue from scratch" path that confuses the agent into burning
+// all 50 turns without making progress.
+export const MergeConflictContextSchema = z.object({
+  /** The base branch name being rebased onto (e.g. "main"). */
+  defaultBranch: z.string(),
+});
+export type MergeConflictContext = z.infer<typeof MergeConflictContextSchema>;
+
 // --- Agent Profile ---
 export interface AgentProfile {
   tools: string[];

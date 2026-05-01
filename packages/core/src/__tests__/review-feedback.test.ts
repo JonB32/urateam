@@ -446,3 +446,164 @@ describe("assemblePrompt with reviewFeedback", () => {
     expect(result).not.toContain("<review-feedback>");
   });
 });
+
+// ---------------------------------------------------------------------------
+// buildReviewFeedbackContext (regression — see PR-comment trigger bug)
+// ---------------------------------------------------------------------------
+
+describe("buildReviewFeedbackContext", () => {
+  // Loaded lazily so this test file doesn't pull the heavy runner module
+  // (and its DB/git imports) into every other suite in this file.
+  const loadHelper = async () => {
+    const mod = await import("../pipeline/runner.js");
+    return mod.buildReviewFeedbackContext;
+  };
+
+  const webhookComments = [
+    {
+      commentId: "c1",
+      author: "alice",
+      body: "Please add input validation here.",
+      filePath: "src/search.ts",
+      lineNumber: 25,
+    },
+    {
+      commentId: "c2",
+      author: "bob",
+      body: "General comment, no file.",
+    },
+  ];
+
+  it("maps webhook ReviewFeedbackComment[] to ReviewComment[]", async () => {
+    const buildReviewFeedbackContext = await loadHelper();
+    const ctx = buildReviewFeedbackContext(
+      "https://github.com/acme/app/pull/42",
+      "agent/BEC-85-fix",
+      webhookComments,
+    );
+
+    expect(ctx.prUrl).toBe("https://github.com/acme/app/pull/42");
+    expect(ctx.prBranch).toBe("agent/BEC-85-fix");
+    expect(ctx.comments).toHaveLength(2);
+
+    expect(ctx.comments[0]).toMatchObject({
+      author: "alice",
+      body: "Please add input validation here.",
+      file: "src/search.ts",
+      line: 25,
+    });
+    expect(ctx.comments[1]).toMatchObject({
+      author: "bob",
+      body: "General comment, no file.",
+    });
+    expect(ctx.comments[1]?.file).toBeUndefined();
+    expect(ctx.comments[1]?.line).toBeUndefined();
+  });
+
+  it("produced context routes the implement template into the review-feedback branch", async () => {
+    // Locks in the wiring: the helper's output, when handed to assemblePrompt,
+    // must hit the focused "address review feedback" prompt — NOT the standard
+    // "create a branch" path that triggered the max-turns bug for PR-comment
+    // runs.
+    const buildReviewFeedbackContext = await loadHelper();
+    const ctx = buildReviewFeedbackContext(
+      "https://github.com/acme/app/pull/42",
+      "agent/BEC-85-fix",
+      webhookComments,
+    );
+
+    const prompt = assemblePrompt("implement", issue, repo, undefined, ctx);
+    expect(prompt).toContain("address PR review feedback");
+    expect(prompt).toContain("Check out the existing PR branch: agent/BEC-85-fix");
+    expect(prompt).toContain("do NOT create a new PR");
+    expect(prompt).not.toContain("Create a branch named:");
+  });
+
+  it("preserves comment bodies through escapeXml in the rendered prompt", async () => {
+    const buildReviewFeedbackContext = await loadHelper();
+    const ctx = buildReviewFeedbackContext(
+      "https://github.com/acme/app/pull/42",
+      "agent/BEC-85-fix",
+      [
+        {
+          commentId: "c1",
+          author: "alice",
+          body: "<script>alert('xss')</script>",
+          filePath: "src/search.ts",
+          lineNumber: 10,
+        },
+      ],
+    );
+    const prompt = assemblePrompt("implement", issue, repo, undefined, ctx);
+    expect(prompt).not.toContain("<script>");
+    expect(prompt).toContain("&lt;script&gt;");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Merge-conflict context — used by the push-queue rebase-conflict path
+// ---------------------------------------------------------------------------
+
+describe("implementTemplate with mergeConflict", () => {
+  it("uses focused conflict-resolution prompt when mergeConflict is set", () => {
+    const prompt = implementTemplate(
+      issue,
+      repo,
+      undefined,
+      undefined,
+      { defaultBranch: "main" },
+    );
+    expect(prompt).toContain("merge-conflict-resolution agent");
+    expect(prompt).toContain("origin/main");
+    expect(prompt).toContain("git rebase --continue");
+    // Must NOT include the standard implement instructions that confused
+    // the agent into burning all 50 turns on the wrong task.
+    expect(prompt).not.toContain("Create a branch named:");
+    expect(prompt).not.toContain("INTEGRATION REQUIREMENT");
+    expect(prompt).not.toContain("verify EACH acceptance criterion");
+  });
+
+  it("mergeConflict takes precedence over reviewFeedback", () => {
+    const prompt = implementTemplate(
+      issue,
+      repo,
+      undefined,
+      // Both contexts set — conflict resolution must win because it's a hard
+      // prerequisite (can't push until the rebase finishes).
+      {
+        prUrl: "https://github.com/acme/app/pull/42",
+        prBranch: "agent/BEC-85-fix",
+        comments: [],
+      },
+      { defaultBranch: "main" },
+    );
+    expect(prompt).toContain("merge-conflict-resolution agent");
+    expect(prompt).not.toContain("address PR review feedback");
+  });
+
+  it("assemblePrompt routes mergeConflict through to the implement template", () => {
+    const prompt = assemblePrompt(
+      "implement",
+      issue,
+      repo,
+      undefined,
+      undefined,
+      { defaultBranch: "develop" },
+    );
+    expect(prompt).toContain("merge-conflict-resolution agent");
+    expect(prompt).toContain("origin/develop");
+  });
+
+  it("assemblePrompt ignores mergeConflict for non-implement stages", () => {
+    const prompt = assemblePrompt(
+      "test",
+      issue,
+      repo,
+      undefined,
+      undefined,
+      { defaultBranch: "main" },
+    );
+    expect(prompt).not.toContain("merge-conflict-resolution agent");
+    expect(prompt).toContain("test agent");
+  });
+});

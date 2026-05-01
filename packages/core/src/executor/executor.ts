@@ -7,6 +7,7 @@ import type {
   HandoffArtifact,
   StageResult,
   ReviewFeedbackContext,
+  MergeConflictContext,
 } from "../types.js";
 import type { Db, AnyDb } from "../db/client.js";
 import { stageRuns, agentLogs } from "../db/schema.js";
@@ -41,6 +42,11 @@ export interface ExecuteStageContext {
    *  rewritten to address the specific review comments rather than re-implementing
    *  from scratch. The agent is instructed to push to the existing PR branch. */
   reviewFeedback?: ReviewFeedbackContext;
+  /** Merge-conflict resolution context. When present on an implement stage, the
+   *  prompt is rewritten to focus narrowly on resolving rebase conflicts and
+   *  continuing the rebase — no issue re-implementation, no build/test runs.
+   *  Takes precedence over `reviewFeedback` if both are set. */
+  mergeConflictContext?: MergeConflictContext;
 }
 
 export async function executeStage(
@@ -71,7 +77,14 @@ export async function executeStage(
 
   const db = rawDb as AnyDb;
   const stageRunId = nanoid();
-  let prompt = assemblePrompt(stage, sanitizedIssue, repoConfig, handoff, context.reviewFeedback);
+  let prompt = assemblePrompt(
+    stage,
+    sanitizedIssue,
+    repoConfig,
+    handoff,
+    context.reviewFeedback,
+    context.mergeConflictContext,
+  );
 
   // When a devcontainer is active, instruct the agent to run shell commands inside it
   if (context.devcontainerSession) {

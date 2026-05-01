@@ -4,6 +4,7 @@ import type {
   HandoffArtifact,
   StageType,
   ReviewFeedbackContext,
+  MergeConflictContext,
 } from "../../types.js";
 import {
   triageTemplate,
@@ -28,6 +29,9 @@ const TEMPLATE_MAP: Record<
  *
  * @param reviewFeedback - When provided and stage is "implement", constructs a
  *   focused prompt for addressing PR review comments rather than fresh implementation.
+ * @param mergeConflict - When provided and stage is "implement", constructs a
+ *   focused prompt for resolving rebase conflicts. Takes precedence over
+ *   `reviewFeedback` since conflict resolution is a hard prerequisite.
  * @throws if `stage` is "await-approval" or an unknown stage.
  */
 export function assemblePrompt(
@@ -36,6 +40,7 @@ export function assemblePrompt(
   repoConfig: RepoConfig,
   handoff?: HandoffArtifact,
   reviewFeedback?: ReviewFeedbackContext,
+  mergeConflict?: MergeConflictContext,
 ): string {
   if (stage === "await-approval") {
     throw new Error(
@@ -44,7 +49,13 @@ export function assemblePrompt(
   }
 
   if (stage === "implement") {
-    return implementTemplate(sanitizedIssue, repoConfig, handoff, reviewFeedback);
+    return implementTemplate(
+      sanitizedIssue,
+      repoConfig,
+      handoff,
+      reviewFeedback,
+      mergeConflict,
+    );
   }
 
   const templateFn = TEMPLATE_MAP[stage];
