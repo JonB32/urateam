@@ -36,11 +36,12 @@ describe("AgenticDeepReviewProvider", () => {
     );
     const provider = new AgenticDeepReviewProvider();
 
+    const handoff = makeHandoff();
     const runs = await provider.runReview({
       runId: "r1",
       stageRunId: "s1",
       workdir: "/tmp/x",
-      handoff: makeHandoff(),
+      handoff,
       baseRef: "main",
       prNumber: null,
     });
@@ -52,7 +53,9 @@ describe("AgenticDeepReviewProvider", () => {
     expect(runs[0].findings).toHaveLength(1);
     expect(runs[0].inputTokens).toBe(100);
     expect(runs[0].outputTokens).toBe(50);
+    expect(runs[0].durationMs).toBeGreaterThanOrEqual(0);
     expect(runDeepReviewMock).toHaveBeenCalledOnce();
+    expect(runDeepReviewMock).toHaveBeenCalledWith(handoff, "/tmp/x");
   });
 
   it("returns failed run with errorMessage when runDeepReview throws", async () => {
@@ -62,11 +65,12 @@ describe("AgenticDeepReviewProvider", () => {
     );
     const provider = new AgenticDeepReviewProvider();
 
+    const handoff = makeHandoff();
     const runs = await provider.runReview({
       runId: "r1",
       stageRunId: "s1",
       workdir: "/tmp/x",
-      handoff: makeHandoff(),
+      handoff,
       baseRef: "main",
       prNumber: null,
     });
@@ -75,5 +79,6 @@ describe("AgenticDeepReviewProvider", () => {
     expect(runs[0].status).toBe("failed");
     expect(runs[0].errorMessage).toContain("agent sdk down");
     expect(runs[0].findings).toHaveLength(0);
+    expect(runs[0].durationMs).toBeGreaterThanOrEqual(0);
   });
 });
