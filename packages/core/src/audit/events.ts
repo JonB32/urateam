@@ -327,3 +327,93 @@ export function policyReviewersRequestedEvent(args: {
     payload: { prUrl: args.prUrl, users: args.users, teams: args.teams },
   });
 }
+
+export function releaseFiredEvent(args: {
+  repoUrl: string;
+  branch: string;
+  tag: string;
+  sha: string;
+  mergedPrCount: number;
+}): AuditEvent {
+  return base({
+    eventType: "release.fired",
+    actor: "release-manager",
+    actorType: "release-manager",
+    scope: `repo:${args.repoUrl}`,
+    payload: {
+      branch: args.branch,
+      tag: args.tag,
+      sha: args.sha,
+      mergedPrCount: args.mergedPrCount,
+    },
+  });
+}
+
+export function releaseSkippedEvent(args: {
+  repoUrl: string;
+  branch: string;
+  reason: string;
+}): AuditEvent {
+  return base({
+    eventType: "release.skipped",
+    actor: "release-manager",
+    actorType: "release-manager",
+    scope: `repo:${args.repoUrl}`,
+    payload: { branch: args.branch, reason: args.reason },
+  });
+}
+
+export function releaseApprovedEvent(args: {
+  repoUrl: string;
+  branch: string;
+  approvedBy: string;
+}): AuditEvent {
+  return base({
+    eventType: "release.approved",
+    actor: `slack:${args.approvedBy}`,
+    actorType: "release-manager",
+    scope: `repo:${args.repoUrl}`,
+    payload: { branch: args.branch, approvedBy: args.approvedBy },
+  });
+}
+
+export function releaseTagConflictEvent(args: {
+  repoUrl: string;
+  branch: string;
+  tag: string;
+}): AuditEvent {
+  return base({
+    eventType: "release.tag_conflict",
+    actor: "release-manager",
+    actorType: "release-manager",
+    scope: `repo:${args.repoUrl}`,
+    payload: { branch: args.branch, tag: args.tag },
+  });
+}
+
+export function releasePartialEvent(args: {
+  repoUrl: string;
+  branch: string;
+  tag: string;
+  attemptCount: number;
+}): AuditEvent {
+  return base({
+    eventType: "release.partial",
+    actor: "release-manager",
+    actorType: "release-manager",
+    scope: `repo:${args.repoUrl}`,
+    payload: { branch: args.branch, tag: args.tag, attemptCount: args.attemptCount },
+  });
+}
+
+export function slackPostFailedEvent(args: {
+  channel: string;
+  reason: string;
+}): AuditEvent {
+  return base({
+    eventType: "slack.post_failed",
+    actor: "release-manager",
+    actorType: "release-manager",
+    payload: { channel: args.channel, reason: args.reason },
+  });
+}

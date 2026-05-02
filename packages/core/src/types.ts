@@ -424,11 +424,15 @@ export const AuditEventTypeSchema = z.enum([
   "dashboard.login", "dashboard.logout", "dashboard.login_denied",
   "policy.path_blocked", "policy.cost_exceeded",
   "policy.override_used", "policy.reviewers_requested",
+  "release.fired", "release.skipped", "release.approved",
+  "release.tag_conflict", "release.partial",
+  "slack.post_failed",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 
 export const AuditActorTypeSchema = z.enum([
   "system", "pm-agent", "webhook", "dashboard-user", "cli",
+  "release-manager",
 ]);
 export type AuditActorType = z.infer<typeof AuditActorTypeSchema>;
 
