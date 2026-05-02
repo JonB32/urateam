@@ -17,7 +17,7 @@ describe("release-manager DB tables", () => {
     const path = tmpDbPath();
     paths.push(path);
     const db = await createDb({ driver: "sqlite", connectionString: path });
-    return { db };
+    return { db: db as any };
   }
 
   afterEach(() => {
