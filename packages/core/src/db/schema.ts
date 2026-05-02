@@ -242,3 +242,43 @@ export const reviewModelRuns = sqliteTable("review_model_runs", {
   startedAt: crossTimestamp("started_at"),
   completedAt: crossTimestamp("completed_at"),
 });
+
+/** BEC-135: cron decisions logged each tick — one row per fire OR skip. */
+export const releaseDecisions = sqliteTable("release_decisions", {
+  id: text("id").primaryKey(),
+  repoUrl: text("repo_url").notNull(),
+  branch: text("branch").notNull(),
+  decidedAt: crossTimestamp("decided_at")
+    .notNull()
+    .$defaultFn(() => new Date()),
+  /** "fire" | "skip" | "awaiting-approval" | "fire-pending" */
+  decision: text("decision").notNull(),
+  reason: text("reason").notNull(),
+  /** JSON snapshot of trigger inputs at decision time, for debugging. */
+  triggerStateJson: text("trigger_state_json").notNull(),
+  proposedVersion: text("proposed_version"),
+  firedTag: text("fired_tag"),
+  firedSha: text("fired_sha"),
+  /** Tracks retries when GitHub release-creation fails after tag was created. Capped at 3. */
+  attemptCount: integer("attempt_count").notNull().default(0),
+});
+
+/** BEC-135: one-shot Slack-driven approvals consumed by the next eligible fire. */
+export const releaseApprovals = sqliteTable(
+  "release_approvals",
+  {
+    id: text("id").primaryKey(),
+    repoUrl: text("repo_url").notNull(),
+    branch: text("branch").notNull(),
+    approvedAt: crossTimestamp("approved_at")
+      .notNull()
+      .$defaultFn(() => new Date()),
+    /** Slack user ID (e.g. "U12345"). */
+    approvedBy: text("approved_by").notNull(),
+    consumedAt: crossTimestamp("consumed_at"),
+    consumedByDecisionId: text("consumed_by_decision_id"),
+  },
+  // The UNIQUE WHERE consumed_at IS NULL partial index is created in the
+  // raw migration SQL because Drizzle's sqliteTable.unique() helper does
+  // not support partial indexes. Migration files own that concern.
+);
