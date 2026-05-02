@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ReleaseManagerConfigSchema } from "./release-manager/types.js";
 
 // --- Stage Types ---
 export const StageTypeSchema = z.enum([
@@ -204,6 +205,8 @@ export const RepoConfigSchema = z.object({
   provider: z.enum(["github", "gitlab"]).optional(),
   /** Configuration for GitHub PR review comment → pipeline re-entry (feedback runs). */
   githubFeedback: GitHubFeedbackConfigSchema.optional(),
+  /** BEC-135: Release Manager agent (Pro feature). */
+  releaseManager: ReleaseManagerConfigSchema.optional(),
 });
 export type RepoConfig = z.infer<typeof RepoConfigSchema>;
 
