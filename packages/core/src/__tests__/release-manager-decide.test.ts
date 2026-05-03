@@ -35,7 +35,7 @@ describe("decide()", () => {
   it("returns the first failing trigger's reason in the documented order — mergedPRsSince fails first", () => {
     const r = decide(
       baseState({ mergedCommitsSinceLastTag: 1, lastTagAt: new Date(NOW.getTime() - 1 * 3600 * 1000) }),
-      { mergedPRsSince: 5, timeSinceLastHours: 24 },
+      { mergedPRsSince: 5, timeSinceLastHours: 24, requireSlackApproval: false },
       NOW,
     );
     expect(r.kind).toBe("skip");
@@ -45,7 +45,7 @@ describe("decide()", () => {
   it("checks timeSinceLastHours after mergedPRsSince passes", () => {
     const r = decide(
       baseState({ mergedCommitsSinceLastTag: 10, lastTagAt: new Date(NOW.getTime() - 1 * 3600 * 1000) }),
-      { mergedPRsSince: 5, timeSinceLastHours: 24 },
+      { mergedPRsSince: 5, timeSinceLastHours: 24, requireSlackApproval: false },
       NOW,
     );
     expect(r.kind).toBe("skip");
@@ -55,7 +55,7 @@ describe("decide()", () => {
   it("checks ciGreenForMinutes after time check passes", () => {
     const r = decide(
       baseState({ ciStatus: "not-green", ciGreenSince: null }),
-      { mergedPRsSince: 5, ciGreenForMinutes: 30 },
+      { mergedPRsSince: 5, ciGreenForMinutes: 30, requireSlackApproval: false },
       NOW,
     );
     expect(r.kind).toBe("skip");
@@ -83,7 +83,7 @@ describe("decide()", () => {
   });
 
   it("fires when only one trigger is set and it passes", () => {
-    const r = decide(baseState(), { mergedPRsSince: 5 }, NOW);
+    const r = decide(baseState(), { mergedPRsSince: 5, requireSlackApproval: false }, NOW);
     expect(r.kind).toBe("fire");
   });
 
