@@ -127,7 +127,9 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
   }
 
   // 6. Fresh approval lookup. "Fresh" = consumed_at IS NULL AND approved_at within approvalTtlMs.
-  const cutoff = new Date(Date.now() - approvalTtlMs);
+  // crossTimestamp stores epoch seconds in SQLite — pass the raw integer to avoid
+  // "SQLite3 can only bind numbers, strings, bigints, buffers, and null" errors.
+  const cutoffEpoch = Math.floor((Date.now() - approvalTtlMs) / 1000);
   const freshRows = await (db as any)
     .select({ approvedBy: releaseApprovals.approvedBy, approvedAt: releaseApprovals.approvedAt })
     .from(releaseApprovals)
@@ -136,7 +138,7 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
         eq(releaseApprovals.repoUrl, repoUrl),
         eq(releaseApprovals.branch, branch),
         isNull(releaseApprovals.consumedAt),
-        sql`${releaseApprovals.approvedAt} >= ${cutoff}`,
+        sql`${releaseApprovals.approvedAt} >= ${cutoffEpoch}`,
       ),
     )
     .orderBy(desc(releaseApprovals.approvedAt))

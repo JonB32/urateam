@@ -77,3 +77,4 @@ export {
   type ActiveWorkEntry,
   type FileOverlapResult as CoordinationFileOverlapResult,
 } from "./pm/coordination.js";
+export * from "./release-manager/index.js";
