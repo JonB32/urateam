@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq, isNull, and } from "drizzle-orm";
+import { eq, isNull, and, desc } from "drizzle-orm";
 import type { Octokit } from "@octokit/rest";
 import { Cron } from "croner";
 import type { AnyDb } from "../db/client.js";
@@ -125,6 +125,7 @@ export function createReleaseManagerScheduler(
           isNull(releaseApprovals.consumedAt),
         ),
       )
+      .orderBy(desc(releaseApprovals.approvedAt))
       .limit(1);
     if (fresh?.[0]?.id) {
       await (db as any)
