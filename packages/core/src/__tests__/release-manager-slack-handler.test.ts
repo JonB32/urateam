@@ -142,3 +142,42 @@ describe("handleReleaseSubcommand", () => {
     expect(r.text).toMatch(/Try.*approve.*skip.*status/i);
   });
 });
+
+import { createSlackInterface } from "../pm/slack-interface.js";
+
+describe("slack-interface /release dispatcher", () => {
+  it("routes /release approve to releaseHandler", async () => {
+    const releaseHandler = vi.fn(async () => ({ text: "ok-handler", responseType: "in_channel" as const }));
+    // We bypass signature verification by stubbing it via a captured signing secret.
+    // In a real test we'd sign the request; here we assert call routing only by
+    // crafting a body and invoking the Hono router.
+    const { router } = createSlackInterface({
+      signingSecret: "test-secret-1234567890",
+      botToken: "xoxb-test",
+      channelId: "C123",
+      releaseHandler,
+    });
+    // Build a valid signature for the body so the request passes the check.
+    const body = "command=%2Frelease&text=approve&user_id=U123&response_url=";
+    const ts = Math.floor(Date.now() / 1000).toString();
+    const crypto = await import("crypto");
+    const sig =
+      "v0=" +
+      crypto.createHmac("sha256", "test-secret-1234567890")
+        .update(`v0:${ts}:${body}`)
+        .digest("hex");
+    const res = await router.fetch(new Request("http://localhost/slack/commands", {
+      method: "POST",
+      headers: {
+        "X-Slack-Request-Timestamp": ts,
+        "X-Slack-Signature": sig,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body,
+    }));
+    expect(res.status).toBe(200);
+    const json: any = await res.json();
+    expect(json.text).toBe("ok-handler");
+    expect(releaseHandler).toHaveBeenCalledWith({ text: "approve", userId: "U123" });
+  });
+});

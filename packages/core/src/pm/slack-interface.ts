@@ -80,6 +80,8 @@ export interface SlackInterfaceConfig {
   callClaude?: (prompt: string) => Promise<string>;
   /** Optional Sonnet-model callable for bulk create analysis (defaults to Sonnet if not provided) */
   callClaudeSonnet?: (prompt: string) => Promise<string>;
+  /** BEC-135: optional handler for /release subcommands. */
+  releaseHandler?: (params: { text: string; userId: string }) => Promise<{ text: string; responseType: "ephemeral" | "in_channel" }>;
 }
 
 export type PmCommand =
@@ -625,11 +627,31 @@ export function createSlackInterface(config: SlackInterfaceConfig): {
 
     // Parse URL-encoded form body
     const params = new URLSearchParams(rawBody);
+    const slashCommand = params.get("command") ?? "";
     const commandText = (params.get("text") ?? "").trim();
     const responseUrl = params.get("response_url") ?? "";
+    const userId = params.get("user_id") ?? "";
 
-    log.info({ commandText }, "received Slack slash command");
+    log.info({ slashCommand, commandText }, "received Slack slash command");
 
+    // Branch: /release vs /pm (the legacy default).
+    if (slashCommand === "/release") {
+      if (!config.releaseHandler) {
+        return c.json({
+          response_type: "ephemeral",
+          text: ":x: Release Manager is not configured on this server.",
+        });
+      }
+      const r = await config.releaseHandler({ text: commandText, userId });
+      if (responseUrl) {
+        postToResponseUrl(responseUrl, r.text).catch((err) =>
+          log.error({ err }, "failed to post to Slack response_url"),
+        );
+      }
+      return c.json({ response_type: r.responseType, text: r.text });
+    }
+
+    // Default: /pm path (preserves existing behavior).
     let cmd = parsePmCommand(commandText);
 
     // Fall back to NL interpretation if command is unknown
