@@ -158,5 +158,6 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
     hasFreshApproval,
     freshApprovalApprover,
     manualTagDetected,
+    qaRun: null,
   };
 }

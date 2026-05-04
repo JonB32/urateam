@@ -17,6 +17,7 @@ function baseState(over: Partial<CollectedState> = {}): CollectedState {
     hasFreshApproval: true,
     freshApprovalApprover: "U123",
     manualTagDetected: false,
+    qaRun: null,
     ...over,
   };
 }

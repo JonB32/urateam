@@ -1,10 +1,13 @@
 import { z } from "zod";
+import { QaCheckConfigSchema, type QaRunSnapshot, type QaTriggerResult } from "../qa/types.js";
 
 export const ReleaseManagerTriggersSchema = z.object({
   mergedPRsSince: z.number().int().positive().optional(),
   timeSinceLastHours: z.number().int().positive().optional(),
   ciGreenForMinutes: z.number().int().positive().optional(),
   requireSlackApproval: z.boolean().default(false),
+  /** BEC-136: trigger workflow + gate release on its result. */
+  qaCheck: QaCheckConfigSchema.optional(),
 });
 export type ReleaseManagerTriggers = z.infer<typeof ReleaseManagerTriggersSchema>;
 
@@ -29,12 +32,13 @@ export const ReleaseManagerConfigSchema = z
       t.mergedPRsSince !== undefined ||
       t.timeSinceLastHours !== undefined ||
       t.ciGreenForMinutes !== undefined ||
-      t.requireSlackApproval === true;
+      t.requireSlackApproval === true ||
+      t.qaCheck !== undefined;
     if (!anyTrigger) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["triggers"],
-        message: "at least one trigger field must be set (mergedPRsSince, timeSinceLastHours, ciGreenForMinutes, or requireSlackApproval=true)",
+        message: "at least one trigger field must be set (mergedPRsSince, timeSinceLastHours, ciGreenForMinutes, requireSlackApproval=true, or qaCheck)",
       });
     }
     if (t.requireSlackApproval === true && !cfg.slackChannel) {
@@ -69,9 +73,11 @@ export interface CollectedState {
   freshApprovalApprover: string | null;
   /** True iff the latest tag in the repo is newer than what we last fired. Re-baselines counters. */
   manualTagDetected: boolean;
+  /** BEC-136: in-flight QA run for this (repo, branch). Null when nothing in flight. */
+  qaRun: QaRunSnapshot | null;
 }
 
 export type DecisionResult =
   | { kind: "fire"; reason: string }
-  | { kind: "skip"; reason: string }
+  | { kind: "skip"; reason: string; qaActionNeeded?: QaTriggerResult }
   | { kind: "awaiting-approval"; reason: string };
