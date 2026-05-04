@@ -261,6 +261,10 @@ export const releaseDecisions = sqliteTable("release_decisions", {
   firedSha: text("fired_sha"),
   /** Tracks retries when GitHub release-creation fails after tag was created. Capped at 3. */
   attemptCount: integer("attempt_count").notNull().default(0),
+  /** BEC-136: GitHub workflow run ID for the in-flight QA run. Null when no QA in flight. */
+  qaRunId: integer("qa_run_id"),
+  /** BEC-136: SHA the QA workflow was triggered against. Used to detect mid-run SHA mismatch. */
+  qaRunSha: text("qa_run_sha"),
 });
 
 /** BEC-135: one-shot Slack-driven approvals consumed by the next eligible fire. */
@@ -279,6 +283,27 @@ export const releaseApprovals = sqliteTable(
     consumedByDecisionId: text("consumed_by_decision_id"),
   },
   // The UNIQUE WHERE consumed_at IS NULL partial index is created in the
+  // raw migration SQL because Drizzle's sqliteTable.unique() helper does
+  // not support partial indexes. Migration files own that concern.
+);
+
+/** BEC-136: tracks Linear issues filed for missing QA workflows — partial UNIQUE prevents re-filing while open. */
+export const qaGapIssues = sqliteTable(
+  "qa_gap_issues",
+  {
+    id: text("id").primaryKey(),
+    repoUrl: text("repo_url").notNull(),
+    branch: text("branch").notNull(),
+    workflowPath: text("workflow_path").notNull(),
+    /** Linear issue identifier returned at file time (e.g., "BEC-150"). */
+    linearIssueId: text("linear_issue_id").notNull(),
+    filedAt: crossTimestamp("filed_at")
+      .notNull()
+      .$defaultFn(() => new Date()),
+    /** Set when the gap is detected as resolved (workflow file appears). Issue itself is closed manually by operator. */
+    resolvedAt: crossTimestamp("resolved_at"),
+  },
+  // The UNIQUE WHERE resolved_at IS NULL partial index is created in the
   // raw migration SQL because Drizzle's sqliteTable.unique() helper does
   // not support partial indexes. Migration files own that concern.
 );
