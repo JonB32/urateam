@@ -283,6 +283,8 @@ export function createReleaseManagerScheduler(
               workflowPath: config.triggers.qaCheck!.workflow,
               linearTeamId: config.triggers.qaCheck!.linearTeamId,
             });
+          } else {
+            log.error({ repoUrl, branch }, "qaCheck requires Linear client but none configured — skipping gap-issue file");
           }
         } else if (dispatch.kind === "dispatch_422") {
           finalReason = "qa_dispatch_error";

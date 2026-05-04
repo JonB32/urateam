@@ -386,7 +386,7 @@ describe("createReleaseManagerScheduler — qaCheck integration", () => {
     await sched.tick();
     await sched.tick();
     await sched.tick();
-    const rows = await db.select().from(releaseDecisions);
+    const rows = await db.select().from(releaseDecisions).orderBy(releaseDecisions.decidedAt);
     expect(rows.length).toBe(3);
     expect(rows[2].reason).toBe("qa_dispatch_error");
     expect(rows[2].decision).toBe("skip");
