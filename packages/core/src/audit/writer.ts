@@ -32,9 +32,15 @@ async function insertAuditEvent(db: AnyDb, event: AuditEvent): Promise<void> {
  * Fire-and-forget insert of an audit event. Write failures are logged but
  * never propagated — audit writes must not crash the caller.
  *
- * Gated on the `audit-log` enterprise feature (spec §8): when unlicensed,
- * this is a no-op so OSS/Pro deployments do not accumulate audit_events rows
- * indefinitely (retention sweep is also gated).
+ * Gated on the `audit-log` enterprise feature: when unlicensed, this is a
+ * no-op. This gate exists so events from Enterprise-only features (cost
+ * rollups, RBAC, SSO, org-policy) do not accumulate rows on Pro/OSS
+ * deployments that have no way to query, prune, or export them.
+ *
+ * **Pro-tier features (PM agent, Release Manager) emit their audit events
+ * via `logAuditEventUnchecked` instead** — those rows must appear in the
+ * audit table whenever the feature itself is licensed, regardless of
+ * whether the Enterprise audit-log dashboard is unlocked.
  *
  * Uses a dynamic import of `../license.js` to avoid a circular-import cycle
  * (license.ts calls into this module to record license-validation failures
@@ -52,11 +58,19 @@ export async function logAuditEvent(
 }
 
 /**
- * Unchecked writer used by the license-validation failure path itself.
- * Bypasses the `audit-log` feature gate because (a) recording why a license
- * was rejected must not depend on that license being valid, and (b) the
- * event is emitted at most once per process (license status is cached).
- * Do not use this from other call sites.
+ * Unchecked writer that bypasses the `audit-log` Enterprise feature gate.
+ *
+ * Used by:
+ * 1. The license-validation failure path itself — recording why a license
+ *    was rejected must not depend on that license being valid. (Bonus: the
+ *    event fires at most once per process, since license status is cached.)
+ * 2. Pro-tier feature events (PM agent decisions, Release Manager
+ *    fire/skip/approval/conflict events) — these must appear in the audit
+ *    table whenever the Pro feature is licensed, independent of the
+ *    Enterprise audit-log dashboard being unlocked.
+ *
+ * Use sparingly. Enterprise-only features should continue to use
+ * `logAuditEvent` so their events are properly gated.
  */
 export async function logAuditEventUnchecked(
   db: AnyDb,

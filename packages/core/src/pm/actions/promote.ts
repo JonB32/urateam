@@ -2,7 +2,7 @@ import type { PromoteResult, ConflictCheckResult } from "../types.js";
 import { resolveWorkflowStates } from "../linear-helpers.js";
 import { createLogger } from "../../logger.js";
 import type { AnyDb } from "../../db/client.js";
-import { logAuditEvent, pmPromotedEvent } from "../../audit/index.js";
+import { logAuditEventUnchecked, pmPromotedEvent } from "../../audit/index.js";
 
 const log = createLogger({ component: "PmAgent:promote" });
 
@@ -83,7 +83,7 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
     await linearClient.updateIssue(candidate.id, { stateId: todoStateId });
 
     if (input.db) {
-      void logAuditEvent(input.db, pmPromotedEvent({
+      void logAuditEventUnchecked(input.db, pmPromotedEvent({
         issueId: candidate.identifier,
         fromState: "Backlog",
         toState: "Todo",
