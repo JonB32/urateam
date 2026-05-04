@@ -155,6 +155,57 @@ export const startCommand = new Command("start")
       });
     }
 
+    // --- Release Manager config (BEC-135 — Pro tier) ---
+    let rmConfig: import("@urateam/core").ReleaseManagerConfig | undefined;
+    let rmRepoUrl: string | undefined;
+    if (process.env.RELEASE_MANAGER_ENABLED === "true") {
+      const { ReleaseManagerConfigSchema, isFeatureLicensed } = await import("@urateam/core");
+
+      if (!isFeatureLicensed("release-manager")) {
+        console.error(
+          "RELEASE_MANAGER_ENABLED=true requires a Pro tier license that unlocks 'release-manager'. " +
+          "Set URATEAM_LICENSE_KEY to a valid Pro license and restart.",
+        );
+        process.exit(1);
+      }
+
+      // Use the first configured repo as the target. v1 supports a single Release Manager.
+      const firstRepoTeamId = Object.keys(repoConfigs)[0];
+      rmRepoUrl = repoConfigs[firstRepoTeamId]?.url;
+      if (!rmRepoUrl) {
+        console.error("RELEASE_MANAGER_ENABLED=true requires a configured REPO_URL.");
+        process.exit(1);
+      }
+
+      const triggers: Record<string, number | boolean> = {};
+      if (process.env.RELEASE_MANAGER_TRIGGER_MERGED_PRS_SINCE) {
+        triggers.mergedPRsSince = parseInt(process.env.RELEASE_MANAGER_TRIGGER_MERGED_PRS_SINCE, 10);
+      }
+      if (process.env.RELEASE_MANAGER_TRIGGER_TIME_SINCE_LAST_HOURS) {
+        triggers.timeSinceLastHours = parseInt(process.env.RELEASE_MANAGER_TRIGGER_TIME_SINCE_LAST_HOURS, 10);
+      }
+      if (process.env.RELEASE_MANAGER_TRIGGER_CI_GREEN_FOR_MINUTES) {
+        triggers.ciGreenForMinutes = parseInt(process.env.RELEASE_MANAGER_TRIGGER_CI_GREEN_FOR_MINUTES, 10);
+      }
+      if (process.env.RELEASE_MANAGER_TRIGGER_REQUIRE_SLACK_APPROVAL === "true") {
+        triggers.requireSlackApproval = true;
+      }
+
+      try {
+        rmConfig = ReleaseManagerConfigSchema.parse({
+          enabled: true,
+          schedule: process.env.RELEASE_MANAGER_SCHEDULE ?? "*/30 * * * *",
+          triggers,
+          versionBump: process.env.RELEASE_MANAGER_VERSION_BUMP ?? "patch",
+          slackChannel: process.env.RELEASE_MANAGER_SLACK_CHANNEL,
+          branch: process.env.RELEASE_MANAGER_BRANCH ?? "main",
+        });
+      } catch (err) {
+        console.error("Release Manager config invalid:", (err as Error).message);
+        process.exit(1);
+      }
+    }
+
     const config = {
       webhookSecret: process.env.LINEAR_WEBHOOK_SECRET,
       linearApiKey: process.env.LINEAR_API_KEY ?? "",
@@ -239,6 +290,7 @@ export const startCommand = new Command("start")
 
     // --- PM Agent (opt-in) ---
     let pmInterval: ReturnType<typeof setInterval> | undefined;
+    let rmScheduler: import("@urateam/core").ReleaseManagerScheduler | undefined;
     if (pmAgentEnabled && pmConfig) {
       const { createPmScheduler } = await import("@urateam/core");
       const slackBotToken = process.env.SLACK_BOT_TOKEN!;
@@ -264,11 +316,65 @@ export const startCommand = new Command("start")
       console.log(`PM Agent: enabled (every ${pmConfig.cronIntervalMs / 60000}min, max ${pmConfig.maxInFlight} in-flight)`);
     }
 
+    // --- Release Manager (BEC-135 — Pro tier, opt-in) ---
+    if (rmConfig && rmRepoUrl) {
+      if (!github) {
+        console.error(
+          "RELEASE_MANAGER_ENABLED=true requires GITHUB_APP_ID + GITHUB_PRIVATE_KEY_PATH so the agent can create tags/releases.",
+        );
+        process.exit(1);
+      }
+      const { createGitHubClient, createReleaseManagerScheduler, isFeatureLicensed,
+        handleReleaseSubcommand, parseReleaseSubcommand } = await import("@urateam/core");
+      const rmOctokit = await createGitHubClient(github);
+      rmScheduler = createReleaseManagerScheduler({
+        config: rmConfig,
+        db,
+        octokit: rmOctokit,
+        repoUrl: rmRepoUrl,
+        isLicensed: () => isFeatureLicensed("release-manager"),
+        slack: process.env.SLACK_BOT_TOKEN
+          ? {
+              postMessage: async (channel, text) => {
+                const { postSlackMessage } = await import("@urateam/core");
+                const r = await postSlackMessage(process.env.SLACK_BOT_TOKEN!, { channel, text });
+                return r !== null && (r as any).ok !== false;
+              },
+            }
+          : undefined,
+      });
+
+      // Plumb a release-handler closure through pmSlack so /release routes here.
+      if (pmSlack) {
+        (pmSlack as any).releaseHandler = async ({ text, userId }: { text: string; userId: string }) => {
+          const cmd = parseReleaseSubcommand(text);
+          const pauseDurationHours = rmConfig!.triggers.timeSinceLastHours ?? 24;
+          return handleReleaseSubcommand({
+            cmd,
+            db,
+            repoUrl: rmRepoUrl!,
+            branch: rmConfig!.branch,
+            slackUserId: userId,
+            pauseDurationHours,
+            onSkip: (_reason) => {
+              rmScheduler!.pauseUntil(new Date(Date.now() + pauseDurationHours * 3600 * 1000));
+            },
+          });
+        };
+      }
+
+      rmScheduler.start();
+      console.log(
+        `Release Manager: enabled (schedule "${rmConfig.schedule}", repo ${rmRepoUrl}, branch ${rmConfig.branch})`,
+      );
+    }
+
     // --- Graceful shutdown ---
     function shutdown() {
       console.log("Shutting down...");
       clearInterval(cleanupInterval);
       if (pmInterval) clearInterval(pmInterval);
+      rmScheduler?.stop();
       let closed = 0;
       const onClose = () => { if (++closed === 2) process.exit(0); };
       dashServer.close(onClose);

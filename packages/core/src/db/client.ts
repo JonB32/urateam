@@ -5,7 +5,7 @@ import { sql, type SQL } from "drizzle-orm";
 import postgres from "postgres";
 import * as schema from "./schema.js";
 import { _setSchemaDriver } from "./schema.js";
-import { runMigrationsPostgres } from "./migrator.js";
+import { runMigrationsSqlite, runMigrationsPostgres } from "./migrator.js";
 
 const fullSchema = schema;
 
@@ -315,6 +315,7 @@ export async function createDb(options: CreateDbOptions): Promise<Db> {
   for (const stmt of getMigrateSqlite()) {
     try { sqlite.exec(stmt); } catch { /* column already exists */ }
   }
+  runMigrationsSqlite(sqlite);
   const db = drizzleSqlite(sqlite, { schema: fullSchema });
   (db as any)[DB_DRIVER_TAG] = "sqlite";
   return db;

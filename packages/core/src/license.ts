@@ -31,6 +31,7 @@ const PRO_FEATURES = [
   "multi-repo",
   "stage-models",
   "advanced-automerge",
+  "release-manager",
 ];
 
 const ENTERPRISE_FEATURES = [

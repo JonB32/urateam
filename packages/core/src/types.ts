@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ReleaseManagerConfigSchema } from "./release-manager/types.js";
 
 // --- Stage Types ---
 export const StageTypeSchema = z.enum([
@@ -204,6 +205,8 @@ export const RepoConfigSchema = z.object({
   provider: z.enum(["github", "gitlab"]).optional(),
   /** Configuration for GitHub PR review comment → pipeline re-entry (feedback runs). */
   githubFeedback: GitHubFeedbackConfigSchema.optional(),
+  /** BEC-135: Release Manager agent (Pro feature). */
+  releaseManager: ReleaseManagerConfigSchema.optional(),
 });
 export type RepoConfig = z.infer<typeof RepoConfigSchema>;
 
@@ -424,11 +427,15 @@ export const AuditEventTypeSchema = z.enum([
   "dashboard.login", "dashboard.logout", "dashboard.login_denied",
   "policy.path_blocked", "policy.cost_exceeded",
   "policy.override_used", "policy.reviewers_requested",
+  "release.fired", "release.skipped", "release.approved",
+  "release.tag_conflict", "release.partial",
+  "slack.post_failed",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 
 export const AuditActorTypeSchema = z.enum([
   "system", "pm-agent", "webhook", "dashboard-user", "cli",
+  "release-manager",
 ]);
 export type AuditActorType = z.infer<typeof AuditActorTypeSchema>;
 
