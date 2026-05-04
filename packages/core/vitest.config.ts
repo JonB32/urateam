@@ -18,6 +18,11 @@ export default defineConfig({
     include: ["src/__tests__/**/*.test.ts"],
     exclude: ["src/__tests__/integration/**/*.test.ts"],
     passWithNoTests: true,
-    testTimeout: 15_000,
+    // 30s — license-helper-using tests (sso/policy/rbac feature-flag tests +
+    // barrel re-export tests) do crypto + dynamic-import work that takes
+    // 4-5s in isolation and can exceed 15s under parallel-worker contention.
+    // 30s gives ~5x headroom over the slowest observed run while keeping
+    // legitimately-hung tests detectable in a single CI minute.
+    testTimeout: 30_000,
   },
 });
