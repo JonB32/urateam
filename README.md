@@ -23,8 +23,8 @@ ura dev
 
 | Tier | Pitch |
 |---|---|
-| **OSS** | Self-hosted, BYO Anthropic key. Free. |
-| **Pro** | Multi-repo, advanced auto-merge, deep review, PM Agent with Slack interface + conflict detection + approval workflows. |
+| **OSS** | Self-hosted, BYO Anthropic key. Free. Includes QA agent (orchestrate existing GitHub Actions workflow as a release-readiness gate; file Linear gap issues for missing harness). |
+| **Pro** | Multi-repo, advanced auto-merge, deep review, PM Agent with Slack interface + conflict detection + approval workflows, Release Manager (cron-driven auto-tag + GitHub release on configurable triggers, Slack approval flow). |
 | **Enterprise** | Adds SSO (WorkOS), audit log + export, spend caps & alerts, RBAC, cost & ROI dashboard, org policy / guardrails. Sales-led. |
 
 See `docs/superpowers/specs/2026-04-13-enterprise-tier-design.md` for the full feature matrix.
