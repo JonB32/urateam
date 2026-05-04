@@ -10,6 +10,8 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+> **Note:** the entries below this line have accumulated since ~0.1.7 (license JWT migration era) without being migrated into per-version sections as their corresponding versions shipped. They cover changes that landed in roughly 0.1.7 through 0.1.30. Backfilling per-version attribution would require reading 24 PRs of git history. Future releases should follow the "Move the `[Unreleased]` entries into a new section" step in the Release process below.
+
 ### Added
 - `@urateam/cli`: CLI version is now read from `package.json` instead of being hardcoded (#19, #25).
 - `@urateam/cli`: new hidden `ura license issue` admin command for generating Ed25519-signed Enterprise license keys.
@@ -39,6 +41,31 @@ notes call out when a change affects only a single package.
 - `@urateam/core`: rebase-conflict resolution in the push-queue path no longer reuses the standard implement template. New `MergeConflictContext` type + dedicated template branch — focuses narrowly on `git status` / resolve markers / `git rebase --continue`; strips out issue data, INTEGRATION REQUIREMENT, acceptance-criteria verification, and build/test runs that were burning the agent's turn budget on irrelevant work (#137).
 - `@urateam/core`: `reviewFeedbackBlock` now includes a `WARNING:` preamble inside `<review-feedback>`, matching the convention used by `<issue-data>` and `<previous-stage-context>`. Restores the in-band instruction-isolation defense that the previous text-form path provided (#137).
 - `@urateam/core`: review-feedback implement template no longer instructs the agent to `git checkout` the PR branch. The worktree is already on the right branch via `createWorktreeFromRemote`, and per CLAUDE.md "Worktree Isolation Model", running `git checkout` inside a worktree can corrupt other concurrent runs sharing the same `.git`. Replaced with explicit "stay on current branch — do NOT run `git checkout`" (#137).
+
+## [0.1.31] - 2026-05-04
+
+### Added
+- `@urateam/core`: **BEC-135 Release Manager agent** (Pro tier). Cron-driven agent at `packages/core/src/release-manager/` that watches recently-merged PRs, evaluates configurable trigger rules each tick (`mergedPRsSince` / `timeSinceLastHours` / `ciGreenForMinutes` / `requireSlackApproval`), and cuts a GitHub release tag with auto-generated notes when conditions pass. Operator's existing CI/CD takes over for the actual deploy. Three-kind decision result (`fire | skip | awaiting-approval`) lets the dashboard distinguish "ready to ship, just needs approval" from cooldown skips. Spec + plan in `docs/superpowers/`. (#140)
+- `@urateam/core`: `/release approve | skip <reason> | status` Slack subcommands routed via the existing `pm/slack-interface.ts` `/slack/commands` Hono router (dispatched by Slack's `command` form field). Approvals are one-shot tokens enforced by a partial UNIQUE index. (#140)
+- `@urateam/core`: two new tables — `release_decisions` (one row per scheduler tick, with reason + trigger snapshot) and `release_approvals` (Slack-driven one-shot tokens consumed by the next eligible fire). Migration `009_release_manager.sql` (sqlite) + `010_release_manager.sql` (postgres). (#140)
+- `@urateam/core`: 6 new audit event types — `release.fired`, `release.skipped`, `release.approved`, `release.tag_conflict`, `release.partial`, `slack.post_failed`. New actor type `release-manager`. (#140)
+- `@urateam/core`: `release-manager` added to `PRO_FEATURES`. (#140)
+- `@urateam/cli`: `RELEASE_MANAGER_*` env vars wired through `start.ts` with license + GitHub App credential gates. Documented in `.env.example`. (#140)
+- New runtime dep: `croner@^9.0.0` for cron expression parsing. (#140)
+
+### Changed
+- `@urateam/core`: **Pro-tier audit events bypass the Enterprise `audit-log` license gate.** PM agent + Release Manager events (`pm.*` and `release.*`) now appear in the audit table whenever the Pro license is unlocked, regardless of whether the Enterprise audit-log dashboard is also licensed. Enterprise-only feature events (cost rollups, RBAC, SSO, org-policy) continue to use `logAuditEvent` and remain gated. The `audit-log` Enterprise feature now correctly refers only to retention sweep, dashboard reader, and CSV export — not to whether events are written. (#143)
+- `@urateam/core`: SQLite `createDb()` now actually runs file-based migrations under `db/migrations/sqlite/` (was previously only running on Postgres). On existing SQLite deployments, all migrations 001–009 will be evaluated on first startup after upgrade. All scripts use `IF NOT EXISTS` / idempotent DDL, so this is safe. (#140)
+- `@urateam/core`: `pm/slack-interface.ts` `/slack/commands` route now dispatches by Slack's `command` form field (`/pm` vs `/release`). Existing `/pm` behavior preserved exactly. (#140)
+
+### Fixed
+- `@urateam/core`: removed dead retry counter in `release-manager/scheduler.ts` for the `release_create_failed` branch. The retry was unreachable because `state.ts` `manualTagDetected` only considered `decision="fire"` rows — partial-fire's `fire-pending` row was excluded, so the next tick rebaselined via `manual_tag_detected` before reaching the retry path. Replaced with a single skip row + immediate `releasePartialEvent` audit. Operators clean up the orphaned tag manually. Proper retry-on-fire-pending sweep is queued as v2 (BEC-139). (#143)
+
+### Known v1 simplifications (BEC-135)
+- `/release status` renders only the recent decision rows, not the live trigger-state matrix from spec §7. Tracked as BEC-140.
+- Single Release Manager instance per process (one configured repo). Tracked as BEC-141.
+- No Slack interactive buttons (slash commands only). Tracked as BEC-142.
+- No pre-release / RC tag support (e.g. `v1.2.3-beta.1`). Tracked as BEC-143.
 
 ## [0.1.6] - 2026-04-13
 
@@ -92,7 +119,8 @@ When cutting a new version:
 3. Open a PR titled `chore: bump to vX.Y.Z`. After merge, tag the merge commit `vX.Y.Z` and push the tag — the publish workflow takes it from there.
 4. Add a fresh empty `[Unreleased]` block on top.
 
-[Unreleased]: https://github.com/JonB32/urateam/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/JonB32/urateam/compare/v0.1.31...HEAD
+[0.1.31]: https://github.com/JonB32/urateam/compare/v0.1.30...v0.1.31
 [0.1.6]: https://github.com/JonB32/urateam/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/JonB32/urateam/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/JonB32/urateam/compare/v0.1.3...v0.1.4
