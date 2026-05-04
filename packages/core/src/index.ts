@@ -80,3 +80,4 @@ export {
   type FileOverlapResult as CoordinationFileOverlapResult,
 } from "./pm/coordination.js";
 export * from "./release-manager/index.js";
+export * from "./qa/index.js";
