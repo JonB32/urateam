@@ -70,7 +70,9 @@ describe("evalQaCheck", () => {
     });
     expect(result.pass).toBe(false);
     expect(result.reason).toBe("qa_running");
-    expect(result.reason === "qa_running" && result.runId).toBe(99999);
+    if (result.pass === false && result.reason === "qa_running") {
+      expect(result.runId).toBe(99999);
+    }
   });
 
   it("returns qa_timed_out when run has been running > timeoutMinutes", () => {
@@ -125,7 +127,9 @@ describe("evalQaCheck", () => {
     });
     expect(result.pass).toBe(false);
     expect(result.reason).toBe("qa_failed");
-    expect(result.reason === "qa_failed" && result.conclusion).toBe("failure");
+    if (result.pass === false && result.reason === "qa_failed") {
+      expect(result.conclusion).toBe("failure");
+    }
   });
 
   it("returns qa_failed for conclusion=cancelled", () => {
@@ -144,6 +148,8 @@ describe("evalQaCheck", () => {
     });
     expect(result.pass).toBe(false);
     expect(result.reason).toBe("qa_failed");
-    expect(result.reason === "qa_failed" && result.conclusion).toBe("cancelled");
+    if (result.pass === false && result.reason === "qa_failed") {
+      expect(result.conclusion).toBe("cancelled");
+    }
   });
 });
