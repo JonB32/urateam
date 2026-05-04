@@ -21,7 +21,7 @@ import { bumpFromConfigAndCommits } from "./versioning.js";
 import { createTagAndRelease, parseRepoFromUrl } from "./github.js";
 import type { ReleaseManagerConfig } from "./types.js";
 import { triggerWorkflow, pollWorkflowRun, workflowFileExists } from "../qa/github.js";
-import { fileGapIssue } from "../qa/gap.js";
+import { fileGapIssue, markGapResolved } from "../qa/gap.js";
 
 const log = createLogger({ component: "ReleaseManager:scheduler" });
 
@@ -204,6 +204,16 @@ export function createReleaseManagerScheduler(
         log.warn({ err }, "qa workflowFileExists check failed — treating as exists");
         wfExists = true; // fail-open so retries hit the dispatch path
       }
+      if (wfExists) {
+        // BEC-136: workflow file is present; if there was an open gap issue for this
+        // (repo, branch, workflow), mark it resolved so a future gap can be re-filed.
+        await markGapResolved({
+          db,
+          repoUrl,
+          branch,
+          workflowPath: config.triggers.qaCheck.workflow,
+        });
+      }
       let runConclusion: string | null = null;
       if (state.qaRun && state.qaRun.runSha === state.headSha) {
         try {
@@ -309,6 +319,21 @@ export function createReleaseManagerScheduler(
         } else {
           log.error({ repoUrl, branch }, "qaCheck requires Linear client but none configured — skipping gap-issue file");
         }
+      }
+
+      if (result.qaActionNeeded?.reason === "qa_timed_out" && !result.qaActionNeeded.pass && state.qaRun) {
+        const elapsedMs = Date.now() - state.qaRun.triggeredAt.getTime();
+        void logAuditEventUnchecked(
+          db,
+          qaRunCompletedEvent({
+            repoUrl,
+            branch,
+            runId: result.qaActionNeeded.runId,
+            conclusion: "timed_out",
+            durationMs: elapsedMs,
+            synthetic: true,
+          }),
+        );
       }
 
       await persistDecision({
