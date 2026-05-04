@@ -42,6 +42,27 @@ notes call out when a change affects only a single package.
 - `@urateam/core`: `reviewFeedbackBlock` now includes a `WARNING:` preamble inside `<review-feedback>`, matching the convention used by `<issue-data>` and `<previous-stage-context>`. Restores the in-band instruction-isolation defense that the previous text-form path provided (#137).
 - `@urateam/core`: review-feedback implement template no longer instructs the agent to `git checkout` the PR branch. The worktree is already on the right branch via `createWorktreeFromRemote`, and per CLAUDE.md "Worktree Isolation Model", running `git checkout` inside a worktree can corrupt other concurrent runs sharing the same `.git`. Replaced with explicit "stay on current branch — do NOT run `git checkout`" (#137).
 
+## [0.1.32] - 2026-05-04
+
+### Added
+- `@urateam/core`: **BEC-136 QA agent + release-readiness check** (Phase 1, OSS+ tier). New module at `packages/core/src/qa/` integrates as a 5th trigger field on `ReleaseManagerTriggers`. When configured, each Release Manager tick verifies a customer-defined GitHub Actions workflow has run green against the merge SHA before firing a release. Async fire-and-check across ticks: tick triggers a `workflow_dispatch`, observes an in-flight run, or files a Linear gap issue — never blocks. Spec + plan in `docs/superpowers/`. (#147)
+- `@urateam/core`: 6-kind decision result (`pass | qa_failed | qa_running | qa_timed_out | qa_needs_trigger | qa_no_workflow`) drives different scheduler actions per kind. SHA-mismatch handling treats stale runs as "needs trigger" (fresh dispatch, old run abandoned). (#147)
+- `@urateam/core`: gap-issue filing is rule-based (workflow-file-existence check) with a static Linear template — no LLM analysis in v1. Idempotent via new `qa_gap_issues` table with partial UNIQUE `WHERE resolved_at IS NULL`. (#147)
+- `@urateam/core`: 3 new audit event types — `qa.run_triggered`, `qa.run_completed` (with synthetic flag for timeouts), `qa.gap_issue_filed`. All use `logAuditEventUnchecked` per the BEC-135 v2 Pro-tier audit-gating pattern. (#147)
+- `@urateam/core`: 2 new columns on `release_decisions` (`qaRunId`, `qaRunSha`) + new `qa_gap_issues` table. Migrations sqlite 010+011, postgres 011+012. (#147)
+- `@urateam/cli`: `RELEASE_MANAGER_TRIGGER_QA_*` env vars (workflow path, linearTeamId, timeoutMinutes) wired through `start.ts` with `LINEAR_API_KEY` validation. Documented in `.env.example`. (#147)
+- New `dispatch_pending` result kind in `qa/github.ts` separates GitHub's eventual-consistency window (workflow_dispatch returned 204 but listWorkflowRuns hasn't indexed yet) from real dispatch failures — pending case does not consume the 3-attempt retry budget. (#147)
+
+### Changed
+- `@urateam/core`: `decide()` in `release-manager/decide.ts` accepts an optional 4th `qaState` parameter. Existing callers continue to work unchanged (3-arg form). The qaCheck evaluator slots in at position 4 (between `ciGreenForMinutes` and `requireSlackApproval`) so a QA failure produces a regular `skip` rather than the `awaiting-approval` terminal kind. (#147)
+- `@urateam/core`: `CollectedState` gains a `qaRun: QaRunSnapshot | null` field populated by `collectState()` from the most-recent `release_decisions` row with non-null `qa_run_id`. (#147)
+- `@urateam/core`: scheduler retry counter for `qa_dispatch_error` is now scoped to current `headSha` (was branch-wide) — prevents an old SHA's failure cycle from triggering immediate permanent-block on a new commit. (#147)
+- `@urateam/core`: `qa.run_completed` audit events deduplicate by runId via in-memory Set in scheduler closure. (#147)
+- `@urateam/core`: `markGapResolved` in `qa/gap.ts` is invoked by the scheduler whenever the workflow file is detected — sets `resolvedAt` on any open `qa_gap_issues` row, allowing future gaps for the same `(repo, branch, workflow)` to be re-filed. (#147)
+
+### Fixed
+- `@urateam/core`: `fileGapIssue` `linear_error` return is now handled with a 3-attempt retry counter (per spec §8). After 3 consecutive Linear API failures, the scheduler permanently skips with `reason="qa_gap_file_error"` instead of silently retrying forever. (#147)
+
 ## [0.1.31] - 2026-05-04
 
 ### Added
@@ -119,7 +140,8 @@ When cutting a new version:
 3. Open a PR titled `chore: bump to vX.Y.Z`. After merge, tag the merge commit `vX.Y.Z` and push the tag — the publish workflow takes it from there.
 4. Add a fresh empty `[Unreleased]` block on top.
 
-[Unreleased]: https://github.com/JonB32/urateam/compare/v0.1.31...HEAD
+[Unreleased]: https://github.com/JonB32/urateam/compare/v0.1.32...HEAD
+[0.1.32]: https://github.com/JonB32/urateam/compare/v0.1.31...v0.1.32
 [0.1.31]: https://github.com/JonB32/urateam/compare/v0.1.30...v0.1.31
 [0.1.6]: https://github.com/JonB32/urateam/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/JonB32/urateam/compare/v0.1.4...v0.1.5
