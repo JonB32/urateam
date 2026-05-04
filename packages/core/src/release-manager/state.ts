@@ -146,6 +146,32 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
   const hasFreshApproval = (freshRows?.length ?? 0) > 0;
   const freshApprovalApprover = hasFreshApproval ? freshRows[0].approvedBy : null;
 
+  // 7. BEC-136: most-recent in-flight QA run snapshot.
+  const qaRunRows = await (db as any)
+    .select({
+      qaRunId: releaseDecisions.qaRunId,
+      qaRunSha: releaseDecisions.qaRunSha,
+      decidedAt: releaseDecisions.decidedAt,
+    })
+    .from(releaseDecisions)
+    .where(
+      and(
+        eq(releaseDecisions.repoUrl, repoUrl),
+        eq(releaseDecisions.branch, branch),
+      ),
+    )
+    .orderBy(desc(releaseDecisions.decidedAt))
+    .limit(20);
+  // Take the most recent row that actually has a qa_run_id.
+  const latestQaRow = qaRunRows.find((r: any) => r.qaRunId !== null && r.qaRunId !== undefined);
+  const qaRun = latestQaRow
+    ? {
+        runId: latestQaRow.qaRunId as number,
+        runSha: latestQaRow.qaRunSha as string,
+        triggeredAt: latestQaRow.decidedAt instanceof Date ? latestQaRow.decidedAt : new Date(latestQaRow.decidedAt),
+      }
+    : null;
+
   return {
     lastTag,
     lastTagSha,
@@ -158,6 +184,6 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
     hasFreshApproval,
     freshApprovalApprover,
     manualTagDetected,
-    qaRun: null,
+    qaRun,
   };
 }
