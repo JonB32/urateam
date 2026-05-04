@@ -3,7 +3,7 @@ import { eq, and, desc } from "drizzle-orm";
 import type { AnyDb } from "../db/client.js";
 import { releaseApprovals, releaseDecisions } from "../db/schema.js";
 import { logAuditEvent } from "../audit/writer.js";
-import { releaseApprovedEvent } from "../audit/events.js";
+import { releaseApprovedEvent, releaseSkippedEvent } from "../audit/events.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger({ component: "ReleaseManager:slack-handler" });
@@ -46,6 +46,8 @@ export interface HandleReleaseSubcommandInput {
   slackUserId: string;
   /** Optional hook so the scheduler can be told to pause after /release skip. */
   onSkip?: (reason: string) => void;
+  /** Optional: hours until the next eligible tick after a /release skip. Used in the response text. */
+  pauseDurationHours?: number;
 }
 
 export interface SlackResponse {
@@ -59,7 +61,7 @@ const HELP_TEXT =
 export async function handleReleaseSubcommand(
   input: HandleReleaseSubcommandInput,
 ): Promise<SlackResponse> {
-  const { cmd, db, repoUrl, branch, slackUserId, onSkip } = input;
+  const { cmd, db, repoUrl, branch, slackUserId, onSkip, pauseDurationHours } = input;
 
   switch (cmd.kind) {
     case "approve": {
@@ -106,9 +108,17 @@ export async function handleReleaseSubcommand(
         triggerStateJson: JSON.stringify({ source: "slack", slackUserId }),
         attemptCount: 0,
       });
+      void logAuditEvent(db, releaseSkippedEvent({
+        repoUrl,
+        branch,
+        reason: `manual:${cmd.reason}`,
+      }));
       onSkip?.(cmd.reason);
+      const durationText = pauseDurationHours
+        ? `Will re-evaluate after ${pauseDurationHours}h.`
+        : "Will re-evaluate on next tick.";
       return {
-        text: `:double_vertical_bar: Release skipped: ${cmd.reason}. Will re-evaluate on next tick.`,
+        text: `:double_vertical_bar: Release skipped: ${cmd.reason}. ${durationText}`,
         responseType: "in_channel",
       };
     }

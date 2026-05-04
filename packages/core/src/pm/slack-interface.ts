@@ -644,7 +644,7 @@ export function createSlackInterface(config: SlackInterfaceConfig): {
       }
       const r = await config.releaseHandler({ text: commandText, userId });
       if (responseUrl) {
-        postToResponseUrl(responseUrl, r.text).catch((err) =>
+        postToResponseUrl(responseUrl, r.text, r.responseType).catch((err) =>
           log.error({ err }, "failed to post to Slack response_url"),
         );
       }
@@ -809,11 +809,15 @@ export async function analyzeBulkCreateRequest(
   }
 }
 
-async function postToResponseUrl(responseUrl: string, text: string): Promise<void> {
+async function postToResponseUrl(
+  responseUrl: string,
+  text: string,
+  responseType: "ephemeral" | "in_channel" = "ephemeral",
+): Promise<void> {
   await fetch(responseUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ response_type: "ephemeral", text }),
+    body: JSON.stringify({ response_type: responseType, text }),
   });
 }
 

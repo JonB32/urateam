@@ -348,15 +348,16 @@ export const startCommand = new Command("start")
       if (pmSlack) {
         (pmSlack as any).releaseHandler = async ({ text, userId }: { text: string; userId: string }) => {
           const cmd = parseReleaseSubcommand(text);
+          const pauseDurationHours = rmConfig!.triggers.timeSinceLastHours ?? 24;
           return handleReleaseSubcommand({
             cmd,
             db,
             repoUrl: rmRepoUrl!,
             branch: rmConfig!.branch,
             slackUserId: userId,
+            pauseDurationHours,
             onSkip: (_reason) => {
-              const ttlMs = (rmConfig!.triggers.timeSinceLastHours ?? 24) * 3600 * 1000;
-              rmScheduler!.pauseUntil(new Date(Date.now() + ttlMs));
+              rmScheduler!.pauseUntil(new Date(Date.now() + pauseDurationHours * 3600 * 1000));
             },
           });
         };

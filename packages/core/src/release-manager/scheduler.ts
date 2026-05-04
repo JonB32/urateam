@@ -282,7 +282,15 @@ export function createReleaseManagerScheduler(
     }
 
     if (githubResult.kind === "other_error") {
-      log.error({ err: githubResult.message, repoUrl, branch }, "createTagAndRelease unknown error — not persisting");
+      await persistDecision({
+        id,
+        decision: "skip",
+        reason: "tag_create_error",
+        triggerStateJson,
+        proposedVersion,
+      });
+      void logAuditEvent(db, releaseSkippedEvent({ repoUrl, branch, reason: "tag_create_error" }));
+      log.error({ err: githubResult.message, repoUrl, branch }, "createTagAndRelease unknown error — wrote skip row");
       return;
     }
 
