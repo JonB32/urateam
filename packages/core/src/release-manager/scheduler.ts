@@ -67,6 +67,7 @@ export function createReleaseManagerScheduler(
   let pausedUntilTs: number = 0;
   let cronJob: Cron | null = null;
   let licenseWarnLogged = false;
+  const auditedCompletedRunIds = new Set<number>();
 
   function approvalTtlMs(): number {
     const hours = config.triggers.timeSinceLastHours;
@@ -218,8 +219,9 @@ export function createReleaseManagerScheduler(
       if (state.qaRun && state.qaRun.runSha === state.headSha) {
         try {
           const polled = await pollWorkflowRun({ octokit, owner, repo, runId: state.qaRun.runId });
-          if (polled.kind === "completed") {
+          if (polled.kind === "completed" && !auditedCompletedRunIds.has(state.qaRun.runId)) {
             runConclusion = polled.conclusion;
+            auditedCompletedRunIds.add(state.qaRun.runId);
             // Emit qa.run_completed audit on first observation of completion.
             void logAuditEventUnchecked(
               db,
@@ -230,6 +232,9 @@ export function createReleaseManagerScheduler(
                 durationMs: polled.durationMs,
               }),
             );
+          } else if (polled.kind === "completed") {
+            runConclusion = polled.conclusion;
+            // Already audited this runId on a prior tick; skip emit.
           }
         } catch (err) {
           log.warn({ err }, "qa pollWorkflowRun failed — treating as still running");
@@ -266,6 +271,7 @@ export function createReleaseManagerScheduler(
               eq(releaseDecisions.repoUrl, repoUrl),
               eq(releaseDecisions.branch, branch),
               eq(releaseDecisions.reason, "qa_needs_trigger"),
+              eq(releaseDecisions.qaRunSha, state.headSha),
             ),
           );
         attemptCount = ((prevAttempts?.[0]?.maxAttempts as number) ?? 0);
@@ -285,7 +291,7 @@ export function createReleaseManagerScheduler(
           // Workflow disappeared between state cache and dispatch — drop into gap-issue path.
           finalReason = "qa_no_workflow";
           if (linear) {
-            await fileGapIssue({
+            const gapResult = await fileGapIssue({
               db,
               linear,
               repoUrl,
@@ -293,14 +299,42 @@ export function createReleaseManagerScheduler(
               workflowPath: config.triggers.qaCheck!.workflow,
               linearTeamId: config.triggers.qaCheck!.linearTeamId,
             });
+            if (gapResult.kind === "linear_error") {
+              const prevGapAttempts = await (db as any)
+                .select({ attemptCount: max(releaseDecisions.attemptCount) })
+                .from(releaseDecisions)
+                .where(
+                  and(
+                    eq(releaseDecisions.repoUrl, repoUrl),
+                    eq(releaseDecisions.branch, branch),
+                    eq(releaseDecisions.reason, "qa_no_workflow"),
+                  ),
+                );
+              const gapAttemptCount = ((prevGapAttempts?.[0]?.attemptCount as number) ?? 0) + 1;
+              if (gapAttemptCount >= 3) {
+                finalReason = "qa_gap_file_error";
+                attemptCount = gapAttemptCount;
+              } else {
+                attemptCount = gapAttemptCount;
+              }
+              log.error({ err: gapResult.message, repoUrl, branch }, "fileGapIssue failed; will retry");
+            }
           } else {
             log.error({ repoUrl, branch }, "qaCheck requires Linear client but none configured — skipping gap-issue file");
           }
         } else if (dispatch.kind === "dispatch_422") {
           finalReason = "qa_dispatch_error";
           attemptCount = 99; // permanent skip — workflow misconfigured, retrying won't help
+        } else if (dispatch.kind === "dispatch_pending") {
+          // GitHub eventual-consistency window. Don't count against retry budget; next tick
+          // will re-evaluate and the run should be findable by then.
+          // Tag with qaRunSha so the per-SHA retry counter query can find these rows.
+          qaRunSha = state.headSha;
+          // attemptCount stays as-is; finalReason stays as "qa_needs_trigger" for next tick to retry.
         } else {
-          // dispatch_error — increment attempt counter
+          // dispatch_error — increment attempt counter.
+          // Tag with qaRunSha so the per-SHA retry counter query can find these rows.
+          qaRunSha = state.headSha;
           attemptCount += 1;
           if (attemptCount >= 3) {
             finalReason = "qa_dispatch_error";
@@ -308,7 +342,7 @@ export function createReleaseManagerScheduler(
         }
       } else if (result.qaActionNeeded?.reason === "qa_no_workflow") {
         if (linear) {
-          await fileGapIssue({
+          const gapResult = await fileGapIssue({
             db,
             linear,
             repoUrl,
@@ -316,6 +350,26 @@ export function createReleaseManagerScheduler(
             workflowPath: config.triggers.qaCheck!.workflow,
             linearTeamId: config.triggers.qaCheck!.linearTeamId,
           });
+          if (gapResult.kind === "linear_error") {
+            const prevGapAttempts = await (db as any)
+              .select({ attemptCount: max(releaseDecisions.attemptCount) })
+              .from(releaseDecisions)
+              .where(
+                and(
+                  eq(releaseDecisions.repoUrl, repoUrl),
+                  eq(releaseDecisions.branch, branch),
+                  eq(releaseDecisions.reason, "qa_no_workflow"),
+                ),
+              );
+            const gapAttemptCount = ((prevGapAttempts?.[0]?.attemptCount as number) ?? 0) + 1;
+            if (gapAttemptCount >= 3) {
+              finalReason = "qa_gap_file_error";
+              attemptCount = gapAttemptCount;
+            } else {
+              attemptCount = gapAttemptCount;
+            }
+            log.error({ err: gapResult.message, repoUrl, branch }, "fileGapIssue failed; will retry");
+          }
         } else {
           log.error({ repoUrl, branch }, "qaCheck requires Linear client but none configured — skipping gap-issue file");
         }

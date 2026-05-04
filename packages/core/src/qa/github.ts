@@ -48,7 +48,8 @@ export type TriggerWorkflowResult =
   | { kind: "ok"; runId: number }
   | { kind: "dispatch_404" }
   | { kind: "dispatch_422"; message: string }
-  | { kind: "dispatch_error"; message: string };
+  | { kind: "dispatch_error"; message: string }
+  | { kind: "dispatch_pending"; message: string }; // GitHub eventual-consistency window
 
 /**
  * Trigger a workflow_dispatch and find the resulting run.
@@ -106,8 +107,8 @@ export async function triggerWorkflow(
   }
 
   if (runId === null) {
-    // Eventual-consistency window. Treat as needs-retry so the next tick re-evaluates.
-    return { kind: "dispatch_error", message: "dispatch succeeded but run not found yet" };
+    // Eventual-consistency window. Treat as needs-retry without burning the retry budget.
+    return { kind: "dispatch_pending", message: "dispatch succeeded but run not found yet" };
   }
 
   void logAuditEventUnchecked(
