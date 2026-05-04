@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { decide } from "../release-manager/decide.js";
 import type { CollectedState } from "../release-manager/types.js";
+import type { QaCheckConfig, QaRunSnapshot } from "../qa/types.js";
 
 const NOW = new Date("2026-05-01T12:00:00Z");
 
@@ -17,6 +18,7 @@ function baseState(over: Partial<CollectedState> = {}): CollectedState {
     hasFreshApproval: true,
     freshApprovalApprover: "U123",
     manualTagDetected: false,
+    qaRun: null,
     ...over,
   };
 }
@@ -92,6 +94,62 @@ describe("decide()", () => {
       baseState({ hasFreshApproval: false }),
       { mergedPRsSince: 5, requireSlackApproval: false },
       NOW,
+    );
+    expect(r.kind).toBe("fire");
+  });
+});
+
+describe("decide() qaCheck slot-4 integration", () => {
+  const qaConfig: QaCheckConfig = {
+    workflow: ".github/workflows/smoke.yml",
+    timeoutMinutes: 30,
+    linearTeamId: "team-uuid-123",
+  };
+
+  it("evaluates qaCheck after ciGreenForMinutes — qaCheck failure trumps requireSlackApproval", () => {
+    // mergedPRsSince + ciGreen pass; qaCheck fails (no workflow); requireSlackApproval would also fail
+    // expected: skip with qa_no_workflow (NOT awaiting-approval)
+    const r = decide(
+      baseState({
+        hasFreshApproval: false,
+      }),
+      {
+        mergedPRsSince: 5,
+        ciGreenForMinutes: 30,
+        qaCheck: qaConfig,
+        requireSlackApproval: true,
+      },
+      NOW,
+      { workflowFileExists: false, runConclusion: null },
+    );
+    expect(r.kind).toBe("skip");
+    expect(r.reason).toBe("qa_no_workflow");
+    expect(r.kind === "skip" ? r.qaActionNeeded?.reason : undefined).toBe("qa_no_workflow");
+  });
+
+  it("bubbles qaActionNeeded for qa_needs_trigger when workflow exists but no run for SHA", () => {
+    const r = decide(
+      baseState({}),
+      { mergedPRsSince: 5, qaCheck: qaConfig, requireSlackApproval: false },
+      NOW,
+      { workflowFileExists: true, runConclusion: null },
+    );
+    expect(r.kind).toBe("skip");
+    expect(r.reason).toBe("qa_needs_trigger");
+    expect(r.kind === "skip" ? r.qaActionNeeded?.reason : undefined).toBe("qa_needs_trigger");
+  });
+
+  it("returns fire when qaCheck passes alongside other passing triggers", () => {
+    const qaRun: QaRunSnapshot = {
+      runId: 99999,
+      runSha: "fedcba0",
+      triggeredAt: new Date(NOW.getTime() - 5 * 60 * 1000),
+    };
+    const r = decide(
+      baseState({ qaRun }),
+      { mergedPRsSince: 5, qaCheck: qaConfig, requireSlackApproval: false },
+      NOW,
+      { workflowFileExists: true, runConclusion: "success" },
     );
     expect(r.kind).toBe("fire");
   });

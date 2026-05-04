@@ -218,3 +218,177 @@ describe("createReleaseManagerScheduler — single tick", () => {
     expect(rows[0].reason).toBe("tag_exists");
   });
 });
+
+describe("createReleaseManagerScheduler — qaCheck integration", () => {
+  const paths: string[] = [];
+  let db: any;
+  const repoUrl = "https://github.com/org/repo";
+  const branch = "main";
+  const qaConfig = {
+    enabled: true,
+    triggers: {
+      mergedPRsSince: 1,
+      qaCheck: {
+        workflow: ".github/workflows/smoke.yml",
+        linearTeamId: "team-uuid-123",
+      },
+    },
+  };
+
+  beforeEach(async () => {
+    delete process.env.URATEAM_LICENSE_KEY;
+    _resetLicenseCache();
+    const path = tmpDbPath();
+    paths.push(path);
+    const created = await createDb({ driver: "sqlite", connectionString: path });
+    db = created as any;
+  });
+
+  afterEach(() => {
+    for (const p of paths) {
+      try { unlinkSync(p); } catch {}
+      try { unlinkSync(p + "-wal"); } catch {}
+      try { unlinkSync(p + "-shm"); } catch {}
+    }
+    paths.length = 0;
+    _resetLicenseCache();
+  });
+
+  it("triggers workflow when qaCheck.workflow exists but no run for headSha", async () => {
+    const cfg = ReleaseManagerConfigSchema.parse(qaConfig);
+    const octokit = makeMockOctokit({
+      repos: {
+        getBranch: vi.fn(async () => ({ data: { commit: { sha: "head_sha_x" } } })),
+        listTags: vi.fn(async () => ({ data: [{ name: "v1.0.0", commit: { sha: "old_sha" } }] })),
+        getCommit: vi.fn(async () => ({ data: { commit: { committer: { date: "2026-04-01T12:00:00Z" } } } })),
+        compareCommits: vi.fn(async () => ({ data: { commits: [{ commit: { message: "fix: a" } }] } })),
+        listCommits: vi.fn(async () => ({ data: [] })),
+        getContent: vi.fn(async () => ({ data: { type: "file" } })), // workflow exists
+      },
+      actions: {
+        createWorkflowDispatch: vi.fn(async () => ({ status: 204 })),
+        listWorkflowRuns: vi.fn(async () => ({ data: { workflow_runs: [{ id: 88888, head_sha: "head_sha_x", status: "in_progress", run_started_at: "2026-05-04T12:00:00Z" }] } })),
+      },
+      checks: {
+        listForRef: vi.fn(async () => ({ data: { check_runs: [] } })),
+      },
+    });
+    const linear = { createIssue: vi.fn() };
+    const sched = createReleaseManagerScheduler({
+      config: cfg, db, octokit, linear: linear as any, repoUrl,
+      isLicensed: () => true, slack: undefined,
+    });
+    await sched.tick();
+    expect(octokit.actions.createWorkflowDispatch).toHaveBeenCalled();
+    const rows = await db.select().from(releaseDecisions);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].decision).toBe("skip");
+    expect(rows[0].reason).toBe("qa_needs_trigger");
+    expect(rows[0].qaRunId).toBe(88888);
+    expect(rows[0].qaRunSha).toBe("head_sha_x");
+  });
+
+  it("polls existing in-flight run and writes qa_running skip", async () => {
+    const cfg = ReleaseManagerConfigSchema.parse(qaConfig);
+    // Pre-seed an in-flight QA run row
+    await db.insert(releaseDecisions).values({
+      id: "rd_pre",
+      repoUrl,
+      branch,
+      decidedAt: new Date(Date.now() - 5 * 60 * 1000),
+      decision: "skip",
+      reason: "qa_needs_trigger",
+      triggerStateJson: "{}",
+      attemptCount: 0,
+      qaRunId: 88888,
+      qaRunSha: "head_sha_x",
+    });
+    const octokit = makeMockOctokit({
+      repos: {
+        getBranch: vi.fn(async () => ({ data: { commit: { sha: "head_sha_x" } } })),
+        listTags: vi.fn(async () => ({ data: [{ name: "v1.0.0", commit: { sha: "old_sha" } }] })),
+        getCommit: vi.fn(async () => ({ data: { commit: { committer: { date: "2026-04-01T12:00:00Z" } } } })),
+        compareCommits: vi.fn(async () => ({ data: { commits: [{ commit: { message: "fix: a" } }] } })),
+        listCommits: vi.fn(async () => ({ data: [] })),
+        getContent: vi.fn(async () => ({ data: { type: "file" } })),
+      },
+      actions: {
+        createWorkflowDispatch: vi.fn(),  // should NOT be called
+        getWorkflowRun: vi.fn(async () => ({ data: { id: 88888, status: "in_progress", conclusion: null, run_started_at: "2026-05-04T12:00:00Z" } })),
+      },
+      checks: { listForRef: vi.fn(async () => ({ data: { check_runs: [] } })) },
+    });
+    const sched = createReleaseManagerScheduler({
+      config: cfg, db, octokit, linear: { createIssue: vi.fn() } as any, repoUrl,
+      isLicensed: () => true, slack: undefined,
+    });
+    await sched.tick();
+    expect(octokit.actions.createWorkflowDispatch).not.toHaveBeenCalled();
+    expect(octokit.actions.getWorkflowRun).toHaveBeenCalled();
+    const rows = await db.select().from(releaseDecisions);
+    // Two rows: pre-seed + new tick
+    expect(rows.length).toBe(2);
+    const newRow = rows.find((r: any) => r.id !== "rd_pre");
+    expect(newRow.reason).toBe("qa_running");
+  });
+
+  it("files Linear gap issue when workflow file is missing", async () => {
+    const cfg = ReleaseManagerConfigSchema.parse(qaConfig);
+    const octokit = makeMockOctokit({
+      repos: {
+        getBranch: vi.fn(async () => ({ data: { commit: { sha: "head_sha_x" } } })),
+        listTags: vi.fn(async () => ({ data: [{ name: "v1.0.0", commit: { sha: "old_sha" } }] })),
+        getCommit: vi.fn(async () => ({ data: { commit: { committer: { date: "2026-04-01T12:00:00Z" } } } })),
+        compareCommits: vi.fn(async () => ({ data: { commits: [{ commit: { message: "fix: a" } }] } })),
+        listCommits: vi.fn(async () => ({ data: [] })),
+        getContent: vi.fn(async () => {
+          const e: any = new Error("Not Found"); e.status = 404; throw e;
+        }),
+      },
+      checks: { listForRef: vi.fn(async () => ({ data: { check_runs: [] } })) },
+    });
+    const linear = {
+      createIssue: vi.fn(async () => ({ issue: Promise.resolve({ identifier: "BEC-150" }) })),
+    };
+    const sched = createReleaseManagerScheduler({
+      config: cfg, db, octokit, linear: linear as any, repoUrl,
+      isLicensed: () => true, slack: undefined,
+    });
+    await sched.tick();
+    expect(linear.createIssue).toHaveBeenCalledTimes(1);
+    const rows = await db.select().from(releaseDecisions);
+    expect(rows[0].reason).toBe("qa_no_workflow");
+  });
+
+  it("retry counter: 3 consecutive dispatch failures → permanent skip with qa_dispatch_error", async () => {
+    const cfg = ReleaseManagerConfigSchema.parse(qaConfig);
+    const octokit = makeMockOctokit({
+      repos: {
+        getBranch: vi.fn(async () => ({ data: { commit: { sha: "head_sha_x" } } })),
+        listTags: vi.fn(async () => ({ data: [{ name: "v1.0.0", commit: { sha: "old_sha" } }] })),
+        getCommit: vi.fn(async () => ({ data: { commit: { committer: { date: "2026-04-01T12:00:00Z" } } } })),
+        compareCommits: vi.fn(async () => ({ data: { commits: [{ commit: { message: "fix: a" } }] } })),
+        listCommits: vi.fn(async () => ({ data: [] })),
+        getContent: vi.fn(async () => ({ data: { type: "file" } })),
+      },
+      actions: {
+        createWorkflowDispatch: vi.fn(async () => {
+          const e: any = new Error("Server Error"); e.status = 502; throw e;
+        }),
+        listWorkflowRuns: vi.fn(async () => ({ data: { workflow_runs: [] } })),
+      },
+      checks: { listForRef: vi.fn(async () => ({ data: { check_runs: [] } })) },
+    });
+    const sched = createReleaseManagerScheduler({
+      config: cfg, db, octokit, linear: { createIssue: vi.fn() } as any, repoUrl,
+      isLicensed: () => true, slack: undefined,
+    });
+    await sched.tick();
+    await sched.tick();
+    await sched.tick();
+    const rows = await db.select().from(releaseDecisions).orderBy(releaseDecisions.decidedAt);
+    expect(rows.length).toBe(3);
+    expect(rows[2].reason).toBe("qa_dispatch_error");
+    expect(rows[2].decision).toBe("skip");
+  });
+});

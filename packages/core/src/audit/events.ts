@@ -417,3 +417,67 @@ export function slackPostFailedEvent(args: {
     payload: { channel: args.channel, reason: args.reason },
   });
 }
+
+export function qaRunTriggeredEvent(args: {
+  repoUrl: string;
+  branch: string;
+  workflow: string;
+  runId: number;
+  sha: string;
+}): AuditEvent {
+  return base({
+    eventType: "qa.run_triggered",
+    actor: "release-manager",
+    actorType: "release-manager",
+    scope: `repo:${args.repoUrl}`,
+    payload: {
+      branch: args.branch,
+      workflow: args.workflow,
+      runId: args.runId,
+      sha: args.sha,
+    },
+  });
+}
+
+export function qaRunCompletedEvent(args: {
+  repoUrl: string;
+  branch: string;
+  runId: number;
+  conclusion: "success" | "failure" | "cancelled" | "timed_out" | "action_required" | "skipped" | "stale" | "neutral";
+  durationMs: number;
+  /** Set to true when we synthesize a timeout (GitHub didn't conclude the run). */
+  synthetic?: boolean;
+}): AuditEvent {
+  return base({
+    eventType: "qa.run_completed",
+    actor: "release-manager",
+    actorType: "release-manager",
+    scope: `repo:${args.repoUrl}`,
+    payload: {
+      branch: args.branch,
+      runId: args.runId,
+      conclusion: args.conclusion,
+      durationMs: args.durationMs,
+      synthetic: args.synthetic ?? false,
+    },
+  });
+}
+
+export function qaGapIssueFiledEvent(args: {
+  repoUrl: string;
+  branch: string;
+  workflowPath: string;
+  linearIssueId: string;
+}): AuditEvent {
+  return base({
+    eventType: "qa.gap_issue_filed",
+    actor: "release-manager",
+    actorType: "release-manager",
+    scope: `repo:${args.repoUrl}`,
+    payload: {
+      branch: args.branch,
+      workflowPath: args.workflowPath,
+      linearIssueId: args.linearIssueId,
+    },
+  });
+}

@@ -430,6 +430,7 @@ export const AuditEventTypeSchema = z.enum([
   "release.fired", "release.skipped", "release.approved",
   "release.tag_conflict", "release.partial",
   "slack.post_failed",
+  "qa.run_triggered", "qa.run_completed", "qa.gap_issue_filed",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 

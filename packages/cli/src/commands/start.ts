@@ -177,7 +177,7 @@ export const startCommand = new Command("start")
         process.exit(1);
       }
 
-      const triggers: Record<string, number | boolean> = {};
+      const triggers: Record<string, unknown> = {};
       if (process.env.RELEASE_MANAGER_TRIGGER_MERGED_PRS_SINCE) {
         triggers.mergedPRsSince = parseInt(process.env.RELEASE_MANAGER_TRIGGER_MERGED_PRS_SINCE, 10);
       }
@@ -189,6 +189,32 @@ export const startCommand = new Command("start")
       }
       if (process.env.RELEASE_MANAGER_TRIGGER_REQUIRE_SLACK_APPROVAL === "true") {
         triggers.requireSlackApproval = true;
+      }
+
+      if (process.env.RELEASE_MANAGER_TRIGGER_QA_WORKFLOW) {
+        const qaWorkflow = process.env.RELEASE_MANAGER_TRIGGER_QA_WORKFLOW;
+        const qaTeamId = process.env.RELEASE_MANAGER_TRIGGER_QA_LINEAR_TEAM_ID;
+        const qaTimeoutMin = process.env.RELEASE_MANAGER_TRIGGER_QA_TIMEOUT_MINUTES;
+
+        if (!qaTeamId) {
+          console.error(
+            "RELEASE_MANAGER_TRIGGER_QA_WORKFLOW set but RELEASE_MANAGER_TRIGGER_QA_LINEAR_TEAM_ID is missing. " +
+            "Configure linearTeamId for filing gap issues.",
+          );
+          process.exit(1);
+        }
+        if (!process.env.LINEAR_API_KEY) {
+          console.error(
+            "qaCheck requires LINEAR_API_KEY (used to file gap issues). Set it and restart.",
+          );
+          process.exit(1);
+        }
+
+        triggers.qaCheck = {
+          workflow: qaWorkflow,
+          linearTeamId: qaTeamId,
+          ...(qaTimeoutMin ? { timeoutMinutes: parseInt(qaTimeoutMin, 10) } : {}),
+        };
       }
 
       try {
@@ -327,12 +353,20 @@ export const startCommand = new Command("start")
       const { createGitHubClient, createReleaseManagerScheduler, isFeatureLicensed,
         handleReleaseSubcommand, parseReleaseSubcommand } = await import("@urateam/core");
       const rmOctokit = await createGitHubClient(github);
+
+      let linearClient: import("@linear/sdk").LinearClient | undefined;
+      if (rmConfig.triggers.qaCheck) {
+        const { LinearClient } = await import("@linear/sdk");
+        linearClient = new LinearClient({ apiKey: process.env.LINEAR_API_KEY! });
+      }
+
       rmScheduler = createReleaseManagerScheduler({
         config: rmConfig,
         db,
         octokit: rmOctokit,
         repoUrl: rmRepoUrl,
         isLicensed: () => isFeatureLicensed("release-manager"),
+        linear: linearClient,
         slack: process.env.SLACK_BOT_TOKEN
           ? {
               postMessage: async (channel, text) => {

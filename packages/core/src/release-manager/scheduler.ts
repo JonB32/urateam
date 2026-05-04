@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { eq, isNull, and, desc } from "drizzle-orm";
+import { eq, isNull, and, desc, max } from "drizzle-orm";
 import type { Octokit } from "@octokit/rest";
+import type { LinearClient } from "@linear/sdk";
 import { Cron } from "croner";
 import type { AnyDb } from "../db/client.js";
 import { releaseApprovals, releaseDecisions } from "../db/schema.js";
@@ -12,12 +13,15 @@ import {
   releaseTagConflictEvent,
   releasePartialEvent,
   slackPostFailedEvent,
+  qaRunCompletedEvent,
 } from "../audit/events.js";
 import { collectState } from "./state.js";
 import { decide } from "./decide.js";
 import { bumpFromConfigAndCommits } from "./versioning.js";
 import { createTagAndRelease, parseRepoFromUrl } from "./github.js";
 import type { ReleaseManagerConfig } from "./types.js";
+import { triggerWorkflow, pollWorkflowRun, workflowFileExists } from "../qa/github.js";
+import { fileGapIssue, markGapResolved } from "../qa/gap.js";
 
 const log = createLogger({ component: "ReleaseManager:scheduler" });
 
@@ -29,6 +33,8 @@ export interface ReleaseManagerSchedulerInput {
   config: ReleaseManagerConfig;
   db: AnyDb;
   octokit: Octokit;
+  /** BEC-136: Linear client for filing QA gap issues. Required when qaCheck is configured. */
+  linear?: LinearClient;
   repoUrl: string;
   /** Injectable license check — production passes `() => isFeatureLicensed("release-manager")`. */
   isLicensed: () => boolean;
@@ -51,7 +57,7 @@ const SLACK_DEDUP_WINDOW_MS = 24 * 3600 * 1000;
 export function createReleaseManagerScheduler(
   input: ReleaseManagerSchedulerInput,
 ): ReleaseManagerScheduler {
-  const { config, db, octokit, repoUrl, isLicensed, slack } = input;
+  const { config, db, octokit, linear, repoUrl, isLicensed, slack } = input;
   const branch = config.branch;
   const slackChannel = config.slackChannel;
 
@@ -61,6 +67,7 @@ export function createReleaseManagerScheduler(
   let pausedUntilTs: number = 0;
   let cronJob: Cron | null = null;
   let licenseWarnLogged = false;
+  const auditedCompletedRunIds = new Set<number>();
 
   function approvalTtlMs(): number {
     const hours = config.triggers.timeSinceLastHours;
@@ -96,6 +103,8 @@ export function createReleaseManagerScheduler(
     firedTag?: string;
     firedSha?: string;
     attemptCount?: number;
+    qaRunId?: number;
+    qaRunSha?: string;
   }): Promise<void> {
     await (db as any).insert(releaseDecisions).values({
       id: row.id,
@@ -109,6 +118,8 @@ export function createReleaseManagerScheduler(
       firedTag: row.firedTag,
       firedSha: row.firedSha,
       attemptCount: row.attemptCount ?? 0,
+      qaRunId: row.qaRunId,
+      qaRunSha: row.qaRunSha,
     });
   }
 
@@ -179,8 +190,61 @@ export function createReleaseManagerScheduler(
       return;
     }
 
-    // 2. Decision.
-    const result = decide(state, config.triggers);
+    // 2. BEC-136: Compute QA state when qaCheck is configured.
+    let qaState: { workflowFileExists: boolean; runConclusion: string | null } | undefined;
+    if (config.triggers.qaCheck) {
+      const { owner, repo } = parseRepoFromUrl(repoUrl);
+      let wfExists = false;
+      try {
+        wfExists = await workflowFileExists({
+          octokit, owner, repo,
+          path: config.triggers.qaCheck.workflow,
+          ref: state.headSha,
+        });
+      } catch (err) {
+        log.warn({ err }, "qa workflowFileExists check failed — treating as exists");
+        wfExists = true; // fail-open so retries hit the dispatch path
+      }
+      if (wfExists) {
+        // BEC-136: workflow file is present; if there was an open gap issue for this
+        // (repo, branch, workflow), mark it resolved so a future gap can be re-filed.
+        await markGapResolved({
+          db,
+          repoUrl,
+          branch,
+          workflowPath: config.triggers.qaCheck.workflow,
+        });
+      }
+      let runConclusion: string | null = null;
+      if (state.qaRun && state.qaRun.runSha === state.headSha) {
+        try {
+          const polled = await pollWorkflowRun({ octokit, owner, repo, runId: state.qaRun.runId });
+          if (polled.kind === "completed" && !auditedCompletedRunIds.has(state.qaRun.runId)) {
+            runConclusion = polled.conclusion;
+            auditedCompletedRunIds.add(state.qaRun.runId);
+            // Emit qa.run_completed audit on first observation of completion.
+            void logAuditEventUnchecked(
+              db,
+              qaRunCompletedEvent({
+                repoUrl, branch,
+                runId: state.qaRun.runId,
+                conclusion: polled.conclusion as any,
+                durationMs: polled.durationMs,
+              }),
+            );
+          } else if (polled.kind === "completed") {
+            runConclusion = polled.conclusion;
+            // Already audited this runId on a prior tick; skip emit.
+          }
+        } catch (err) {
+          log.warn({ err }, "qa pollWorkflowRun failed — treating as still running");
+        }
+      }
+      qaState = { workflowFileExists: wfExists, runConclusion };
+    }
+
+    // 3. Decision.
+    const result = decide(state, config.triggers, undefined, qaState);
     const proposedVersion = bumpFromConfigAndCommits(
       state.lastTag,
       state.commitsSinceLastTag,
@@ -189,18 +253,158 @@ export function createReleaseManagerScheduler(
 
     if (result.kind === "skip") {
       const id = `rd_${randomUUID()}`;
+
+      // Compute attempt count for retry handling on qa_dispatch_error path.
+      let attemptCount = 0;
+      let qaRunId: number | undefined;
+      let qaRunSha: string | undefined;
+      let finalReason = result.reason;
+
+      if (result.qaActionNeeded?.reason === "qa_needs_trigger") {
+        // Look up the highest attempt count across all qa_needs_trigger rows for this branch.
+        // Using MAX instead of ORDER BY + LIMIT 1 to be stable when multiple rows share the same decidedAt.
+        const prevAttempts = await (db as any)
+          .select({ maxAttempts: max(releaseDecisions.attemptCount) })
+          .from(releaseDecisions)
+          .where(
+            and(
+              eq(releaseDecisions.repoUrl, repoUrl),
+              eq(releaseDecisions.branch, branch),
+              eq(releaseDecisions.reason, "qa_needs_trigger"),
+              eq(releaseDecisions.qaRunSha, state.headSha),
+            ),
+          );
+        attemptCount = ((prevAttempts?.[0]?.maxAttempts as number) ?? 0);
+
+        const { owner, repo } = parseRepoFromUrl(repoUrl);
+        const dispatch = await triggerWorkflow({
+          octokit, db, owner, repo, repoUrl, branch,
+          workflow: config.triggers.qaCheck!.workflow,
+          ref: state.headSha,
+          inputs: config.triggers.qaCheck!.workflowInputs,
+        });
+        if (dispatch.kind === "ok") {
+          attemptCount = 0; // reset on successful dispatch
+          qaRunId = dispatch.runId;
+          qaRunSha = state.headSha;
+        } else if (dispatch.kind === "dispatch_404") {
+          // Workflow disappeared between state cache and dispatch — drop into gap-issue path.
+          finalReason = "qa_no_workflow";
+          if (linear) {
+            const gapResult = await fileGapIssue({
+              db,
+              linear,
+              repoUrl,
+              branch,
+              workflowPath: config.triggers.qaCheck!.workflow,
+              linearTeamId: config.triggers.qaCheck!.linearTeamId,
+            });
+            if (gapResult.kind === "linear_error") {
+              const prevGapAttempts = await (db as any)
+                .select({ attemptCount: max(releaseDecisions.attemptCount) })
+                .from(releaseDecisions)
+                .where(
+                  and(
+                    eq(releaseDecisions.repoUrl, repoUrl),
+                    eq(releaseDecisions.branch, branch),
+                    eq(releaseDecisions.reason, "qa_no_workflow"),
+                  ),
+                );
+              const gapAttemptCount = ((prevGapAttempts?.[0]?.attemptCount as number) ?? 0) + 1;
+              if (gapAttemptCount >= 3) {
+                finalReason = "qa_gap_file_error";
+                attemptCount = gapAttemptCount;
+              } else {
+                attemptCount = gapAttemptCount;
+              }
+              log.error({ err: gapResult.message, repoUrl, branch }, "fileGapIssue failed; will retry");
+            }
+          } else {
+            log.error({ repoUrl, branch }, "qaCheck requires Linear client but none configured — skipping gap-issue file");
+          }
+        } else if (dispatch.kind === "dispatch_422") {
+          finalReason = "qa_dispatch_error";
+          attemptCount = 99; // permanent skip — workflow misconfigured, retrying won't help
+        } else if (dispatch.kind === "dispatch_pending") {
+          // GitHub eventual-consistency window. Don't count against retry budget; next tick
+          // will re-evaluate and the run should be findable by then.
+          // Tag with qaRunSha so the per-SHA retry counter query can find these rows.
+          qaRunSha = state.headSha;
+          // attemptCount stays as-is; finalReason stays as "qa_needs_trigger" for next tick to retry.
+        } else {
+          // dispatch_error — increment attempt counter.
+          // Tag with qaRunSha so the per-SHA retry counter query can find these rows.
+          qaRunSha = state.headSha;
+          attemptCount += 1;
+          if (attemptCount >= 3) {
+            finalReason = "qa_dispatch_error";
+          }
+        }
+      } else if (result.qaActionNeeded?.reason === "qa_no_workflow") {
+        if (linear) {
+          const gapResult = await fileGapIssue({
+            db,
+            linear,
+            repoUrl,
+            branch,
+            workflowPath: config.triggers.qaCheck!.workflow,
+            linearTeamId: config.triggers.qaCheck!.linearTeamId,
+          });
+          if (gapResult.kind === "linear_error") {
+            const prevGapAttempts = await (db as any)
+              .select({ attemptCount: max(releaseDecisions.attemptCount) })
+              .from(releaseDecisions)
+              .where(
+                and(
+                  eq(releaseDecisions.repoUrl, repoUrl),
+                  eq(releaseDecisions.branch, branch),
+                  eq(releaseDecisions.reason, "qa_no_workflow"),
+                ),
+              );
+            const gapAttemptCount = ((prevGapAttempts?.[0]?.attemptCount as number) ?? 0) + 1;
+            if (gapAttemptCount >= 3) {
+              finalReason = "qa_gap_file_error";
+              attemptCount = gapAttemptCount;
+            } else {
+              attemptCount = gapAttemptCount;
+            }
+            log.error({ err: gapResult.message, repoUrl, branch }, "fileGapIssue failed; will retry");
+          }
+        } else {
+          log.error({ repoUrl, branch }, "qaCheck requires Linear client but none configured — skipping gap-issue file");
+        }
+      }
+
+      if (result.qaActionNeeded?.reason === "qa_timed_out" && !result.qaActionNeeded.pass && state.qaRun) {
+        const elapsedMs = Date.now() - state.qaRun.triggeredAt.getTime();
+        void logAuditEventUnchecked(
+          db,
+          qaRunCompletedEvent({
+            repoUrl,
+            branch,
+            runId: result.qaActionNeeded.runId,
+            conclusion: "timed_out",
+            durationMs: elapsedMs,
+            synthetic: true,
+          }),
+        );
+      }
+
       await persistDecision({
         id,
         decision: "skip",
-        reason: result.reason,
+        reason: finalReason,
         triggerStateJson,
         proposedVersion,
+        qaRunId,
+        qaRunSha,
+        attemptCount,
       });
-      void logAuditEventUnchecked(db, releaseSkippedEvent({ repoUrl, branch, reason: result.reason }));
+      void logAuditEventUnchecked(db, releaseSkippedEvent({ repoUrl, branch, reason: finalReason }));
       // Slack notification with dedup
       await maybePostSlack(
-        `:double_vertical_bar: Release skipped for *${repoUrl}* (${branch}): ${result.reason}`,
-        result.reason,
+        `:double_vertical_bar: Release skipped for *${repoUrl}* (${branch}): ${finalReason}`,
+        finalReason,
       );
       return;
     }
