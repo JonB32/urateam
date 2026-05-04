@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq, and, desc } from "drizzle-orm";
 import type { AnyDb } from "../db/client.js";
 import { releaseApprovals, releaseDecisions } from "../db/schema.js";
-import { logAuditEvent } from "../audit/writer.js";
+import { logAuditEventUnchecked } from "../audit/writer.js";
 import { releaseApprovedEvent, releaseSkippedEvent } from "../audit/events.js";
 import { createLogger } from "../logger.js";
 
@@ -74,7 +74,7 @@ export async function handleReleaseSubcommand(
           approvedAt: new Date(),
           approvedBy: slackUserId,
         });
-        void logAuditEvent(db, releaseApprovedEvent({ repoUrl, branch, approvedBy: slackUserId }));
+        void logAuditEventUnchecked(db, releaseApprovedEvent({ repoUrl, branch, approvedBy: slackUserId }));
         return {
           text: `:white_check_mark: Approved by <@${slackUserId}>. Next eligible tick will fire if other rules pass.`,
           responseType: "in_channel",
@@ -108,7 +108,7 @@ export async function handleReleaseSubcommand(
         triggerStateJson: JSON.stringify({ source: "slack", slackUserId }),
         attemptCount: 0,
       });
-      void logAuditEvent(db, releaseSkippedEvent({
+      void logAuditEventUnchecked(db, releaseSkippedEvent({
         repoUrl,
         branch,
         reason: `manual:${cmd.reason}`,

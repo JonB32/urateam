@@ -5,7 +5,7 @@ import { Cron } from "croner";
 import type { AnyDb } from "../db/client.js";
 import { releaseApprovals, releaseDecisions } from "../db/schema.js";
 import { createLogger } from "../logger.js";
-import { logAuditEvent } from "../audit/writer.js";
+import { logAuditEventUnchecked } from "../audit/writer.js";
 import {
   releaseFiredEvent,
   releaseSkippedEvent,
@@ -46,7 +46,6 @@ export interface ReleaseManagerScheduler {
   pauseUntil(ts: Date): void;
 }
 
-const MAX_RETRY_ATTEMPTS = 3;
 const SLACK_DEDUP_WINDOW_MS = 24 * 3600 * 1000;
 
 export function createReleaseManagerScheduler(
@@ -81,7 +80,7 @@ export function createReleaseManagerScheduler(
     }
     const ok = await slack.postMessage(slackChannel, text).catch(() => false);
     if (!ok) {
-      void logAuditEvent(db, slackPostFailedEvent({ channel: slackChannel, reason: "post_returned_false" }));
+      void logAuditEventUnchecked(db, slackPostFailedEvent({ channel: slackChannel, reason: "post_returned_false" }));
       return;
     }
     lastSlackPostAt = now;
@@ -175,7 +174,7 @@ export function createReleaseManagerScheduler(
         reason: "manual_tag_detected",
         triggerStateJson,
       });
-      void logAuditEvent(db, releaseSkippedEvent({ repoUrl, branch, reason: "manual_tag_detected" }));
+      void logAuditEventUnchecked(db, releaseSkippedEvent({ repoUrl, branch, reason: "manual_tag_detected" }));
       log.info({ repoUrl, branch }, "manual tag detected — re-baselining");
       return;
     }
@@ -197,7 +196,7 @@ export function createReleaseManagerScheduler(
         triggerStateJson,
         proposedVersion,
       });
-      void logAuditEvent(db, releaseSkippedEvent({ repoUrl, branch, reason: result.reason }));
+      void logAuditEventUnchecked(db, releaseSkippedEvent({ repoUrl, branch, reason: result.reason }));
       // Slack notification with dedup
       await maybePostSlack(
         `:double_vertical_bar: Release skipped for *${repoUrl}* (${branch}): ${result.reason}`,
@@ -215,7 +214,7 @@ export function createReleaseManagerScheduler(
         triggerStateJson,
         proposedVersion,
       });
-      void logAuditEvent(db, releaseSkippedEvent({ repoUrl, branch, reason: "awaiting-approval" }));
+      void logAuditEventUnchecked(db, releaseSkippedEvent({ repoUrl, branch, reason: "awaiting-approval" }));
       // Always post on first transition to awaiting-approval (bypass dedup).
       // Reset lastSlackSkipReason so a subsequent regular-skip will re-post.
       lastSlackSkipReason = null;
@@ -243,41 +242,35 @@ export function createReleaseManagerScheduler(
         triggerStateJson,
         proposedVersion,
       });
-      void logAuditEvent(db, releaseTagConflictEvent({ repoUrl, branch, tag: proposedVersion }));
+      void logAuditEventUnchecked(db, releaseTagConflictEvent({ repoUrl, branch, tag: proposedVersion }));
       return;
     }
 
     if (githubResult.kind === "release_create_failed") {
-      // Tag was created; release-creation failed. Increment attempt and write fire-pending.
-      const prevAttempt = await (db as any)
-        .select({ attemptCount: releaseDecisions.attemptCount })
-        .from(releaseDecisions)
-        .where(
-          and(
-            eq(releaseDecisions.repoUrl, repoUrl),
-            eq(releaseDecisions.branch, branch),
-            eq(releaseDecisions.decision, "fire-pending"),
-            eq(releaseDecisions.firedTag, proposedVersion),
-          ),
-        )
-        .limit(1);
-      const nextAttempt = ((prevAttempt?.[0]?.attemptCount as number) ?? 0) + 1;
-      const decision = nextAttempt >= MAX_RETRY_ATTEMPTS ? "skip" : "fire-pending";
-      const reason = decision === "skip" ? "release_create_failed_after_retries" : "release_create_failed_retrying";
+      // Tag was created; release-creation failed. Write a single skip row with the
+      // partial-fire details so an operator can see what happened and clean up the
+      // orphaned tag manually. v1 does NOT retry release-creation across ticks
+      // (the tag is now committed, so the next tick would hit `tag_exists` and
+      // skip again — see plan §"Known v1 simplifications"). Proper retry is a v2
+      // feature requiring a tick-start sweep that calls only `createRelease` for
+      // matching fire-pending rows.
       await persistDecision({
         id,
-        decision,
-        reason,
+        decision: "skip",
+        reason: "release_create_failed",
         triggerStateJson,
         proposedVersion,
         firedTag: proposedVersion,
         firedSha: state.headSha,
-        attemptCount: nextAttempt,
       });
-      if (decision === "skip") {
-        void logAuditEvent(db, releasePartialEvent({ repoUrl, branch, tag: proposedVersion, attemptCount: nextAttempt }));
-      }
-      log.error({ repoUrl, branch, tag: proposedVersion, attempt: nextAttempt, msg: githubResult.message }, "release create failed");
+      void logAuditEventUnchecked(
+        db,
+        releasePartialEvent({ repoUrl, branch, tag: proposedVersion, attemptCount: 1 }),
+      );
+      log.error(
+        { repoUrl, branch, tag: proposedVersion, msg: githubResult.message },
+        "release create failed — tag exists in GitHub but release page not created; manual cleanup required",
+      );
       return;
     }
 
@@ -289,7 +282,7 @@ export function createReleaseManagerScheduler(
         triggerStateJson,
         proposedVersion,
       });
-      void logAuditEvent(db, releaseSkippedEvent({ repoUrl, branch, reason: "tag_create_error" }));
+      void logAuditEventUnchecked(db, releaseSkippedEvent({ repoUrl, branch, reason: "tag_create_error" }));
       log.error({ err: githubResult.message, repoUrl, branch }, "createTagAndRelease unknown error — wrote skip row");
       return;
     }
@@ -307,7 +300,7 @@ export function createReleaseManagerScheduler(
     if (state.hasFreshApproval) {
       await consumeApprovalRow(id);
     }
-    void logAuditEvent(
+    void logAuditEventUnchecked(
       db,
       releaseFiredEvent({
         repoUrl,

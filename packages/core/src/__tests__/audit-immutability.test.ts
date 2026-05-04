@@ -49,11 +49,24 @@ describe("audit_events immutability", () => {
     ).toEqual([]);
   });
 
-  it("logAuditEventUnchecked is only called from license.ts", () => {
+  it("logAuditEventUnchecked is only called from license.ts or Pro-tier feature modules", () => {
     const repoRoot = path.resolve(__dirname, "../../../..");
+    // logAuditEventUnchecked is allowed in:
+    //   1. The writer itself (definition)
+    //   2. license.ts (license-validation failure path)
+    //   3. Pro-tier feature modules (PM agent, Release Manager) — their audit events
+    //      must appear in the audit table whenever the Pro feature is licensed,
+    //      independent of the Enterprise audit-log dashboard being unlocked.
+    //   4. This test file
     const allowed = [
       "packages/core/src/audit/writer.ts",
       "packages/core/src/license.ts",
+      "packages/core/src/pm/scheduler.ts",
+      "packages/core/src/pm/actions/triage.ts",
+      "packages/core/src/pm/actions/promote.ts",
+      "packages/core/src/pm/actions/resolve-approvals.ts",
+      "packages/core/src/release-manager/scheduler.ts",
+      "packages/core/src/release-manager/slack-handler.ts",
       "packages/core/src/__tests__/audit-immutability.test.ts",
     ];
 

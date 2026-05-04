@@ -22,7 +22,7 @@ import { sanitize } from "../executor/prompt/sanitizer.js";
 import { resolveWorkflowStates } from "./linear-helpers.js";
 import { sql } from "drizzle-orm";
 import { createLogger } from "../logger.js";
-import { logAuditEvent, budgetRefusedEvent, pruneAuditLog } from "../audit/index.js";
+import { logAuditEventUnchecked, budgetRefusedEvent, pruneAuditLog } from "../audit/index.js";
 import { pruneExpiredSessions } from "../auth/index.js";
 import { recomputeCostRollups } from "../cost/index.js";
 
@@ -175,7 +175,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                 : s.scope.kind === "team"
                   ? `team:${s.scope.teamId}`
                   : `repo:${s.scope.repoUrl}`;
-            void logAuditEvent(
+            void logAuditEventUnchecked(
               db,
               budgetRefusedEvent({
                 scope: scopeKey,
@@ -195,7 +195,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           tick.budgetGuard.reason = `maxInFlight reached (${evaluation.activeCount}/${config.maxInFlight})`;
           // Emit a budget.run_refused event so operators can trace "why didn't
           // this run start?" when capacity (not token spend) is the blocker.
-          void logAuditEvent(
+          void logAuditEventUnchecked(
             db,
             budgetRefusedEvent({
               scope: "global",
