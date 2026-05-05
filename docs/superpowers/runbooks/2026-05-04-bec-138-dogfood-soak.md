@@ -9,7 +9,7 @@
 - [ ] Enterprise JWT for `dogfood@urateams.com` minted; valid ≥1 year; copied to `.env.dogfood`
 - [ ] GitHub `urateam-dogfood-bot` account (or fine-grained PAT) has `repo` + `workflow` on `JonB32/urateam`
 - [ ] Linear API key under dogfood-bot account; copied to `.env.dogfood`
-- [ ] OpenRouter + Anthropic keys present in `.env.dogfood`
+- [ ] `OPENROUTER_API_KEY` present in `.env.dogfood`. `ANTHROPIC_API_KEY` is optional (see "One-time: authenticate Claude Code OAuth" below — default is OAuth via the bundled `claude` CLI)
 - [ ] PR with Dockerfile + compose + ci.yml workflow_dispatch is merged to `main`
 
 ## Deploy
@@ -29,6 +29,25 @@ Boot success indicators in the log:
 - Dashboard listening on `:3001`
 
 If any are missing, fix the env file, then `docker compose -f docker-compose.dogfood.yml up -d --force-recreate`.
+
+## One-time: authenticate Claude Code OAuth
+
+Required when `ANTHROPIC_API_KEY` is unset (the default). The dogfood image installs `@anthropic-ai/claude-code`; OAuth tokens persist in the `urateam-dogfood-claude` named volume across restarts.
+
+```bash
+docker compose -f docker-compose.dogfood.yml exec -it urateam-dogfood claude login
+```
+
+Follow the OAuth flow (URL → browser → paste returned token). After login, verify:
+
+```bash
+docker compose -f docker-compose.dogfood.yml exec urateam-dogfood claude auth status
+```
+Expected: `Authenticated as <your account>`. If this fails, the executor's `auth-check` will reject runs with `"Claude auth credentials are invalid or expired"` and no agent work will happen.
+
+**Subscription quota note:** every dogfood agent run (PM, review, RM, QA) counts against your Claude Max/Team quota. If quota saturates mid-soak, set `ANTHROPIC_API_KEY` in `.env.dogfood`, recreate the container, and the SDK will switch to billed API.
+
+**Volume preservation warning:** `docker compose down` preserves the named volume `urateam-dogfood-claude` (intentional — keeps OAuth credentials across restarts). `docker compose down --volumes` (or `-v`) deletes it, which silently wipes the OAuth tokens. If auth suddenly breaks after a teardown, re-run `claude login`.
 
 ## Verify boot (run these from your laptop after deploy)
 

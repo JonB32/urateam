@@ -6,12 +6,14 @@ services:
         URATEAM_CORE_VERSION: 0.1.18
         URATEAM_CLI_VERSION: 0.1.20
         URATEAM_DASHBOARD_VERSION: 0.1.18
+        CLAUDE_CODE_VERSION: 2.1.128
     container_name: urateam-dogfood
     restart: unless-stopped
     env_file: .env.dogfood
     volumes:
       - urateam-dogfood-data:/home/ura/data
       - urateam-dogfood-work:/home/ura/work
+      - urateam-dogfood-claude:/home/ura/.claude
     ports:
       # localhost-only — remote access via SSH tunnel during soak
       - "127.0.0.1:3001:3001"
@@ -19,3 +21,4 @@ services:
 volumes:
   urateam-dogfood-data:
   urateam-dogfood-work:
+  urateam-dogfood-claude:
