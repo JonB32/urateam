@@ -16,14 +16,19 @@ ARG URATEAM_DASHBOARD_VERSION=0.1.18
 RUN npm install -g \
       @urateam/cli@${URATEAM_CLI_VERSION} \
       @urateam/core@${URATEAM_CORE_VERSION} \
-      @urateam/dashboard@${URATEAM_DASHBOARD_VERSION}
+      @urateam/dashboard@${URATEAM_DASHBOARD_VERSION} \
+      @anthropic-ai/claude-code
 
 # Non-root runtime user
 RUN addgroup -S ura && adduser -S -G ura ura
 USER ura
 WORKDIR /home/ura
 
-VOLUME ["/home/ura/data", "/home/ura/work"]
+# /home/ura/.claude holds Claude Code OAuth credentials (credentials.json) so
+# the executor's auth-check can pass without ANTHROPIC_API_KEY. Mounted as a
+# named volume in compose so credentials persist across container restarts;
+# `docker compose exec urateam-dogfood claude login` is the one-time setup step.
+VOLUME ["/home/ura/data", "/home/ura/work", "/home/ura/.claude"]
 EXPOSE 3001
 
 ENTRYPOINT ["/sbin/tini", "--"]

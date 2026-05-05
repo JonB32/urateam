@@ -30,6 +30,23 @@ Boot success indicators in the log:
 
 If any are missing, fix the env file, then `docker compose -f docker-compose.dogfood.yml up -d --force-recreate`.
 
+## One-time: authenticate Claude Code OAuth
+
+Required when `ANTHROPIC_API_KEY` is unset (the default). The dogfood image installs `@anthropic-ai/claude-code`; OAuth tokens persist in the `urateam-dogfood-claude` named volume across restarts.
+
+```bash
+docker compose -f docker-compose.dogfood.yml exec -it urateam-dogfood claude login
+```
+
+Follow the OAuth flow (URL → browser → paste returned token). After login, verify:
+
+```bash
+docker compose -f docker-compose.dogfood.yml exec urateam-dogfood claude auth status
+```
+Expected: `Authenticated as <your account>`. If this fails, the executor's `auth-check` will reject runs with `"Claude auth credentials are invalid or expired"` and no agent work will happen.
+
+**Subscription quota note:** every dogfood agent run (PM, review, RM, QA) counts against your Claude Max/Team quota. If quota saturates mid-soak, set `ANTHROPIC_API_KEY` in `.env.dogfood`, recreate the container, and the SDK will switch to billed API.
+
 ## Verify boot (run these from your laptop after deploy)
 
 ```bash
