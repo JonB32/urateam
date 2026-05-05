@@ -5,12 +5,25 @@
 
 ## Pre-flight (do before starting the container)
 
-- [ ] Slack channel `#urateam-dogfood` exists; Slack app installed; bot token captured
-- [ ] Enterprise JWT for `dogfood@urateams.com` minted; valid ≥1 year; copied to `.env.dogfood`
-- [ ] GitHub `urateam-dogfood-bot` account (or fine-grained PAT) has `repo` + `workflow` on `JonB32/urateam`
-- [ ] Linear API key under dogfood-bot account; copied to `.env.dogfood`
+Captures + values needed in `.env.dogfood`:
+
+- [ ] Slack channel `#urateam-dogfood` exists; Slack app installed; **bot token** AND **channel ID** captured (channel ID is `C…`, found in Slack channel "About" panel — NOT the same as the channel name)
+- [ ] Enterprise license JWT for `dogfood@urateams.com` minted via `worker/scripts/issue-license.ts` in the urateam-licensing repo; valid ≥1 year; pasted into `URATEAM_LICENSE_KEY` (note: the var is `_KEY`, not `_JWT`)
+- [ ] Fine-grained GitHub PAT scoped to `JonB32/urateam` (Contents r/w, Pull requests r/w, Workflows r/w, Issues r/w) — used for `gh auth login --with-token` after boot
+- [ ] Linear API key under dogfood-bot account; pasted into `LINEAR_API_KEY`
+- [ ] Linear webhook secret (any random string for dogfood; production would set up a real webhook): `LINEAR_WEBHOOK_SECRET` — generate with `openssl rand -base64 32`
+- [ ] Dashboard password: `DASHBOARD_PASSWORD` — generate with `openssl rand -base64 32`
 - [ ] `OPENROUTER_API_KEY` present in `.env.dogfood`. `ANTHROPIC_API_KEY` is optional (see "One-time: authenticate Claude Code OAuth" below — default is OAuth via the bundled `claude` CLI)
-- [ ] PR with Dockerfile + compose + ci.yml workflow_dispatch is merged to `main`
+- [ ] PR with Dockerfile + compose + env example + soak runbook is merged to `main`
+
+Pre-filled in `.env.dogfood.example` (no action needed unless you want to override):
+
+- `LINEAR_TEAM_ID`, `REPO_TEAM_ID` = `3a6010b3-7a06-4c35-921c-d39080c1629d` (Beckerspace)
+- `REPO_URL` = `https://github.com/JonB32/urateam`
+- `PM_AGENT_ENABLED=true`, `PM_AGENT_TEAM_IDS` = same team UUID
+- `RELEASE_MANAGER_ENABLED=true` + conservative trigger config + QA gate against `.github/workflows/ci.yml`
+- `AGENT_BYPASS_PERMISSIONS=true` (required for non-root container)
+- `REVIEW_MODELS` pre-set to claude-3.5-sonnet + gpt-4o + gemini-2.5-pro for OpenRouter fanout
 
 ## Deploy
 
@@ -47,7 +60,19 @@ Expected: `Authenticated as <your account>`. If this fails, the executor's `auth
 
 **Subscription quota note:** every dogfood agent run (PM, review, RM, QA) counts against your Claude Max/Team quota. If quota saturates mid-soak, set `ANTHROPIC_API_KEY` in `.env.dogfood`, recreate the container, and the SDK will switch to billed API.
 
-**Volume preservation warning:** `docker compose down` preserves the named volume `urateam-dogfood-claude` (intentional — keeps OAuth credentials across restarts). `docker compose down --volumes` (or `-v`) deletes it, which silently wipes the OAuth tokens. If auth suddenly breaks after a teardown, re-run `claude login`.
+**Volume preservation warning:** `docker compose down` preserves the named volume `urateam-dogfood-claude` (intentional — keeps OAuth credentials across restarts). `docker compose down --volumes` (or `-v`) deletes it, which silently wipes the OAuth tokens. If auth suddenly breaks after a teardown, re-run `claude login`. The same applies to `urateam-dogfood-config` (gh CLI auth).
+
+## One-time: authenticate gh CLI
+
+Required because the env example uses the `gh auth login --with-token` path rather than GitHub App credentials. The Dockerfile installs `github-cli`; gh's auth persists in `/home/ura/.config` (the `urateam-dogfood-config` named volume) across restarts.
+
+On the host, with the captured fine-grained PAT in your shell as `$GH_PAT`:
+
+```bash
+echo "$GH_PAT" | docker compose -f docker-compose.dogfood.yml exec -T urateam-dogfood gh auth login --with-token
+docker compose -f docker-compose.dogfood.yml exec urateam-dogfood gh auth status
+```
+Expected: `Logged in to github.com as <you> (oauth_token)` — confirms gh can authenticate.
 
 ## Verify boot (run these from your laptop after deploy)
 

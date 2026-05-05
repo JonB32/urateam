@@ -14,6 +14,7 @@ services:
       - urateam-dogfood-data:/home/ura/data
       - urateam-dogfood-work:/home/ura/work
       - urateam-dogfood-claude:/home/ura/.claude
+      - urateam-dogfood-config:/home/ura/.config
     ports:
       # localhost-only — remote access via SSH tunnel during soak
       - "127.0.0.1:3001:3001"
@@ -22,3 +23,4 @@ volumes:
   urateam-dogfood-data:
   urateam-dogfood-work:
   urateam-dogfood-claude:
+  urateam-dogfood-config:
