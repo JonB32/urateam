@@ -13,11 +13,12 @@ RUN apk add --no-cache git openssh-client tini python3 make g++
 ARG URATEAM_CORE_VERSION=0.1.18
 ARG URATEAM_CLI_VERSION=0.1.20
 ARG URATEAM_DASHBOARD_VERSION=0.1.18
+ARG CLAUDE_CODE_VERSION=2.1.128
 RUN npm install -g \
       @urateam/cli@${URATEAM_CLI_VERSION} \
       @urateam/core@${URATEAM_CORE_VERSION} \
       @urateam/dashboard@${URATEAM_DASHBOARD_VERSION} \
-      @anthropic-ai/claude-code
+      @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 # Non-root runtime user
 RUN addgroup -S ura && adduser -S -G ura ura
