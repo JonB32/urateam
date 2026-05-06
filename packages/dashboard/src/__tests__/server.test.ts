@@ -555,6 +555,16 @@ describe("createDashboard — Enterprise tier + basic auth (BEC-156)", () => {
     expect(res.status).toBe(200);
   });
 
+  it("serves the config page (admin-only RBAC gate) with valid basic-auth credentials", async () => {
+    // /config requires `config.view` which is admin-only. This test verifies
+    // the synthetic role MUST be `admin` — a future regression that downgrades
+    // it to `viewer` would silently fail this gate.
+    const res = await app.request("/config", {
+      headers: { Authorization: basicAuthHeader("admin", "secret") },
+    });
+    expect(res.status).toBe(200);
+  });
+
   it("still rejects unauthenticated requests with 401", async () => {
     const res = await app.request("/");
     expect(res.status).toBe(401);
