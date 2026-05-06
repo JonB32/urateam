@@ -35,6 +35,7 @@ function baseConfig(overrides: Partial<PmAgentConfig> = {}): PmAgentConfig {
     stuckIssueRecovery: true,
     stuckIssueTargetState: "Backlog",
     stuckIssueMaxPerTick: 5,
+    requirePipelineLabelForPromote: false,
     ...overrides,
   };
 }

@@ -48,6 +48,7 @@ describe("BEC-62 reproduction — scheduler ignores isPmPaused()", () => {
         stuckIssueRecovery: true,
         stuckIssueTargetState: "Todo",
         stuckIssueMaxPerTick: 5,
+        requirePipelineLabelForPromote: false,
       },
       db: {} as any,
       linearApiKey: "",

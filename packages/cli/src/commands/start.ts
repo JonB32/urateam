@@ -152,6 +152,11 @@ export const startCommand = new Command("start")
         dailyTokenBudget: parseInt(dailyBudgetStr, 10),
         slackChannelId,
         teamIds,
+        // BEC-150: opt-in label-match filter for the promote step. Default false
+        // for back-compat; set true to prevent unactionable Backlog items from
+        // being promoted to Todo.
+        requirePipelineLabelForPromote:
+          process.env.PM_AGENT_REQUIRE_PIPELINE_LABEL_FOR_PROMOTE === "true",
       });
     }
 

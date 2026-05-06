@@ -409,6 +409,8 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                 checkConflict,
                 stateMap,
                 db,
+                requirePipelineLabel: config.requirePipelineLabelForPromote,
+                pipelineConfigs: deps.pipelineConfigs,
               });
             }
           } catch (err) {

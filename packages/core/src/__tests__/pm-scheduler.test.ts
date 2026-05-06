@@ -69,6 +69,7 @@ describe("PmScheduler.tick", () => {
         stuckIssueRecovery: true,
         stuckIssueTargetState: "Todo",
         stuckIssueMaxPerTick: 5,
+        requirePipelineLabelForPromote: false,
       },
       db: {} as any, // Not used when actions are injected
       linearApiKey: "",

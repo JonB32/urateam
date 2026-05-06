@@ -2,11 +2,27 @@ import { describe, it, expect, vi } from "vitest";
 import { promoteReadyIssues } from "../pm/actions/promote.js";
 
 function mockLinearClient(issues: any[]) {
+  // Linear SDK returns labels as an async connection: `await issue.labels()` → { nodes }.
+  // Existing fixtures use `labels: { nodes: [...] }` as a plain object; wrap as a function
+  // so promote.ts can use the same `await issue.labels()` pattern as start-todo.ts.
+  for (const i of issues) {
+    if (i.labels && typeof i.labels !== "function") {
+      const fixture = i.labels;
+      i.labels = vi.fn().mockResolvedValue(fixture);
+    }
+  }
   return {
     issues: vi.fn().mockResolvedValue({ nodes: issues }),
     updateIssue: vi.fn().mockResolvedValue({}),
     createComment: vi.fn().mockResolvedValue({}),
   };
+}
+
+// Test helper: resolvePipeline only checks `configs[label]` for truthiness, so the
+// shape doesn't matter for these tests. Cast as `any` to avoid duplicating the
+// full PipelineConfig schema in test fixtures.
+function pipelineConfig(label: string): any {
+  return { label, stages: [], maxTurns: 25 };
 }
 
 const defaultStateMap = new Map([["team-1:Todo", "state-todo"]]);
@@ -91,5 +107,201 @@ describe("promoteReadyIssues", () => {
 
     const promoted = results.filter((r) => r.promoted);
     expect(promoted).toHaveLength(2);
+  });
+
+  describe("requirePipelineLabel option (BEC-150)", () => {
+    it("promotes when issue has a pipeline-matching label", async () => {
+      const issues = [
+        {
+          id: "i1", identifier: "BEC-100", title: "Tech debt", description: "small",
+          priority: 2, labels: { nodes: [{ name: "quick-fix" }] },
+          team: { id: "team-1" }, url: "https://linear.app/BEC-100",
+        },
+      ];
+      const client = mockLinearClient(issues);
+      const conflictChecker = vi.fn().mockResolvedValue({ overlapRisk: "none", likelyFiles: [], reasoning: "" });
+
+      const results = await promoteReadyIssues({
+        linearClient: client as any,
+        teamIds: ["team-1"],
+        slotsAvailable: 1,
+        checkConflict: conflictChecker,
+        stateMap: defaultStateMap,
+        requirePipelineLabel: true,
+        pipelineConfigs: { "quick-fix": pipelineConfig("quick-fix") },
+      });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].promoted).toBe(true);
+      expect(client.updateIssue).toHaveBeenCalled();
+    });
+
+    it("skips promote when requirePipelineLabel=true and no label matches a configured pipeline", async () => {
+      const issues = [
+        {
+          id: "i1", identifier: "BEC-200", title: "Strategy doc", description: "planning",
+          priority: 2, labels: { nodes: [{ name: "marketing" }] },
+          team: { id: "team-1" }, url: "https://linear.app/BEC-200",
+        },
+      ];
+      const client = mockLinearClient(issues);
+      const conflictChecker = vi.fn().mockResolvedValue({ overlapRisk: "none", likelyFiles: [], reasoning: "" });
+
+      const results = await promoteReadyIssues({
+        linearClient: client as any,
+        teamIds: ["team-1"],
+        slotsAvailable: 1,
+        checkConflict: conflictChecker,
+        stateMap: defaultStateMap,
+        requirePipelineLabel: true,
+        pipelineConfigs: { "quick-fix": pipelineConfig("quick-fix"), "auto-implement": pipelineConfig("auto-implement") },
+      });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].promoted).toBe(false);
+      expect(results[0].reason).toContain("no pipeline-matching label");
+      expect(client.updateIssue).not.toHaveBeenCalled();
+    });
+
+    it("skips promote when requirePipelineLabel=true and issue has no labels at all", async () => {
+      const issues = [
+        {
+          id: "i1", identifier: "BEC-300", title: "Unlabeled", description: "",
+          priority: 2, labels: { nodes: [] },
+          team: { id: "team-1" }, url: "https://linear.app/BEC-300",
+        },
+      ];
+      const client = mockLinearClient(issues);
+      const conflictChecker = vi.fn().mockResolvedValue({ overlapRisk: "none", likelyFiles: [], reasoning: "" });
+
+      const results = await promoteReadyIssues({
+        linearClient: client as any,
+        teamIds: ["team-1"],
+        slotsAvailable: 1,
+        checkConflict: conflictChecker,
+        stateMap: defaultStateMap,
+        requirePipelineLabel: true,
+        pipelineConfigs: { "quick-fix": pipelineConfig("quick-fix") },
+      });
+
+      expect(results[0].promoted).toBe(false);
+      expect(client.updateIssue).not.toHaveBeenCalled();
+    });
+
+    it("preserves existing behavior (promotes regardless of label) when requirePipelineLabel is false / unset", async () => {
+      const issues = [
+        {
+          id: "i1", identifier: "BEC-400", title: "Unlabeled", description: "",
+          priority: 2, labels: { nodes: [] },
+          team: { id: "team-1" }, url: "https://linear.app/BEC-400",
+        },
+      ];
+      const client = mockLinearClient(issues);
+      const conflictChecker = vi.fn().mockResolvedValue({ overlapRisk: "none", likelyFiles: [], reasoning: "" });
+
+      const results = await promoteReadyIssues({
+        linearClient: client as any,
+        teamIds: ["team-1"],
+        slotsAvailable: 1,
+        checkConflict: conflictChecker,
+        stateMap: defaultStateMap,
+        // requirePipelineLabel omitted (default false)
+        // pipelineConfigs also omitted
+      });
+
+      expect(results[0].promoted).toBe(true);
+      expect(client.updateIssue).toHaveBeenCalled();
+    });
+
+    it("requirePipelineLabel=true without pipelineConfigs throws clear error (misconfiguration)", async () => {
+      const issues = [
+        {
+          id: "i1", identifier: "BEC-500", title: "x", description: "",
+          priority: 2, labels: { nodes: [{ name: "quick-fix" }] },
+          team: { id: "team-1" }, url: "https://linear.app/BEC-500",
+        },
+      ];
+      const client = mockLinearClient(issues);
+      const conflictChecker = vi.fn().mockResolvedValue({ overlapRisk: "none", likelyFiles: [], reasoning: "" });
+
+      await expect(
+        promoteReadyIssues({
+          linearClient: client as any,
+          teamIds: ["team-1"],
+          slotsAvailable: 1,
+          checkConflict: conflictChecker,
+          stateMap: defaultStateMap,
+          requirePipelineLabel: true,
+          // pipelineConfigs intentionally missing
+        }),
+      ).rejects.toThrow(/pipelineConfigs/);
+    });
+
+    it("checks label match BEFORE conflict-detection (saves Claude tokens)", async () => {
+      const issues = [
+        {
+          id: "i1", identifier: "BEC-600", title: "Unlabeled", description: "",
+          priority: 2, labels: { nodes: [] },
+          team: { id: "team-1" }, url: "https://linear.app/BEC-600",
+        },
+      ];
+      const client = mockLinearClient(issues);
+      const conflictChecker = vi.fn().mockResolvedValue({ overlapRisk: "none", likelyFiles: [], reasoning: "" });
+
+      await promoteReadyIssues({
+        linearClient: client as any,
+        teamIds: ["team-1"],
+        slotsAvailable: 1,
+        checkConflict: conflictChecker,
+        stateMap: defaultStateMap,
+        requirePipelineLabel: true,
+        pipelineConfigs: { "quick-fix": pipelineConfig("quick-fix") },
+      });
+
+      expect(conflictChecker).not.toHaveBeenCalled();
+    });
+
+    it("promotes matching candidates while skipping unmatched ones in a mixed list", async () => {
+      const issues = [
+        {
+          id: "i1", identifier: "BEC-700", title: "skip me 1", description: "",
+          priority: 1, labels: { nodes: [{ name: "marketing" }] },
+          team: { id: "team-1" }, url: "https://linear.app/BEC-700",
+        },
+        {
+          id: "i2", identifier: "BEC-701", title: "promote me", description: "",
+          priority: 1, labels: { nodes: [{ name: "quick-fix" }] },
+          team: { id: "team-1" }, url: "https://linear.app/BEC-701",
+        },
+        {
+          id: "i3", identifier: "BEC-702", title: "skip me 2", description: "",
+          priority: 1, labels: { nodes: [] },
+          team: { id: "team-1" }, url: "https://linear.app/BEC-702",
+        },
+      ];
+      const client = mockLinearClient(issues);
+      const conflictChecker = vi.fn().mockResolvedValue({ overlapRisk: "none", likelyFiles: [], reasoning: "" });
+
+      const results = await promoteReadyIssues({
+        linearClient: client as any,
+        teamIds: ["team-1"],
+        slotsAvailable: 5,
+        checkConflict: conflictChecker,
+        stateMap: defaultStateMap,
+        requirePipelineLabel: true,
+        pipelineConfigs: { "quick-fix": pipelineConfig("quick-fix") },
+      });
+
+      expect(results).toHaveLength(3);
+      const promoted = results.filter((r) => r.promoted);
+      expect(promoted).toHaveLength(1);
+      expect(promoted[0].issueId).toBe("BEC-701");
+      // The two unmatched candidates produce skip-results; updateIssue should
+      // only have fired for the matched one.
+      expect(client.updateIssue).toHaveBeenCalledTimes(1);
+      expect(client.updateIssue).toHaveBeenCalledWith("i2", expect.objectContaining({ stateId: "state-todo" }));
+      // Conflict check only runs on the promoted candidate, not on the skipped ones.
+      expect(conflictChecker).toHaveBeenCalledTimes(1);
+    });
   });
 });

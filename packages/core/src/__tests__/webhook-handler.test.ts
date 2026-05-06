@@ -357,6 +357,7 @@ describe("webhook handler — 100% budget gate", () => {
     stuckIssueRecovery: true,
     stuckIssueTargetState: "Backlog" as const,
     stuckIssueMaxPerTick: 5,
+    requirePipelineLabelForPromote: false,
   };
 
   it("refuses to start a pipeline when the configured scope is at 100%", async () => {

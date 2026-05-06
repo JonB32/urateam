@@ -14,6 +14,12 @@ export const PmAgentConfigSchema = z.object({
   stuckIssueTargetState: z.enum(["Backlog", "Todo"]).default("Backlog"),
   /** Max number of stuck issues to recover per PM Agent tick (rate limiter). */
   stuckIssueMaxPerTick: z.number().int().min(1).default(5),
+  /**
+   * BEC-150: when true, the `promote` step only promotes Backlog issues whose
+   * labels resolve to a configured pipeline. Default false for back-compat;
+   * set via PM_AGENT_REQUIRE_PIPELINE_LABEL_FOR_PROMOTE=true.
+   */
+  requirePipelineLabelForPromote: z.boolean().default(false),
   budgets: z
     .object({
       /** Default daily token budget for any team or repo not explicitly listed. Falls back to top-level dailyTokenBudget if omitted. */
