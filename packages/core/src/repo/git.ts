@@ -471,18 +471,6 @@ export function choosePushStrategy(
 }
 
 /**
- * Check for uncommitted changes and auto-commit them if found.
- * Returns true if a commit was made, false if the worktree was clean.
- *
- * This is a safety net for when the agent doesn't commit its work
- * (hits maxTurns, maxTokens, or a permission error). Without this,
- * the push queue's rebase fails and the work is lost.
- *
- * @param expectedBranch - When provided, the function verifies that the
- *   worktree HEAD is on this branch before committing.  A mismatch throws
- *   immediately to prevent cross-branch contamination (BEC-99).
- */
-/**
  * BEC-157: paths that auto-commit must NEVER include in the agent's commit.
  * These are agent scratchpad / runner-state artifacts that the agent's
  * pipeline produces locally but should not ship to the target repo.
@@ -490,21 +478,52 @@ export function choosePushStrategy(
  * Each entry is a predicate against a worktree-relative path. Anchor patterns
  * to root (no leading `/`) so a legitimate `src/utils/verify-input.ts` is not
  * filtered.
+ *
+ * Trade-off: a legitimate root-level `verify-prod-config.mjs` style script
+ * would be silently filtered. Operators with such files must rename them
+ * (e.g., `check-prod-config.mjs`) or place them under a subdirectory.
  */
 const SCRATCHPAD_PATTERNS: ReadonlyArray<(path: string) => boolean> = [
   // Claude Code session state (runner-specific paths leak in here)
   (p) => p === ".claude" || p.startsWith(".claude/"),
   // Root-level BEC-NNN-*.md docs (agent self-documentation; not repo content)
   (p) => /^BEC-\d+-.*\.md$/.test(p),
-  // Root-level verify-*.{mjs,ts,js} scripts (agent self-validation; redundant
-  // with vitest)
+  // Root-level verify-*.{mjs,ts,js,cjs} scripts (agent self-validation;
+  // redundant with vitest). See trade-off note in docblock above.
   (p) => /^verify-.*\.(mjs|ts|js|cjs)$/.test(p),
-  // Root-level *-VERIFICATION.md
-  (p) => /^[A-Z][A-Z0-9_-]*-VERIFICATION\.md$/.test(p),
+  // Root-level BEC-NNN-*-VERIFICATION.md (parallel with BEC-NNN-*.md above —
+  // tightened from `[A-Z][A-Z0-9_-]*-VERIFICATION.md` so legitimate operator
+  // docs like `SECURITY-VERIFICATION.md` aren't filtered)
+  (p) => /^BEC-\d+-.*-VERIFICATION\.md$/.test(p),
 ];
 
 export function isScratchpadPath(path: string): boolean {
   return SCRATCHPAD_PATTERNS.some((p) => p(path));
+}
+
+/**
+ * BEC-157: identify scratchpad paths that are ALREADY tracked in HEAD.
+ * Returns the subset of `paths` that `git ls-files` reports as tracked.
+ *
+ * Why: the auto-commit filter unstages scratchpad paths via `git rm --cached`.
+ * For a NEWLY-created scratchpad file, this is a clean unstage — no record in
+ * HEAD, no harm done. But for a TRACKED file that the agent modified (e.g.,
+ * the operator previously committed `.claude/settings.json` before the filter
+ * existed), `git rm --cached` records a permanent deletion in the new commit
+ * and the file is removed from the repo. That's silent data loss at rollout
+ * time on any repo that committed scratchpad pre-filter.
+ *
+ * This function lets the caller detect the dangerous case and warn / abort.
+ */
+async function findTrackedPaths(
+  worktreePath: string,
+  paths: string[],
+): Promise<string[]> {
+  if (paths.length === 0) return [];
+  // `git ls-files -- <paths>` lists only those of the given paths that are
+  // tracked. Untracked paths produce no output (they're not errors).
+  const out = await gitExecSafe(["ls-files", "--", ...paths], worktreePath);
+  return out.split("\n").map((s) => s.trim()).filter(Boolean);
 }
 
 /**
@@ -529,6 +548,18 @@ function parseStatusPaths(status: string): string[] {
   return paths;
 }
 
+/**
+ * Check for uncommitted changes and auto-commit them if found.
+ * Returns true if a commit was made, false if the worktree was clean.
+ *
+ * This is a safety net for when the agent doesn't commit its work
+ * (hits maxTurns, maxTokens, or a permission error). Without this,
+ * the push queue's rebase fails and the work is lost.
+ *
+ * @param expectedBranch - When provided, the function verifies that the
+ *   worktree HEAD is on this branch before committing. A mismatch throws
+ *   immediately to prevent cross-branch contamination (BEC-99).
+ */
 export async function autoCommitChanges(
   worktreePath: string,
   issueId: string,
@@ -551,14 +582,30 @@ export async function autoCommitChanges(
   const realPaths = allPaths.filter((p) => !isScratchpadPath(p));
   const filteredPaths = allPaths.filter((p) => isScratchpadPath(p));
 
+  // BEC-157 safety net: if any filtered path is ALREADY TRACKED in HEAD
+  // (operator committed it pre-filter, e.g., before this PR shipped),
+  // unstaging via `git rm --cached` would record a permanent deletion in the
+  // new commit and remove the file from the repo. Detect and skip the unstage
+  // for those entries — leaving them staged as legit modifications/additions.
+  // Worst case: a tracked scratchpad file gets a normal modify-commit. Better
+  // than silent data loss.
+  const trackedScratchpad = await findTrackedPaths(worktreePath, filteredPaths);
+  const safeToUnstage = filteredPaths.filter((p) => !trackedScratchpad.includes(p));
+
   if (filteredPaths.length > 0) {
     getLog().info(
-      { issueId, filtered: filteredPaths },
+      { issueId, filtered: filteredPaths, trackedScratchpad },
       "auto-commit filtered scratchpad paths (BEC-157)",
     );
   }
+  if (trackedScratchpad.length > 0) {
+    getLog().warn(
+      { issueId, trackedScratchpad },
+      "auto-commit: scratchpad paths are tracked in HEAD; preserving as committed changes (operator should remove these from the repo manually if unwanted)",
+    );
+  }
 
-  if (realPaths.length === 0) {
+  if (realPaths.length === 0 && trackedScratchpad.length === 0) {
     getLog().warn(
       { issueId, worktreePath, allFiltered: allPaths },
       "auto-commit: no real changes after scratchpad filter (skipping commit)",
@@ -569,27 +616,24 @@ export async function autoCommitChanges(
   getLog().warn({ issueId, worktreePath }, "auto-committing uncommitted changes (agent did not commit)");
   // BEC-157 staging strategy: `git add -A` to correctly handle all status
   // types (modifications, additions, deletions of tracked files, renames),
-  // then `git rm --cached` any scratchpad paths that just got staged. Using
-  // `git add -- <paths>` with an explicit path list looks cleaner but doesn't
-  // stage deletions of tracked files (regression caught by the existing
-  // "handles deleted files" integration test).
+  // then `git rm --cached` any scratchpad paths that just got staged AND
+  // weren't already tracked in HEAD. Using `git add -- <paths>` with an
+  // explicit path list looks cleaner but doesn't stage deletions of tracked
+  // files (regression caught by the existing "handles deleted files"
+  // integration test).
   await gitExecSafe(["add", "-A"], worktreePath);
-  if (filteredPaths.length > 0) {
+  if (safeToUnstage.length > 0) {
     // Unstage scratchpad files. `git rm --cached -- <paths>` removes index
     // entries while leaving the worktree files alone. `--ignore-unmatch`
     // tolerates files that weren't tracked yet (untracked scratchpad new
     // files: they were `git add -A`-staged as new index entries, and
-    // `git rm --cached` removes them; for tracked scratchpad files that
-    // somehow exist, this removes them from the index but the next commit
-    // would recreate them as deletions — handled by the loop being
-    // tolerant). For our use-case (agent's freshly-created scratchpad),
-    // every filtered path is a new file added by the agent; rm --cached
-    // simply unstages.
+    // `git rm --cached` removes them).
+    //
     // `-r` is required when filteredPaths includes a directory entry (e.g.,
     // `.claude/` from `git status --porcelain` for a new untracked dir).
     // `--ignore-unmatch` tolerates entries that aren't in the index.
     await gitExecSafe(
-      ["rm", "-r", "--cached", "--ignore-unmatch", "--", ...filteredPaths],
+      ["rm", "-r", "--cached", "--ignore-unmatch", "--", ...safeToUnstage],
       worktreePath,
     );
   }

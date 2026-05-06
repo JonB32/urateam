@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { autoCommitChanges } from "../repo/git.js";
+import { autoCommitChanges, isScratchpadPath } from "../repo/git.js";
 
 /**
  * BEC-157: pipeline auto-commit must filter agent scratchpad files (e.g.,
@@ -127,5 +127,91 @@ describe("autoCommitChanges scratchpad filter (BEC-157)", () => {
 
     // No real files to commit → returns false (just like an empty status)
     expect(result).toBe(false);
+  });
+
+  // BEC-157 safety net (Sonnet review Important #1): if a scratchpad file is
+  // ALREADY tracked in HEAD (operator committed it pre-filter), unstaging via
+  // `git rm --cached` would record a permanent deletion. Skip the unstage for
+  // tracked entries — preserve the file as a normal commit.
+  it("preserves tracked scratchpad files instead of silently deleting them", async () => {
+    // Operator previously (pre-filter) committed .claude/settings.json
+    mkdirSync(join(repo, ".claude"), { recursive: true });
+    writeFileSync(join(repo, ".claude", "settings.json"), "old\n");
+    git(["add", "."], repo);
+    git(["commit", "-m", "operator committed scratchpad pre-filter"], repo);
+
+    // Now agent modifies it AND adds a real file
+    writeFileSync(join(repo, ".claude", "settings.json"), "new\n");
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "real.ts"), "real\n");
+
+    const result = await autoCommitChanges(repo, "BEC-999");
+
+    expect(result).toBe(true);
+    const files = listFilesInLastCommit(repo);
+    expect(files).toContain("src/real.ts");
+    // The tracked .claude/settings.json should still appear as committed
+    // (with new content) — NOT deleted from the repo.
+    expect(files).toContain(".claude/settings.json");
+    // Verify the file is not staged for deletion in HEAD~1..HEAD
+    const headContent = git(["show", "HEAD:.claude/settings.json"], repo);
+    expect(headContent).toBe("new\n");
+  });
+});
+
+describe("isScratchpadPath unit tests (BEC-157)", () => {
+  // Direct unit tests for the predicate, decoupled from git plumbing.
+  // Covers boundary cases that the integration tests don't reach.
+
+  it("matches .claude/ directory and contents", () => {
+    expect(isScratchpadPath(".claude")).toBe(true);
+    expect(isScratchpadPath(".claude/")).toBe(true);
+    expect(isScratchpadPath(".claude/settings.json")).toBe(true);
+    expect(isScratchpadPath(".claude/nested/deep.json")).toBe(true);
+  });
+
+  it("does NOT match .claude when nested under a directory", () => {
+    // Root-anchored: a subproject's .claude dir isn't pipeline scratchpad
+    expect(isScratchpadPath("frontend/.claude/x")).toBe(false);
+    expect(isScratchpadPath("packages/core/.claude/y")).toBe(false);
+  });
+
+  it("matches root-level BEC-NNN-*.md scratchpad", () => {
+    expect(isScratchpadPath("BEC-149-INDEX.md")).toBe(true);
+    expect(isScratchpadPath("BEC-1-x.md")).toBe(true);
+    expect(isScratchpadPath("BEC-9999-foo.md")).toBe(true);
+  });
+
+  it("does NOT match BEC-*.md without numeric ID or non-root path", () => {
+    expect(isScratchpadPath("BEC-foo.md")).toBe(false); // no numeric prefix
+    expect(isScratchpadPath("docs/BEC-149-INDEX.md")).toBe(false); // not at root
+    expect(isScratchpadPath("CHANGELOG.md")).toBe(false);
+  });
+
+  it("matches root-level verify-*.{mjs,ts,js,cjs} but not without extension", () => {
+    expect(isScratchpadPath("verify-fix.mjs")).toBe(true);
+    expect(isScratchpadPath("verify-x.ts")).toBe(true);
+    expect(isScratchpadPath("verify-y.js")).toBe(true);
+    expect(isScratchpadPath("verify-z.cjs")).toBe(true);
+    expect(isScratchpadPath("verify.mjs")).toBe(false); // no dash
+    expect(isScratchpadPath("verifyutils.mjs")).toBe(false); // no dash
+    expect(isScratchpadPath("src/utils/verify-input.ts")).toBe(false); // not at root
+  });
+
+  it("matches root-level BEC-NNN-*-VERIFICATION.md but NOT generic *-VERIFICATION.md", () => {
+    expect(isScratchpadPath("BEC-149-MIGRATION-VERIFICATION.md")).toBe(true);
+    expect(isScratchpadPath("BEC-200-VERIFICATION.md")).toBe(true);
+    // Pattern tightened (was overbroad in initial PR; would have filtered these):
+    expect(isScratchpadPath("SECURITY-VERIFICATION.md")).toBe(false);
+    expect(isScratchpadPath("API-VERIFICATION.md")).toBe(false);
+  });
+
+  it("does NOT match legitimate root-level files", () => {
+    expect(isScratchpadPath("CHANGELOG.md")).toBe(false);
+    expect(isScratchpadPath("CONTRIBUTING.md")).toBe(false);
+    expect(isScratchpadPath("README.md")).toBe(false);
+    expect(isScratchpadPath("LICENSE")).toBe(false);
+    expect(isScratchpadPath("package.json")).toBe(false);
+    expect(isScratchpadPath("turbo.json")).toBe(false);
   });
 });
