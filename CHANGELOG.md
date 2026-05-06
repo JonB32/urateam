@@ -8,12 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions below refer to the workspace version published to npm. Per-package
 notes call out when a change affects only a single package.
 
+## [0.1.33] — 2026-05-05
+
+Bumps:
+- `@urateam/core`: 0.1.18 → 0.1.19
+- `@urateam/cli`: 0.1.20 → 0.1.21
+- `@urateam/dashboard`: 0.1.18 → 0.1.19
+- `create-urateam`: 0.1.21 → 0.1.22
+
+### Added
+- **BEC-150** — `PM_AGENT_REQUIRE_PIPELINE_LABEL_FOR_PROMOTE` env var (default `false`, OSS+). When `true`, the PM agent's `promote` step skips Backlog issues whose labels don't resolve to a configured pipeline. Prevents Todo from accumulating items the agent would later refuse to start. Surfaced from BEC-138 dogfood (#153).
+- **BEC-138 dogfood artifact** — Dockerfile + docker-compose.dogfood.yml + .env.dogfood.example + soak runbook for running urateam as a self-dogfood sidecar. Includes `claude-code` CLI for OAuth-subscription auth, `github-cli` for non-app gh auth, named volumes for data/work/.claude/.config persistence (#150, #151, #152).
+- **CI** — `workflow_dispatch:` trigger added to ci.yml so the BEC-136 QA agent can fire release-readiness checks on demand (#150).
+
+### Fixed
+- BEC-138 deployment surfaced and resolved env-contract bugs in the original .env.dogfood.example: `URATEAM_LICENSE_JWT` → `URATEAM_LICENSE_KEY`, `RELEASE_MANAGER_TRIGGERS=joined-string` → individual `RELEASE_MANAGER_TRIGGER_*` vars, missing `LINEAR_WEBHOOK_SECRET` / `LINEAR_TEAM_ID` / `REPO_TEAM_ID` / `REPO_URL` / `DASHBOARD_USER` / `DASHBOARD_PASSWORD` / `AGENT_BYPASS_PERMISSIONS=true`. Dockerfile `CMD` corrected from `ura dev` to `ura start` (dev mode doesn't run PM/RM/QA agent loops) (#152).
+
 ## [Unreleased]
 
 > **Note:** the entries below this line have accumulated since ~0.1.7 (license JWT migration era) without being migrated into per-version sections as their corresponding versions shipped. They cover changes that landed in roughly 0.1.7 through 0.1.30. Backfilling per-version attribution would require reading 24 PRs of git history. Future releases should follow the "Move the `[Unreleased]` entries into a new section" step in the Release process below.
 
 ### Added
-- `@urateam/core`: BEC-150 — `PM_AGENT_REQUIRE_PIPELINE_LABEL_FOR_PROMOTE` env var (default `false`). When `true`, the PM agent's `promote` step (Backlog→Todo) skips Backlog issues whose labels don't resolve to a configured pipeline. Prevents Todo from accumulating items the agent would later refuse to start (e.g., legal/marketing tickets in mixed-purpose teams). Surfaced from BEC-138 dogfood. OSS+ tier.
 - `@urateam/cli`: CLI version is now read from `package.json` instead of being hardcoded (#19, #25).
 - `@urateam/cli`: new hidden `ura license issue` admin command for generating Ed25519-signed Enterprise license keys.
 - `@urateam/core`: license keys are now Ed25519-signed JWTs validated offline against an embedded public key. Replaces the previous "any non-empty key grants Pro" placeholder.
