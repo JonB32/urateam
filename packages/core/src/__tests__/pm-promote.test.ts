@@ -260,5 +260,48 @@ describe("promoteReadyIssues", () => {
 
       expect(conflictChecker).not.toHaveBeenCalled();
     });
+
+    it("promotes matching candidates while skipping unmatched ones in a mixed list", async () => {
+      const issues = [
+        {
+          id: "i1", identifier: "BEC-700", title: "skip me 1", description: "",
+          priority: 1, labels: { nodes: [{ name: "marketing" }] },
+          team: { id: "team-1" }, url: "https://linear.app/BEC-700",
+        },
+        {
+          id: "i2", identifier: "BEC-701", title: "promote me", description: "",
+          priority: 1, labels: { nodes: [{ name: "quick-fix" }] },
+          team: { id: "team-1" }, url: "https://linear.app/BEC-701",
+        },
+        {
+          id: "i3", identifier: "BEC-702", title: "skip me 2", description: "",
+          priority: 1, labels: { nodes: [] },
+          team: { id: "team-1" }, url: "https://linear.app/BEC-702",
+        },
+      ];
+      const client = mockLinearClient(issues);
+      const conflictChecker = vi.fn().mockResolvedValue({ overlapRisk: "none", likelyFiles: [], reasoning: "" });
+
+      const results = await promoteReadyIssues({
+        linearClient: client as any,
+        teamIds: ["team-1"],
+        slotsAvailable: 5,
+        checkConflict: conflictChecker,
+        stateMap: defaultStateMap,
+        requirePipelineLabel: true,
+        pipelineConfigs: { "quick-fix": pipelineConfig("quick-fix") },
+      });
+
+      expect(results).toHaveLength(3);
+      const promoted = results.filter((r) => r.promoted);
+      expect(promoted).toHaveLength(1);
+      expect(promoted[0].issueId).toBe("BEC-701");
+      // The two unmatched candidates produce skip-results; updateIssue should
+      // only have fired for the matched one.
+      expect(client.updateIssue).toHaveBeenCalledTimes(1);
+      expect(client.updateIssue).toHaveBeenCalledWith("i2", expect.objectContaining({ stateId: "state-todo" }));
+      // Conflict check only runs on the promoted candidate, not on the skipped ones.
+      expect(conflictChecker).toHaveBeenCalledTimes(1);
+    });
   });
 });

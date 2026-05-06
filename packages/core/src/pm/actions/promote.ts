@@ -70,13 +70,11 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
   for (const candidate of candidates) {
     if (promotedCount >= slotsAvailable) break;
 
-    const team = await candidate.team;
-    const teamId = team?.id;
-    const todoStateId = teamId ? todoStates.get(teamId) : undefined;
-
-    // BEC-150: short-circuit before the (token-expensive) conflict check.
-    // Only promote issues whose labels resolve to a configured pipeline; this
-    // keeps Todo from filling with items the agent would later refuse to start.
+    // BEC-150: short-circuit BEFORE any per-candidate Linear API call (team,
+    // conflict-check). Only promote issues whose labels resolve to a configured
+    // pipeline; this keeps Todo from filling with items the agent would later
+    // refuse to start, and avoids wasted `await candidate.team` round-trips
+    // for filtered candidates on large Backlogs.
     if (input.requirePipelineLabel) {
       const labelsConnection = await candidate.labels?.();
       const labelNodes = labelsConnection?.nodes ?? [];
@@ -96,6 +94,10 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
         continue;
       }
     }
+
+    const team = await candidate.team;
+    const teamId = team?.id;
+    const todoStateId = teamId ? todoStates.get(teamId) : undefined;
 
     const conflict = await checkConflict(candidate.description ?? "");
 
