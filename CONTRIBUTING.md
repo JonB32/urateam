@@ -35,6 +35,22 @@ packages/
 - `execFile` (never `exec`) for shell commands
 - Sanitize all untrusted input before including in agent prompts
 
+## Release Notes Convention
+
+Per-version release notes for v0.1.7 and later live on the **GitHub Releases** page:
+[https://github.com/JonB32/urateam/releases](https://github.com/JonB32/urateam/releases)
+
+`CHANGELOG.md` is preserved for historical reference only (v0.1.0 – v0.1.6 sections, plus
+an accumulated block of v0.1.7 – v0.1.30 entries that were never backfilled). **Do not add
+new version sections to `CHANGELOG.md`.**
+
+### Cutting a release
+
+1. Update versions in each affected `package.json`.
+2. Open a PR titled `chore: bump to vX.Y.Z` and merge it.
+3. Tag the merge commit: `git tag vX.Y.Z && git push origin vX.Y.Z` — the publish workflow handles npm publishing.
+4. Create the GitHub Release: `gh release create vX.Y.Z --generate-notes` — this is the canonical per-version record.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the BSL 1.1 license.

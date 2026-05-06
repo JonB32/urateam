@@ -1,5 +1,12 @@
 # Changelog
 
+> **Per-version release notes for v0.1.7 and later live at
+> [https://github.com/JonB32/urateam/releases](https://github.com/JonB32/urateam/releases).**
+> GitHub Releases is the source of truth for all future versions. This file is preserved
+> for historical reference (v0.1.0 – v0.1.6) and retains the accumulated entries from
+> v0.1.7 – v0.1.30 that were never backfilled into individual sections. New releases no
+> longer update this file.
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
@@ -24,9 +31,16 @@ Bumps:
 ### Fixed
 - BEC-138 deployment surfaced and resolved env-contract bugs in the original .env.dogfood.example: `URATEAM_LICENSE_JWT` → `URATEAM_LICENSE_KEY`, `RELEASE_MANAGER_TRIGGERS=joined-string` → individual `RELEASE_MANAGER_TRIGGER_*` vars, missing `LINEAR_WEBHOOK_SECRET` / `LINEAR_TEAM_ID` / `REPO_TEAM_ID` / `REPO_URL` / `DASHBOARD_USER` / `DASHBOARD_PASSWORD` / `AGENT_BYPASS_PERMISSIONS=true`. Dockerfile `CMD` corrected from `ura dev` to `ura start` (dev mode doesn't run PM/RM/QA agent loops) (#152).
 
-## [Unreleased]
+## [Unreleased] — Historical (v0.1.7 – v0.1.30)
 
-> **Note:** the entries below this line have accumulated since ~0.1.7 (license JWT migration era) without being migrated into per-version sections as their corresponding versions shipped. They cover changes that landed in roughly 0.1.7 through 0.1.30. Backfilling per-version attribution would require reading 24 PRs of git history. Future releases should follow the "Move the `[Unreleased]` entries into a new section" step in the Release process below.
+> **⚠️ Historical entries only — no longer updated.**
+> The entries below accumulated since v0.1.7 (license JWT migration era) without being
+> migrated into per-version sections as their corresponding versions shipped. They cover
+> changes that landed in roughly v0.1.7 through v0.1.30. Backfilling 24 versions of
+> per-version attribution would require reading ~24 PRs of git history and has been
+> deferred in favour of moving to GitHub Releases (see the top-of-file note).
+> **For release notes from v0.1.7 onward, see
+> [https://github.com/JonB32/urateam/releases](https://github.com/JonB32/urateam/releases).**
 
 ### Added
 - `@urateam/cli`: CLI version is now read from `package.json` instead of being hardcoded (#19, #25).
@@ -149,12 +163,17 @@ Bumps:
 
 ## Release process
 
+> **As of v0.1.7, GitHub Releases is the source of truth for release notes.**
+> This CHANGELOG is no longer updated with new version sections. Per-version notes live at
+> [https://github.com/JonB32/urateam/releases](https://github.com/JonB32/urateam/releases).
+
 When cutting a new version:
 
 1. Update the version in each package's `package.json` (or only the affected package for per-package releases).
-2. Move the `[Unreleased]` entries into a new section with the version and date.
-3. Open a PR titled `chore: bump to vX.Y.Z`. After merge, tag the merge commit `vX.Y.Z` and push the tag — the publish workflow takes it from there.
-4. Add a fresh empty `[Unreleased]` block on top.
+2. Open a PR titled `chore: bump to vX.Y.Z`. After merge, tag the merge commit `vX.Y.Z` and push the tag — the publish workflow takes it from there.
+3. Create a GitHub Release: `gh release create vX.Y.Z --generate-notes`. GitHub auto-generates release notes from PR titles and commit messages. This is the canonical per-version record going forward — do **not** add a new section to `CHANGELOG.md`.
+
+**Note:** Steps 1–3 of this historical process previously included updating `CHANGELOG.md`. That step is retired. The file is preserved for its pre-v0.1.7 sections and the accumulated v0.1.7–v0.1.30 historical block.
 
 [Unreleased]: https://github.com/JonB32/urateam/compare/v0.1.32...HEAD
 [0.1.32]: https://github.com/JonB32/urateam/compare/v0.1.31...v0.1.32
