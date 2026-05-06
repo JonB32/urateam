@@ -365,10 +365,8 @@ describe("Migration Framework", () => {
         // SQL should not be empty
         expect(migration.sql.trim().length).toBeGreaterThan(0);
 
-        // Should contain valid SQL statements
-        expect(migration.sql).toMatch(
-          /CREATE|ALTER|INSERT|UPDATE|DELETE/i
-        );
+        // Should contain valid SQL statements (stubs are excluded by loadMigrationFiles)
+        expect(migration.sql).toMatch(/CREATE|ALTER|INSERT|UPDATE|DELETE/i);
       }
     });
 
@@ -383,11 +381,74 @@ describe("Migration Framework", () => {
         // SQL should not be empty
         expect(migration.sql.trim().length).toBeGreaterThan(0);
 
-        // Should contain valid SQL statements
-        expect(migration.sql).toMatch(
-          /CREATE|ALTER|INSERT|UPDATE|DELETE|DO/i
-        );
+        // Should contain valid SQL statements (stubs are excluded by loadMigrationFiles)
+        expect(migration.sql).toMatch(/CREATE|ALTER|INSERT|UPDATE|DELETE|DO/i);
       }
+    });
+
+    it("should have no duplicate numeric prefixes in SQLite migrations", () => {
+      const migrations = loadMigrationFiles("sqlite");
+      const prefixes = migrations.map((m) => m.name.match(/^(\d+)/)?.[1]);
+      const unique = new Set(prefixes);
+      expect(unique.size).toBe(migrations.length);
+    });
+
+    it("should have no duplicate numeric prefixes in Postgres migrations", () => {
+      const migrations = loadMigrationFiles("postgres");
+      const prefixes = migrations.map((m) => m.name.match(/^(\d+)/)?.[1]);
+      const unique = new Set(prefixes);
+      expect(unique.size).toBe(migrations.length);
+    });
+  });
+
+  describe("BEC-149: Migration rename compatibility", () => {
+    let db: Database.Database;
+
+    beforeEach(() => {
+      db = new Database(":memory:");
+    });
+
+    afterEach(() => {
+      db.close();
+    });
+
+    it("should rename pre-BEC-149 tracking records so existing deployments don't re-run migrations", () => {
+      // Simulate an existing deployment that already applied migrations under the old names
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL UNIQUE,
+          applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+        )
+      `);
+      const insert = db.prepare(
+        "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
+      );
+      insert.run("007_sso");
+      insert.run("008_review_model_runs");
+
+      // Running migrations should rename the old tracking records
+      runMigrationsSqlite(db);
+
+      // Old names should no longer exist in schema_migrations
+      const oldRecords = db
+        .prepare(
+          "SELECT name FROM schema_migrations WHERE name IN ('007_sso', '008_review_model_runs')"
+        )
+        .all();
+      expect(oldRecords).toHaveLength(0);
+
+      // New canonical names should be present and marked applied
+      const new008sso = db
+        .prepare("SELECT name FROM schema_migrations WHERE name = '008_sso'")
+        .get();
+      const new009rmr = db
+        .prepare(
+          "SELECT name FROM schema_migrations WHERE name = '009_review_model_runs'"
+        )
+        .get();
+      expect(new008sso).toBeTruthy();
+      expect(new009rmr).toBeTruthy();
     });
   });
 });

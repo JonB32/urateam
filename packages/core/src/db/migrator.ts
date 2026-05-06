@@ -7,6 +7,8 @@
  * Design:
  *   - schema_migrations table is created before any migrations run.
  *   - Migration files are sorted by name (NNN_description.sql) so they apply in order.
+ *     Each file must have a unique numeric prefix; always use max(existing prefix) + 1
+ *     when adding a new migration.
  *   - Each applied migration is recorded atomically; a failed migration is not recorded.
  *   - SQLite ALTER TABLE does not support IF NOT EXISTS, so duplicate-column errors are
  *     caught and treated as a no-op (idempotent re-run safety).
@@ -21,6 +23,28 @@ import type { Sql } from "postgres";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+/**
+ * BEC-149: Migration file renames to fix duplicate numeric prefixes.
+ * Maps old schema_migrations names → new names.
+ * Applied once on startup; existing deployments will have their tracking
+ * records updated so renamed migrations are not re-run.
+ */
+const SQLITE_MIGRATION_RENAMES: Record<string, string> = {
+  "007_sso": "008_sso",
+  "008_review_model_runs": "009_review_model_runs",
+  "009_release_manager": "010_release_manager",
+  "010_qa_run_columns": "011_qa_run_columns",
+  "011_qa_gap_issues": "012_qa_gap_issues",
+};
+
+const POSTGRES_MIGRATION_RENAMES: Record<string, string> = {
+  "008_sso": "009_sso",
+  "009_review_model_runs": "010_review_model_runs",
+  "010_release_manager": "011_release_manager",
+  "011_qa_run_columns": "012_qa_run_columns",
+  "012_qa_gap_issues": "013_qa_gap_issues",
+};
 
 /** A single migration file with its name and SQL content. */
 export interface Migration {
@@ -54,13 +78,24 @@ const CREATE_SCHEMA_MIGRATIONS_POSTGRES = `
 /**
  * Read all .sql migration files for a driver from the migrations subdirectory,
  * sorted by filename (ascending, so NNN prefix determines order).
+ *
+ * BEC-149: Stub files for deprecated (renumbered) migrations are excluded so
+ * the returned list has no duplicate numeric prefixes.  The old filenames are
+ * kept on disk for git history; the migrator never processes them.
  */
 export function loadMigrationFiles(driver: "sqlite" | "postgres"): Migration[] {
+  // Exclude the old stub files left behind by the BEC-149 renumber.
+  const deprecatedNames =
+    driver === "sqlite"
+      ? new Set(Object.keys(SQLITE_MIGRATION_RENAMES))
+      : new Set(Object.keys(POSTGRES_MIGRATION_RENAMES));
+
   const dir = join(__dirname, "migrations", driver);
   let files: string[];
   try {
     files = readdirSync(dir)
       .filter((f) => f.endsWith(".sql"))
+      .filter((f) => !deprecatedNames.has(f.replace(/\.sql$/, "")))
       .sort();
   } catch {
     // migrations directory missing — no migrations to run
@@ -83,6 +118,14 @@ export function loadMigrationFiles(driver: "sqlite" | "postgres"): Migration[] {
 export function runMigrationsSqlite(db: Database.Database): void {
   // Ensure tracking table exists
   db.exec(CREATE_SCHEMA_MIGRATIONS_SQLITE);
+
+  // BEC-149: rename tracking records for migrations that were given new file names
+  const updateMigrationName = db.prepare(
+    "UPDATE schema_migrations SET name = ? WHERE name = ?"
+  );
+  for (const [oldName, newName] of Object.entries(SQLITE_MIGRATION_RENAMES)) {
+    updateMigrationName.run(newName, oldName);
+  }
 
   const migrations = loadMigrationFiles("sqlite");
   const getApplied = db.prepare(
@@ -188,6 +231,13 @@ export function getMigrationStatusSqlite(
 export async function runMigrationsPostgres(client: Sql): Promise<void> {
   // Ensure tracking table exists
   await client.unsafe(CREATE_SCHEMA_MIGRATIONS_POSTGRES);
+
+  // BEC-149: rename tracking records for migrations that were given new file names
+  for (const [oldName, newName] of Object.entries(POSTGRES_MIGRATION_RENAMES)) {
+    await client`
+      UPDATE schema_migrations SET name = ${newName} WHERE name = ${oldName}
+    `;
+  }
 
   const migrations = loadMigrationFiles("postgres");
 

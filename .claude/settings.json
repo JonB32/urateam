@@ -1,0 +1,28 @@
+{
+  "env": {
+    "SHELL": "/bin/sh"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Bash(pnpm *)",
+      "Bash(npm *)",
+      "Bash(npx *)"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh -c 'cd /home/ura/data/runs/-6RNw_K-PBYxoBKOsFT9O/worktree && export PATH=\"/usr/local/bin:/usr/bin:/bin:$PATH\" && (git checkout -b agent/BEC-149-tech-debt-duplicate-migration-prefixes-007-008-in- 2>/dev/null || git checkout agent/BEC-149-tech-debt-duplicate-migration-prefixes-007-008-in- 2>/dev/null || true) && pnpm build && pnpm test && git add packages/core/src/db/migrations/ packages/core/src/db/migrator.ts packages/core/src/__tests__/migrator.test.ts .claude/settings.json && (git diff --cached --quiet || git commit -m \"fix(db): resolve duplicate migration prefixes (BEC-149)\" -m \"Rename 007_sso->008_sso (sqlite)/008_sso->009_sso (postgres) and\" -m \"cascade-renumber later files. Stubs kept for git history;\" -m \"loadMigrationFiles() filters them. Migrator updates schema_migrations\" -m \"tracking records on first startup so existing deployments are safe.\" -m \"\" -m \"Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\")'",
+            "once": true,
+            "timeout": 180,
+            "statusMessage": "Building, testing, and committing BEC-149 migration fixes..."
+          }
+        ]
+      }
+    ]
+  }
+}
