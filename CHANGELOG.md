@@ -15,6 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions below refer to the workspace version published to npm. Per-package
 notes call out when a change affects only a single package.
 
+## [0.1.34] — 2026-05-06
+
+Bumps:
+- `@urateam/core`: 0.1.19 → 0.1.20
+- `@urateam/cli`: 0.1.21 → 0.1.22
+- `@urateam/dashboard`: 0.1.19 → 0.1.20
+- `create-urateam`: 0.1.22 → 0.1.23
+
+### Added
+- **BEC-156** — Dashboard's basic-auth path on Enterprise tier now synthesizes an admin user after credentials verify, so RBAC's `requirePermission` middleware passes without requiring SSO. Operators using basic auth get full dashboard access (they already proved knowledge of the shared password); SSO remains the path for differentiated multi-user permissions. Surfaced from BEC-138 dogfood; basic-auth users on Enterprise were silently 401'd on every dashboard route. (#158)
+- **BEC-157** — Pipeline auto-commit (`autoCommitChanges` in `packages/core/src/repo/git.ts`) now filters agent scratchpad files (`.claude/`, root-level `BEC-NNN-*.md`, root-level `verify-*.{mjs,ts,js,cjs}`, `BEC-NNN-*-VERIFICATION.md`) before committing. Bot-generated PRs no longer ship runner-specific paths or agent self-documentation. Includes a safety net: scratchpad paths already tracked in HEAD (operator committed pre-filter) are preserved as legit changes rather than silently deleted. New `isScratchpadPath` predicate exported for tests / debugging. (#159)
+- **BEC-148** — `turbo.json` `test` task gets `dependsOn: ["^build"]` so `pnpm -r test` from the repo root no longer fails on `@urateam/core` resolution. Parallel to PR #145's `typecheck` fix. First fully-autonomous bot PR through the dogfood loop on the `quick-fix` pipeline. (#156)
+- **BEC-147** — CHANGELOG conventions migrated to GitHub Releases as source of truth for v0.1.7+. CHANGELOG.md preserved for historical reference; new releases use auto-generated GH release notes going forward. (#155)
+
 ## [0.1.33] — 2026-05-05
 
 Bumps:
