@@ -212,6 +212,31 @@ export function createDashboard(config: DashboardConfig): Hono {
         password: config.auth.password,
       }),
     );
+    // BEC-156: synthesize an admin user after basicAuth verifies credentials.
+    // Without this, the RBAC middleware (`requirePermission`) on Enterprise
+    // tier looks for c.user — which only the SSO middleware sets — and 401's
+    // every dashboard route. SSO is the path for differentiated multi-user
+    // permissions; basic-auth-authenticated requests get implicit-admin
+    // access (they already proved knowledge of the shared DASHBOARD_PASSWORD).
+    //
+    // This middleware only runs when basicAuth's await-next() chain is
+    // reached — basicAuth throws HTTPException(401) on failed credentials,
+    // which short-circuits the chain before this middleware fires. Safe to
+    // grant admin unconditionally here.
+    //
+    // The synthetic email uses an explicit `@basic-auth.local` suffix so audit
+    // rows (audit-log Enterprise feature) record `actorEmail` as a clearly
+    // non-real-user value rather than a bare username string that could be
+    // mistaken for a malformed real email.
+    const basicAuthUsername = config.auth.username;
+    app.use("*", async (c, next) => {
+      c.set("user" as never, {
+        id: `basic-auth:${basicAuthUsername}`,
+        email: `${basicAuthUsername}@basic-auth.local`,
+        role: "admin" as const,
+      } as never);
+      await next();
+    });
   } else {
     app.use("*", async (c) => {
       return c.text(
