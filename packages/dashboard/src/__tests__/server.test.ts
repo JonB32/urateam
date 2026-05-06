@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createDashboard, type DashboardConfig } from "../server.js";
 import type { Db } from "@urateam/core";
+import { installTestProLicense, restoreLicense } from "./helpers/license.js";
 
 /**
  * Build a mock Db whose chainable query-builder methods (.select(), .from(),
@@ -508,5 +509,61 @@ describe("createDashboard — basePath navigation links", () => {
         createDashboard({ db: mockDb, pipelineConfigs: {}, repoConfigs: {} })
       ).not.toThrow();
     });
+  });
+});
+
+// BEC-156: on Enterprise tier with basic auth (no SSO), the RBAC middleware
+// looked for c.user — which only the SSO middleware sets — and 401'd every
+// request even after basicAuth had verified the credentials. The fix
+// synthesizes a user object after basicAuth succeeds so RBAC has something
+// to check.
+describe("createDashboard — Enterprise tier + basic auth (BEC-156)", () => {
+  let app: ReturnType<typeof createDashboard>;
+
+  beforeEach(async () => {
+    await installTestProLicense("enterprise");
+    app = createDashboard({
+      db: createMockDb(),
+      pipelineConfigs: {},
+      repoConfigs: {},
+      auth: { username: "admin", password: "secret" },
+    });
+  });
+
+  afterEach(async () => {
+    await restoreLicense();
+  });
+
+  it("serves the runs page at / with valid basic-auth credentials", async () => {
+    const res = await app.request("/", {
+      headers: { Authorization: basicAuthHeader("admin", "secret") },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("serves the coordination page with valid basic-auth credentials", async () => {
+    const res = await app.request("/coordination", {
+      headers: { Authorization: basicAuthHeader("admin", "secret") },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("serves the tokens page (RBAC-gated) with valid basic-auth credentials", async () => {
+    const res = await app.request("/tokens", {
+      headers: { Authorization: basicAuthHeader("admin", "secret") },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("still rejects unauthenticated requests with 401", async () => {
+    const res = await app.request("/");
+    expect(res.status).toBe(401);
+  });
+
+  it("still rejects wrong-password requests with 401", async () => {
+    const res = await app.request("/", {
+      headers: { Authorization: basicAuthHeader("admin", "wrongpassword") },
+    });
+    expect(res.status).toBe(401);
   });
 });
