@@ -482,6 +482,53 @@ export function choosePushStrategy(
  *   worktree HEAD is on this branch before committing.  A mismatch throws
  *   immediately to prevent cross-branch contamination (BEC-99).
  */
+/**
+ * BEC-157: paths that auto-commit must NEVER include in the agent's commit.
+ * These are agent scratchpad / runner-state artifacts that the agent's
+ * pipeline produces locally but should not ship to the target repo.
+ *
+ * Each entry is a predicate against a worktree-relative path. Anchor patterns
+ * to root (no leading `/`) so a legitimate `src/utils/verify-input.ts` is not
+ * filtered.
+ */
+const SCRATCHPAD_PATTERNS: ReadonlyArray<(path: string) => boolean> = [
+  // Claude Code session state (runner-specific paths leak in here)
+  (p) => p === ".claude" || p.startsWith(".claude/"),
+  // Root-level BEC-NNN-*.md docs (agent self-documentation; not repo content)
+  (p) => /^BEC-\d+-.*\.md$/.test(p),
+  // Root-level verify-*.{mjs,ts,js} scripts (agent self-validation; redundant
+  // with vitest)
+  (p) => /^verify-.*\.(mjs|ts|js|cjs)$/.test(p),
+  // Root-level *-VERIFICATION.md
+  (p) => /^[A-Z][A-Z0-9_-]*-VERIFICATION\.md$/.test(p),
+];
+
+export function isScratchpadPath(path: string): boolean {
+  return SCRATCHPAD_PATTERNS.some((p) => p(path));
+}
+
+/**
+ * Parse `git status --porcelain` output into worktree-relative paths.
+ * Handles renames (`R old -> new`), additions, modifications, deletions,
+ * and untracked files.
+ */
+function parseStatusPaths(status: string): string[] {
+  const paths: string[] = [];
+  for (const line of status.split("\n")) {
+    if (!line.trim()) continue;
+    // Porcelain format: XY <space> <path> [-> <newpath>]
+    // Examples: " M src/foo.ts", "?? .claude/settings.json", "R  old -> new"
+    const rest = line.slice(3);
+    if (rest.includes(" -> ")) {
+      // Rename: take the new path
+      paths.push(rest.split(" -> ")[1]!.trim());
+    } else {
+      paths.push(rest.trim());
+    }
+  }
+  return paths;
+}
+
 export async function autoCommitChanges(
   worktreePath: string,
   issueId: string,
@@ -495,8 +542,33 @@ export async function autoCommitChanges(
   const status = await gitExecSafe(["status", "--porcelain"], worktreePath);
   if (!status.trim()) return false;
 
+  // BEC-157: filter out agent scratchpad paths before staging. The pipeline
+  // sees them as new files in the worktree (.claude/settings.json with
+  // runner paths, BEC-NNN-*.md doc proliferation, verify-*.mjs scripts that
+  // duplicate vitest coverage) but they must not be committed to the target
+  // repo. Legitimate code under src/ is unaffected.
+  const allPaths = parseStatusPaths(status);
+  const realPaths = allPaths.filter((p) => !isScratchpadPath(p));
+  const filteredPaths = allPaths.filter((p) => isScratchpadPath(p));
+
+  if (filteredPaths.length > 0) {
+    getLog().info(
+      { issueId, filtered: filteredPaths },
+      "auto-commit filtered scratchpad paths (BEC-157)",
+    );
+  }
+
+  if (realPaths.length === 0) {
+    getLog().warn(
+      { issueId, worktreePath, allFiltered: allPaths },
+      "auto-commit: no real changes after scratchpad filter (skipping commit)",
+    );
+    return false;
+  }
+
   getLog().warn({ issueId, worktreePath }, "auto-committing uncommitted changes (agent did not commit)");
-  await gitExecSafe(["add", "-A"], worktreePath);
+  // `git add --` with explicit paths to avoid staging the scratchpad files.
+  await gitExecSafe(["add", "--", ...realPaths], worktreePath);
   try {
     await gitExec(
       ["commit", "-m", `feat(${issueId}): agent implementation (auto-committed)`],
