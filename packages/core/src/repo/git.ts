@@ -567,8 +567,32 @@ export async function autoCommitChanges(
   }
 
   getLog().warn({ issueId, worktreePath }, "auto-committing uncommitted changes (agent did not commit)");
-  // `git add --` with explicit paths to avoid staging the scratchpad files.
-  await gitExecSafe(["add", "--", ...realPaths], worktreePath);
+  // BEC-157 staging strategy: `git add -A` to correctly handle all status
+  // types (modifications, additions, deletions of tracked files, renames),
+  // then `git rm --cached` any scratchpad paths that just got staged. Using
+  // `git add -- <paths>` with an explicit path list looks cleaner but doesn't
+  // stage deletions of tracked files (regression caught by the existing
+  // "handles deleted files" integration test).
+  await gitExecSafe(["add", "-A"], worktreePath);
+  if (filteredPaths.length > 0) {
+    // Unstage scratchpad files. `git rm --cached -- <paths>` removes index
+    // entries while leaving the worktree files alone. `--ignore-unmatch`
+    // tolerates files that weren't tracked yet (untracked scratchpad new
+    // files: they were `git add -A`-staged as new index entries, and
+    // `git rm --cached` removes them; for tracked scratchpad files that
+    // somehow exist, this removes them from the index but the next commit
+    // would recreate them as deletions — handled by the loop being
+    // tolerant). For our use-case (agent's freshly-created scratchpad),
+    // every filtered path is a new file added by the agent; rm --cached
+    // simply unstages.
+    // `-r` is required when filteredPaths includes a directory entry (e.g.,
+    // `.claude/` from `git status --porcelain` for a new untracked dir).
+    // `--ignore-unmatch` tolerates entries that aren't in the index.
+    await gitExecSafe(
+      ["rm", "-r", "--cached", "--ignore-unmatch", "--", ...filteredPaths],
+      worktreePath,
+    );
+  }
   try {
     await gitExec(
       ["commit", "-m", `feat(${issueId}): agent implementation (auto-committed)`],
