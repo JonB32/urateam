@@ -6,15 +6,15 @@ import { join } from "node:path";
 import { preflightDirs } from "../lib/preflight-dirs.js";
 
 describe("preflightDirs (BEC-152)", () => {
-  let exitSpy: ReturnType<typeof vi.spyOn>;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let exitSpy: any;
+  let errorSpy: any;
   let tempRoot: string;
 
   beforeEach(() => {
     tempRoot = mkdtempSync(join(tmpdir(), "bec152-"));
-    exitSpy = vi.spyOn(process, "exit").mockImplementation((_code?: number) => {
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(((_code?: number) => {
       throw new Error("__EXIT__");
-    }) as never;
+    }) as never);
     errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
