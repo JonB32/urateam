@@ -83,14 +83,19 @@ export function applyDeepReviewPassesOverride(
   envValue: string | undefined,
 ): Record<string, PipelineConfig> {
   if (envValue === undefined) return configs;
-  const n = parseInt(envValue, 10);
-  if (Number.isNaN(n) || n < 0 || envValue.trim() === "") {
+  // Reject anything that isn't a literal non-negative-integer string. parseInt
+  // would silently truncate "1.5" → 1, "1e2" → 1, etc., which is worse than
+  // returning the default — operators expect a fat-finger to be flagged, not
+  // applied as the prefix-parsable integer.
+  const trimmed = envValue.trim();
+  if (!/^\d+$/.test(trimmed)) {
     log.warn(
       { envValue, var: "URATEAM_DEEP_REVIEW_PASSES" },
       "URATEAM_DEEP_REVIEW_PASSES must be a non-negative integer — ignoring",
     );
     return configs;
   }
+  const n = parseInt(trimmed, 10);
   const result: Record<string, PipelineConfig> = {};
   for (const [key, cfg] of Object.entries(configs)) {
     if ((cfg.stages ?? []).includes("review")) {

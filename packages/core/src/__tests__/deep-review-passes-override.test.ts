@@ -59,6 +59,15 @@ describe("applyDeepReviewPassesOverride (BEC-163)", () => {
     expect(
       applyDeepReviewPassesOverride(defaultConfigs, "")["auto-implement"].deepReviewPasses,
     ).toBe(0);
+    // BEC-163 review feedback: parseInt silently truncates "1.5" → 1. Reject
+    // floats explicitly so an operator who fat-fingers a decimal sees the
+    // ignored-warning instead of a silent partial-match.
+    expect(
+      applyDeepReviewPassesOverride(defaultConfigs, "1.5")["auto-implement"].deepReviewPasses,
+    ).toBe(0);
+    expect(
+      applyDeepReviewPassesOverride(defaultConfigs, "1e2")["auto-implement"].deepReviewPasses,
+    ).toBe(0);
   });
 
   it("does not mutate the input map", () => {
