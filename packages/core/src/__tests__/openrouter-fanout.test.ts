@@ -114,4 +114,37 @@ describe("OpenRouterFanoutProvider", () => {
     expect(runs).toHaveLength(2);
     expect(runs.every((r) => r.status === "failed")).toBe(true);
   });
+
+  describe("BEC-164 maxOutputTokens config", () => {
+    it("when unset, no max_tokens is forwarded to chatCompletion (preserves model default)", async () => {
+      chatCompletion.mockResolvedValue({ content: validJson, inputTokens: 1, outputTokens: 1 });
+      const { OpenRouterFanoutProvider } = await import(
+        "../executor/review/openrouter-fanout.js"
+      );
+      const p = new OpenRouterFanoutProvider({
+        apiKey: "k", baseUrl: "https://x/api/v1",
+        models: ["m1"], timeoutMs: 1000, maxInputTokens: 100_000,
+        // maxOutputTokens intentionally omitted
+      });
+      await p.runReview(ctx());
+      const opts = chatCompletion.mock.calls[0][2];
+      expect(opts.maxTokens).toBeUndefined();
+    });
+
+    it("when set, maxTokens is forwarded so OpenRouter sends max_tokens in the request body", async () => {
+      chatCompletion.mockResolvedValue({ content: validJson, inputTokens: 1, outputTokens: 1 });
+      const { OpenRouterFanoutProvider } = await import(
+        "../executor/review/openrouter-fanout.js"
+      );
+      const p = new OpenRouterFanoutProvider({
+        apiKey: "k", baseUrl: "https://x/api/v1",
+        models: ["m1", "m2"], timeoutMs: 1000, maxInputTokens: 100_000,
+        maxOutputTokens: 4000,
+      });
+      await p.runReview(ctx());
+      // Both parallel calls receive the cap.
+      expect(chatCompletion.mock.calls[0][2].maxTokens).toBe(4000);
+      expect(chatCompletion.mock.calls[1][2].maxTokens).toBe(4000);
+    });
+  });
 });
