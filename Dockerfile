@@ -28,6 +28,22 @@ RUN addgroup -S ura && adduser -S -G ura ura
 USER ura
 WORKDIR /home/ura
 
+# BEC-154: bake a default git identity so the executor's `git commit` doesn't
+# silently fail with "Please tell me who you are" inside non-root containers
+# that don't have a real user. Operators can override via GIT_AUTHOR_NAME /
+# GIT_AUTHOR_EMAIL env vars in their .env file (those win over `git config`).
+#
+# BEC-155: bake the gh-cli credential helper config that `gh auth setup-git`
+# would otherwise write at runtime — without this, `git push` fails with
+# "could not read Username for 'https://github.com'" until an operator runs
+# `docker exec ... gh auth setup-git` after every container restart.
+RUN git config --global user.name  "Urateam Agent" \
+ && git config --global user.email "agent@urateam.local" \
+ && git config --global --replace-all "credential.https://github.com.helper"      "" \
+ && git config --global --add         "credential.https://github.com.helper"      '!/usr/bin/gh auth git-credential' \
+ && git config --global --replace-all "credential.https://gist.github.com.helper" "" \
+ && git config --global --add         "credential.https://gist.github.com.helper" '!/usr/bin/gh auth git-credential'
+
 # Persistent volumes:
 # - /home/ura/data: SQLite database
 # - /home/ura/work: cloned repos + worktrees (PM agent clones REPO_URL here)
