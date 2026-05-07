@@ -401,6 +401,12 @@ export function createReleaseManagerScheduler(
         attemptCount,
       });
       void logAuditEventUnchecked(db, releaseSkippedEvent({ repoUrl, branch, reason: finalReason }));
+      // BEC-160: emit a stdout line for every skip so operators tailing
+      // docker logs can see the scheduler is alive and why it's skipping.
+      log.info(
+        { repoUrl, branch, reason: finalReason, mergedCommitsSinceLastTag: state.mergedCommitsSinceLastTag, lastTag: state.lastTag, proposedVersion },
+        "tick skip",
+      );
       // Slack notification with dedup
       await maybePostSlack(
         `:double_vertical_bar: Release skipped for *${repoUrl}* (${branch}): ${finalReason}`,
@@ -419,6 +425,11 @@ export function createReleaseManagerScheduler(
         proposedVersion,
       });
       void logAuditEventUnchecked(db, releaseSkippedEvent({ repoUrl, branch, reason: "awaiting-approval" }));
+      // BEC-160: stdout visibility for the awaiting-approval skip path.
+      log.info(
+        { repoUrl, branch, reason: "awaiting-approval", proposedVersion },
+        "tick skip",
+      );
       // Always post on first transition to awaiting-approval (bypass dedup).
       // Reset lastSlackSkipReason so a subsequent regular-skip will re-post.
       lastSlackSkipReason = null;
@@ -447,6 +458,11 @@ export function createReleaseManagerScheduler(
         proposedVersion,
       });
       void logAuditEventUnchecked(db, releaseTagConflictEvent({ repoUrl, branch, tag: proposedVersion }));
+      // BEC-160: stdout visibility for the tag-exists skip path.
+      log.info(
+        { repoUrl, branch, reason: "tag_exists", proposedVersion },
+        "tick skip",
+      );
       return;
     }
 
