@@ -15,6 +15,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions below refer to the workspace version published to npm. Per-package
 notes call out when a change affects only a single package.
 
+## [0.1.35] — 2026-05-06
+
+Bumps:
+- `@urateam/core`: 0.1.20 → 0.1.21
+- `@urateam/cli`: 0.1.22 → 0.1.23
+- `@urateam/dashboard`: 0.1.20 → 0.1.21
+- `create-urateam`: 0.1.23 → 0.1.24
+
+### Added
+- **BEC-161** — PM circuit breaker. After **3 consecutive failed pipeline runs** for the same Linear issue (with no successful run between), the `promote` and `start-todo` actions skip the issue with reason `circuit-breaker: N consecutive failed runs (threshold 3)` instead of re-promoting. Closes the recover-stuck → promote → start-todo → fail doom loop that burned agent + OpenRouter tokens on BEC-138 dogfood with zero PRs produced. New env knob `PM_AGENT_MAX_CONSECUTIVE_FAILURES` (default 3, set 0 to disable). (#161)
+- **BEC-160** — Release Manager scheduler now emits a `log.info({ reason, ... }, "tick skip")` line on every skip-emit branch (`mergedPRsSince`/`qa_*`, `awaiting-approval`, `tag_exists`) AND a `log.info(..., "tick fire")` on the successful-fire branch. Prior behavior wrote audit-table rows but no stdout, so operators tailing `docker logs` couldn't tell whether RM was alive — `~3.8 hrs` of misdiagnosis on the 2026-05-06 dogfood before the audit table was queried directly. (#164)
+
+### Changed
+- **BEC-162** — Default `maxTurns` for the implement stage bumped 50 → 100, and for the test stage 25 → 50. Non-trivial sev-2 fixes on BEC-138 dogfood repeatedly hit the old caps. Other stages unchanged. Operators can still override per-stage via the existing `URATEAM_AGENT_PROFILES` env knob. Total spend remains bounded by `PM_AGENT_DAILY_TOKEN_BUDGET` and the BEC-161 circuit breaker. (#163)
+
+### Fixed
+- **BEC-154 / BEC-155** — Dockerfile now bakes a default `git config user.name`/`user.email` and the gh-cli credential helper that `gh auth setup-git` would otherwise have to write at runtime. Without these, every container rebuild silently broke autonomous git operations until an operator manually re-applied them. Operators retain full override via `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` env vars (those win over `git config`). (#162)
+
 ## [0.1.34] — 2026-05-06
 
 Bumps:
