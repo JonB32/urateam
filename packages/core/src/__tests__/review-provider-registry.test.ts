@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   getEnabledProviders,
   type ReviewProvider,
@@ -109,6 +109,64 @@ describe("review-provider registry — fanout selection", () => {
       expect(
         fanoutCfg({ REVIEW_MODELS: "m1", OPENROUTER_API_KEY: "sk", REVIEW_MODELS_MAX_OUTPUT_TOKENS: "lots" }).maxOutputTokens,
       ).toBeUndefined();
+    });
+
+    describe("floor warn (BEC-164 follow-up — surface misconfigurations loudly)", () => {
+      // Captures pino stdout writes so we can assert a warn fires when the
+      // configured cap is suspiciously small. The original BEC-164 fix made
+      // `=1` parse correctly, but a typo would silently produce truncated
+      // garbage on every model — the same zero-findings symptom BEC-164 was
+      // meant to fix, just from a different cause. Sonnet review on PR #174.
+      function captureFanoutCfgWithStdout(env: NodeJS.ProcessEnv): { cfg: { maxOutputTokens?: number }; logs: string[] } {
+        const writes: string[] = [];
+        const orig = process.stdout.write.bind(process.stdout);
+        const spy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: any) => {
+          writes.push(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+          return true;
+        });
+        try {
+          const ps = getEnabledProviders(env);
+          const fanout = ps.find((p) => p.id === "openrouter");
+          const cfg = (fanout as unknown as { cfg: { maxOutputTokens?: number } }).cfg;
+          return { cfg, logs: writes };
+        } finally {
+          spy.mockRestore();
+          writes.forEach((w) => orig(w));
+        }
+      }
+
+      it("emits a warn when value is set but below the sane floor (256)", () => {
+        const { cfg, logs } = captureFanoutCfgWithStdout({
+          REVIEW_MODELS: "m1",
+          OPENROUTER_API_KEY: "sk",
+          REVIEW_MODELS_MAX_OUTPUT_TOKENS: "10",
+        });
+        // Behavior preserved — operator's intent is honored, cap is set to 10.
+        expect(cfg.maxOutputTokens).toBe(10);
+        // Visibility: a warn line surfaces the misconfiguration.
+        const warnLine = logs.find((l) =>
+          /maxOutputTokens|REVIEW_MODELS_MAX_OUTPUT_TOKENS/.test(l) && /floor|too.small|below/i.test(l),
+        );
+        expect(warnLine, `expected a floor-warn line; got ${JSON.stringify(logs)}`).toBeDefined();
+      });
+
+      it("does NOT warn when value is at or above the floor", () => {
+        const { cfg, logs } = captureFanoutCfgWithStdout({
+          REVIEW_MODELS: "m1",
+          OPENROUTER_API_KEY: "sk",
+          REVIEW_MODELS_MAX_OUTPUT_TOKENS: "256",
+        });
+        expect(cfg.maxOutputTokens).toBe(256);
+        expect(logs.find((l) => /maxOutputTokens.*floor|too.small/i.test(l))).toBeUndefined();
+      });
+
+      it("does NOT warn when value is unset", () => {
+        const { logs } = captureFanoutCfgWithStdout({
+          REVIEW_MODELS: "m1",
+          OPENROUTER_API_KEY: "sk",
+        });
+        expect(logs.find((l) => /maxOutputTokens.*floor|too.small/i.test(l))).toBeUndefined();
+      });
     });
   });
 });

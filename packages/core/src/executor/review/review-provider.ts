@@ -1,6 +1,9 @@
 import type { HandoffArtifact, ReviewFinding } from "../../types.js";
 import { AgenticDeepReviewProvider } from "./agentic-deep-review.js";
 import { OpenRouterFanoutProvider } from "./openrouter-fanout.js";
+import { createLogger } from "../../logger.js";
+
+const log = createLogger({ component: "review.provider" });
 
 export type ReviewProviderId = "agentic" | "openrouter";
 
@@ -35,6 +38,14 @@ export interface ReviewProvider {
 const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 const DEFAULT_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_INPUT_TOKENS = 150_000;
+/**
+ * Below this, a structured-finding response can't even fit a small JSON
+ * envelope — the fanout would silently produce truncated garbage on every
+ * model, the same zero-findings symptom BEC-164 was meant to fix, just from
+ * a different cause. Operators get a warn but the value is still applied
+ * (no auto-correction — preserves operator intent for unusual setups).
+ */
+const SANE_OUTPUT_TOKENS_FLOOR = 256;
 
 export function getEnabledProviders(env: NodeJS.ProcessEnv): ReviewProvider[] {
   const providers: ReviewProvider[] = [new AgenticDeepReviewProvider()];
@@ -57,6 +68,21 @@ export function getEnabledProviders(env: NodeJS.ProcessEnv): ReviewProvider[] {
   }
   if (!fanoutDesired) return providers;
 
+  // BEC-164: optional output-token cap. Unset = the model's provider default
+  // applies (can be huge → 402s on limited-budget accounts). Invalid input
+  // falls through to undefined so the cap stays unset.
+  const maxOutputTokens = parsePositiveIntOrUndefined(env.REVIEW_MODELS_MAX_OUTPUT_TOKENS);
+  if (maxOutputTokens !== undefined && maxOutputTokens < SANE_OUTPUT_TOKENS_FLOOR) {
+    log.warn(
+      {
+        var: "REVIEW_MODELS_MAX_OUTPUT_TOKENS",
+        value: maxOutputTokens,
+        floor: SANE_OUTPUT_TOKENS_FLOOR,
+      },
+      "REVIEW_MODELS_MAX_OUTPUT_TOKENS is below the sane floor — model responses will likely be truncated mid-finding and produce zero parseable output. Consider setting it to at least 1024.",
+    );
+  }
+
   providers.push(
     new OpenRouterFanoutProvider({
       apiKey,
@@ -64,10 +90,7 @@ export function getEnabledProviders(env: NodeJS.ProcessEnv): ReviewProvider[] {
       models,
       timeoutMs: parseIntOr(env.REVIEW_MODELS_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
       maxInputTokens: parseIntOr(env.REVIEW_MODELS_MAX_INPUT_TOKENS, DEFAULT_MAX_INPUT_TOKENS),
-      // BEC-164: optional output-token cap. Unset = the model's provider
-      // default applies (can be huge → 402s on limited-budget accounts).
-      // Invalid input falls through to undefined so the cap stays unset.
-      maxOutputTokens: parsePositiveIntOrUndefined(env.REVIEW_MODELS_MAX_OUTPUT_TOKENS),
+      maxOutputTokens,
     }),
   );
   return providers;
