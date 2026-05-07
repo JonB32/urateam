@@ -481,3 +481,21 @@ export function qaGapIssueFiledEvent(args: {
     },
   });
 }
+
+export function reviewFanoutFallbackUsedEvent(args: {
+  runId: string;
+  prNumber: number;
+  fallbackModels: string[];
+}): AuditEvent {
+  return base({
+    eventType: "review.fanout_fallback_used",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    payload: {
+      prNumber: args.prNumber,
+      fallbackModels: args.fallbackModels,
+      fallbackCount: args.fallbackModels.length,
+    },
+  });
+}

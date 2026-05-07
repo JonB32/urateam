@@ -27,6 +27,17 @@ const failedRun: ReviewModelRun = {
   errorMessage: "rate limited",
 };
 
+const rawOutputRun: ReviewModelRun = {
+  modelId: "google/gemini-2.5-pro",
+  providerId: "openrouter",
+  status: "completed",
+  findings: [],
+  rawOutput: "This is plain prose from the model. It looks good overall, but watch out for the N+1 query in service.ts.",
+  inputTokens: 80,
+  outputTokens: 40,
+  durationMs: 800,
+};
+
 describe("postFanoutCommentsToPR", () => {
   beforeEach(() => {
     addPRComment.mockReset();
@@ -99,8 +110,46 @@ describe("postFanoutCommentsToPR", () => {
     // Should not throw
     await expect(
       postFanoutCommentsToPR({} as never, "o", "r", 1, [completedRun, failedRun]),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeDefined();
     // Both addPRComment calls were attempted
     expect(addPRComment).toHaveBeenCalledTimes(2);
+  });
+
+  // BEC-158: fallback advisory comment when structured parse failed
+  it("posts raw output as fallback advisory comment when structured parse failed", async () => {
+    addPRComment.mockResolvedValue(undefined);
+    const { postFanoutCommentsToPR } = await import(
+      "../executor/review/post-fanout-comments.js"
+    );
+    const result = await postFanoutCommentsToPR({} as never, "o", "r", 1, [rawOutputRun]);
+    expect(addPRComment).toHaveBeenCalledOnce();
+    const body = (addPRComment.mock.calls[0][4] as string);
+    expect(body).toContain("google/gemini-2.5-pro");
+    expect(body).toContain("raw output, structured parse failed");
+    expect(body).toContain("plain prose from the model");
+    expect(body).toContain("Advisory only");
+    expect(result.fallbackCount).toBe(1);
+  });
+
+  it("returns fallbackCount=0 when all runs have structured findings", async () => {
+    addPRComment.mockResolvedValue(undefined);
+    const { postFanoutCommentsToPR } = await import(
+      "../executor/review/post-fanout-comments.js"
+    );
+    const result = await postFanoutCommentsToPR({} as never, "o", "r", 1, [completedRun]);
+    expect(result.fallbackCount).toBe(0);
+  });
+
+  it("returns fallbackCount matching runs with rawOutput", async () => {
+    addPRComment.mockResolvedValue(undefined);
+    const { postFanoutCommentsToPR } = await import(
+      "../executor/review/post-fanout-comments.js"
+    );
+    const result = await postFanoutCommentsToPR({} as never, "o", "r", 1, [
+      completedRun,
+      rawOutputRun,
+      failedRun,
+    ]);
+    expect(result.fallbackCount).toBe(1);
   });
 });

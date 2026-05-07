@@ -67,12 +67,21 @@ export class OpenRouterFanoutProvider implements ReviewProvider {
       const result = await this.client.chatCompletion(modelId, prompt.messages, {
         signal: ac.signal,
       });
-      const findings = parseReviewFindings(result.content);
+      // Try structured parse; fall back to raw output on parse failure.
+      let findings: ReviewModelRun["findings"] = [];
+      let rawOutput: string | undefined;
+      try {
+        findings = parseReviewFindings(result.content);
+      } catch {
+        rawOutput = result.content;
+        log.warn({ modelId }, "fanout: structured parse failed, preserving raw output");
+      }
       return {
         modelId,
         providerId: "openrouter" as const,
         status: "completed" as const,
         findings,
+        rawOutput,
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
         durationMs: Date.now() - startedAt,
