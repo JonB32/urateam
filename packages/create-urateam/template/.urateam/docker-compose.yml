@@ -32,8 +32,8 @@ services:
       - "3000"
       - "3001"
     volumes:
-      - agent-runs:/var/agent-runs
-      - agent-repos:/var/agent-repos
+      - agent-runs:/home/ura/data/runs
+      - agent-repos:/home/ura/work/repos
       # Claude OAuth credentials — bind-mounted rw so the SDK can auto-refresh
       # tokens. Run `claude login` against the host's ~/.claude/ before first
       # `docker compose up` (see README "Production deploy"). Bind-mounting a

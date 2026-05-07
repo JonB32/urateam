@@ -1,3 +1,5 @@
+import { join } from "node:path";
+import { homedir } from "node:os";
 import type { PmAgentConfig, TickResult, BudgetEvaluation } from "./types.js";
 import { evaluateBudget } from "./budget.js";
 import { maybeFireAlerts, type PostSlackMessage } from "./budget-alerts.js";
@@ -374,7 +376,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
               tick.promoted = await actions.promoteReadyIssues({} as any);
             } else {
               const activeRuns = await getActiveRunsFromDb(db);
-              const baseDir = deps.repoCloneDir ?? "/var/agent-repos";
+              const baseDir = deps.repoCloneDir ?? join(homedir(), "work", "repos");
               const defaultBranch = deps.defaultBranch ?? "main";
 
               // Find the first cloned repo directory (runner clones to <repoCloneDir>/<slug>/)

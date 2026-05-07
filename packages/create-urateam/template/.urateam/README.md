@@ -171,7 +171,7 @@ git pull && docker compose up -d --build
 
 `pgdata` and `agent-runs` are named docker volumes. For backups, snapshot the
 host volume directory or use `docker run --rm -v pgdata:/data … pg_dump` style
-sidecars. Workspace dirs (`/var/agent-runs`, `/var/agent-repos`) auto-clean
+sidecars. Workspace dirs (default `$HOME/data/runs` and `$HOME/work/repos`) auto-clean
 older than `WORKTREE_TTL_HOURS` (default 24h).
 
 ## How it works
