@@ -1,6 +1,9 @@
 import { Command } from "commander";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
 import { preflightClaudeAuth } from "../lib/preflight-claude-auth.js";
+import { preflightDirs } from "../lib/preflight-dirs.js";
 import { repoPluginsFromEnv } from "../lib/repo-plugins-from-env.js";
 
 export const devCommand = new Command("dev")
@@ -64,6 +67,11 @@ export const devCommand = new Command("dev")
       process.exit(1);
     }
 
+    // --- Resolve and validate workspace directories ---
+    const agentRunDir = process.env.AGENT_RUN_DIR ?? join(homedir(), "data", "runs");
+    const repoCloneDir = process.env.REPO_CLONE_DIR ?? join(homedir(), "work", "repos");
+    await preflightDirs({ agentRunDir, repoCloneDir, command: "ura dev" });
+
     // OSS-tier auth pre-flight (urateam#40). Run before opening the DB so a
     // bad auth state doesn't leave any resources to clean up.
     await preflightClaudeAuth({ command: "ura dev" });
@@ -75,8 +83,8 @@ export const devCommand = new Command("dev")
       repoConfigs,
       slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
       discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL,
-      agentRunDir: process.env.AGENT_RUN_DIR ?? "/tmp/agent-runs",
-      repoCloneDir: process.env.REPO_CLONE_DIR ?? "/tmp/agent-repos",
+      agentRunDir,
+      repoCloneDir,
       githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET,
     };
 

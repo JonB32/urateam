@@ -1,7 +1,10 @@
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
 import { preflightClaudeAuth } from "../lib/preflight-claude-auth.js";
+import { preflightDirs } from "../lib/preflight-dirs.js";
 import { repoPluginsFromEnv } from "../lib/repo-plugins-from-env.js";
 
 export const startCommand = new Command("start")
@@ -252,6 +255,15 @@ export const startCommand = new Command("start")
       process.env.URATEAM_DEEP_REVIEW_PASSES,
     );
 
+    // --- Resolve and validate workspace directories ---
+    const agentRunDir = process.env.AGENT_RUN_DIR ?? join(homedir(), "data", "runs");
+    const repoCloneDir = process.env.REPO_CLONE_DIR ?? join(homedir(), "work", "repos");
+    await preflightDirs({ agentRunDir, repoCloneDir, command: "ura start" });
+
+    // OSS-tier auth pre-flight (urateam#40). Run before opening the DB so a
+    // bad auth state doesn't leave any resources to clean up.
+    await preflightClaudeAuth({ command: "ura start", containerized: true });
+
     const config = {
       webhookSecret: process.env.LINEAR_WEBHOOK_SECRET,
       linearApiKey: process.env.LINEAR_API_KEY ?? "",
@@ -261,18 +273,14 @@ export const startCommand = new Command("start")
       slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
       discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL,
       concurrency: parseInt(process.env.MAX_CONCURRENT_RUNS ?? "3", 10),
-      agentRunDir: process.env.AGENT_RUN_DIR,
-      repoCloneDir: process.env.REPO_CLONE_DIR,
+      agentRunDir,
+      repoCloneDir,
       github,
       dashboardAuth,
       pmSlack,
       pmConfig,
       githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET,
     };
-
-    // OSS-tier auth pre-flight (urateam#40). Run before opening the DB so a
-    // bad auth state doesn't leave any resources to clean up.
-    await preflightClaudeAuth({ command: "ura start", containerized: true });
 
     // --- SSO (Enterprise, opt-in via URATEAM_SSO_ENABLED=true) ---
     // Validate SSO env vars BEFORE opening the DB / starting the runner so a
@@ -320,7 +328,7 @@ export const startCommand = new Command("start")
     const dashServer = serve({ fetch: dashboardApp.fetch, port: dashboardPort });
 
     // --- Worktree cleanup cron ---
-    const agentRunDir = config.agentRunDir ?? "/var/agent-runs";
+    // agentRunDir is already resolved above (before preflightClaudeAuth).
     const _parsedTtl = parseInt(process.env.WORKTREE_TTL_HOURS ?? "24", 10);
     const worktreeTtlHours = Number.isFinite(_parsedTtl) && _parsedTtl > 0 ? _parsedTtl : 24;
 

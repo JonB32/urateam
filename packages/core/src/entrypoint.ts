@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { serve } from "@hono/node-server";
 import { createApp } from "./server.js";
 import { defaultConfigs } from "./pipeline/config.js";
@@ -76,7 +78,7 @@ async function main() {
   // Failed pipeline runs preserve their worktrees for debugging.  Run an
   // initial sweep at startup, then repeat every hour so stale directories
   // don't accumulate between restarts.
-  const agentRunDir = config.agentRunDir ?? "/var/agent-runs";
+  const agentRunDir = config.agentRunDir ?? join(homedir(), "data", "runs");
   async function runWorktreeCleanup() {
     const removed = await cleanupWorktrees(agentRunDir, worktreeTtlHours);
     if (removed.length > 0) {
