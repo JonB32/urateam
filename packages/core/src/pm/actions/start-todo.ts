@@ -20,6 +20,18 @@ export interface StartTodoInput {
   maxPerTick: number;
   /** Budget evaluation from the current tick. When blocked, this action short-circuits. */
   budgetEvaluation?: BudgetEvaluation;
+  /**
+   * BEC-161: when set, Todo issues whose pipeline has ≥ this many consecutive
+   * failed runs (since the last success) are skipped. Leave undefined to
+   * disable the breaker.
+   */
+  maxConsecutiveFailures?: number;
+  /**
+   * BEC-161: returns the number of consecutive failed runs for an issue.
+   * Production wires this to `countConsecutiveFailures(db, issueId)`.
+   * Required when `maxConsecutiveFailures` is set.
+   */
+  getFailureCount?: (issueId: string) => Promise<number>;
 }
 
 export interface StartTodoResult {
@@ -124,6 +136,29 @@ export async function startTodoIssues(
       });
       log.info({ identifier: issue.identifier, labels: labelNames }, "no pipeline match — skipping");
       continue;
+    }
+
+    // BEC-161: circuit breaker — skip issues with too many consecutive failures.
+    if (input.maxConsecutiveFailures !== undefined) {
+      if (!input.getFailureCount) {
+        throw new Error(
+          "startTodoIssues: maxConsecutiveFailures requires getFailureCount to be set",
+        );
+      }
+      const failureCount = await input.getFailureCount(issue.identifier);
+      if (failureCount >= input.maxConsecutiveFailures) {
+        results.push({
+          identifier: issue.identifier,
+          title: issue.title,
+          started: false,
+          reason: `circuit-breaker: ${failureCount} consecutive failed runs (threshold ${input.maxConsecutiveFailures})`,
+        });
+        log.warn(
+          { identifier: issue.identifier, failureCount, threshold: input.maxConsecutiveFailures },
+          "circuit-breaker engaged — skipping start",
+        );
+        continue;
+      }
     }
 
     // Resolve repo config from team/project ID

@@ -157,6 +157,12 @@ export const startCommand = new Command("start")
         // being promoted to Todo.
         requirePipelineLabelForPromote:
           process.env.PM_AGENT_REQUIRE_PIPELINE_LABEL_FOR_PROMOTE === "true",
+        // BEC-161: skip promote/start-todo for issues with N+ consecutive
+        // failed runs. Default 3; set 0 to disable.
+        maxConsecutiveFailures: parseInt(
+          process.env.PM_AGENT_MAX_CONSECUTIVE_FAILURES ?? "3",
+          10,
+        ),
       });
     }
 

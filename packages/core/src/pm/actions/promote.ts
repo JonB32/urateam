@@ -28,6 +28,20 @@ export interface PromoteInput {
    * resolvePipeline). Required when `requirePipelineLabel=true`.
    */
   pipelineConfigs?: Record<string, PipelineConfig>;
+  /**
+   * BEC-161: when set, candidates whose pipeline has ≥ this many consecutive
+   * failed runs (since the last success) are skipped instead of promoted.
+   * Prevents the recover-stuck → promote → start-todo → fail doom loop.
+   * Leave undefined to disable the breaker (default behavior).
+   */
+  maxConsecutiveFailures?: number;
+  /**
+   * BEC-161: returns the number of consecutive failed runs for an issue.
+   * Production wires this to `countConsecutiveFailures(db, issueId)` from
+   * `db-queries.ts`; tests inject a stub. Required when
+   * `maxConsecutiveFailures` is set.
+   */
+  getFailureCount?: (issueId: string) => Promise<number>;
 }
 
 export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteResult[]> {
@@ -39,6 +53,12 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
   if (input.requirePipelineLabel && !input.pipelineConfigs) {
     throw new Error(
       "promoteReadyIssues: requirePipelineLabel=true requires pipelineConfigs to be set",
+    );
+  }
+
+  if (input.maxConsecutiveFailures !== undefined && !input.getFailureCount) {
+    throw new Error(
+      "promoteReadyIssues: maxConsecutiveFailures requires getFailureCount to be set",
     );
   }
 
@@ -90,6 +110,23 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
           issueTitle: candidate.title,
           promoted: false,
           reason: "no pipeline-matching label",
+        });
+        continue;
+      }
+    }
+
+    if (input.maxConsecutiveFailures !== undefined) {
+      const failureCount = await input.getFailureCount!(candidate.identifier);
+      if (failureCount >= input.maxConsecutiveFailures) {
+        log.warn(
+          { issueId: candidate.identifier, failureCount, threshold: input.maxConsecutiveFailures },
+          "skipped promote: circuit-breaker engaged (too many consecutive failures)",
+        );
+        results.push({
+          issueId: candidate.identifier,
+          issueTitle: candidate.title,
+          promoted: false,
+          reason: `circuit-breaker: ${failureCount} consecutive failed runs (threshold ${input.maxConsecutiveFailures})`,
         });
         continue;
       }

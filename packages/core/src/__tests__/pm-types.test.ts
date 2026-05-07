@@ -119,6 +119,7 @@ describe("PmAgentConfigSchema — full coverage", () => {
       stuckIssueTargetState: "Todo",
       stuckIssueMaxPerTick: 25,
       requirePipelineLabelForPromote: false,
+        maxConsecutiveFailures: 3,
     };
     const parsed = PmAgentConfigSchema.parse(full);
     expect(parsed).toEqual(full);
@@ -175,6 +176,7 @@ describe("PmAgentConfigSchema — full coverage", () => {
       ...minimalRequired,
       stuckIssueMaxPerTick: 0,
       requirePipelineLabelForPromote: false,
+        maxConsecutiveFailures: 3,
     });
     expect(result.success).toBe(false);
   });

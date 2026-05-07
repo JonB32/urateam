@@ -10,6 +10,7 @@ import { resolveApprovals, type ResolveApprovalsInput, type ResolveApprovalsResu
 import { recoverRetriableRuns, type RecoverResult } from "./actions/recover.js";
 import { recoverStuckInProgressIssues, type StuckIssueResult } from "./actions/recover-stuck.js";
 import { startTodoIssues, type StartTodoInput, type StartTodoResult } from "./actions/start-todo.js";
+import { countConsecutiveFailures } from "./actions/db-queries.js";
 import { getActiveFileMaps, predictConflict, type ActiveRun } from "./conflict.js";
 import { PmSlackNotifier } from "./slack.js";
 import { isPmPaused } from "./slack-interface.js";
@@ -310,6 +311,11 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                     repoConfigs: deps.repoConfigs,
                     maxPerTick: slotsAvailable,
                     budgetEvaluation: evaluation,
+                    maxConsecutiveFailures: config.maxConsecutiveFailures > 0
+                      ? config.maxConsecutiveFailures
+                      : undefined,
+                    getFailureCount: (issueId) =>
+                      countConsecutiveFailures(deps.db as AnyDb, issueId),
                   });
               const started = todoResults.filter((r) => r.started);
               if (started.length > 0) {
@@ -411,6 +417,11 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                 db,
                 requirePipelineLabel: config.requirePipelineLabelForPromote,
                 pipelineConfigs: deps.pipelineConfigs,
+                maxConsecutiveFailures: config.maxConsecutiveFailures > 0
+                  ? config.maxConsecutiveFailures
+                  : undefined,
+                getFailureCount: (issueId) =>
+                  countConsecutiveFailures(db, issueId),
               });
             }
           } catch (err) {

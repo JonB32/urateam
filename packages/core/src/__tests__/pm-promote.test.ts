@@ -304,4 +304,91 @@ describe("promoteReadyIssues", () => {
       expect(conflictChecker).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe("circuit breaker (BEC-161)", () => {
+    /**
+     * The promote action must short-circuit candidates whose pipeline keeps
+     * failing. We don't need a real DB here — a stub `db` whose query helper
+     * returns the expected failure count per-issue is enough to prove promote
+     * consults the count and skips when it exceeds the threshold.
+     *
+     * Plumbing: promote receives `db` + `maxConsecutiveFailures` and an
+     * injectable `getFailureCount` (so tests don't need real db rows).
+     */
+
+    it("skips candidate with N+ consecutive failed runs (default N=3)", async () => {
+      const issues = [
+        { id: "i1", identifier: "BEC-161-A", title: "Doom-looping", description: "", priority: 2,
+          labels: { nodes: [] }, team: { id: "team-1" }, url: "https://linear.app/BEC-161-A" },
+      ];
+      const client = mockLinearClient(issues);
+      const conflictChecker = vi.fn().mockResolvedValue({ overlapRisk: "none", likelyFiles: [], reasoning: "" });
+      const getFailureCount = vi.fn().mockResolvedValue(3);
+
+      const results = await promoteReadyIssues({
+        linearClient: client as any,
+        teamIds: ["team-1"],
+        slotsAvailable: 1,
+        checkConflict: conflictChecker,
+        stateMap: defaultStateMap,
+        maxConsecutiveFailures: 3,
+        getFailureCount,
+      });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].promoted).toBe(false);
+      expect(results[0].reason).toMatch(/circuit.breaker/i);
+      expect(client.updateIssue).not.toHaveBeenCalled();
+      // breaker check happens BEFORE expensive conflict-detection
+      expect(conflictChecker).not.toHaveBeenCalled();
+      expect(getFailureCount).toHaveBeenCalledWith("BEC-161-A");
+    });
+
+    it("promotes candidate with fewer than N consecutive failures", async () => {
+      const issues = [
+        { id: "i1", identifier: "BEC-161-B", title: "Recently failed once", description: "", priority: 2,
+          labels: { nodes: [] }, team: { id: "team-1" }, url: "https://linear.app/BEC-161-B" },
+      ];
+      const client = mockLinearClient(issues);
+      const conflictChecker = vi.fn().mockResolvedValue({ overlapRisk: "none", likelyFiles: [], reasoning: "" });
+      const getFailureCount = vi.fn().mockResolvedValue(2);
+
+      const results = await promoteReadyIssues({
+        linearClient: client as any,
+        teamIds: ["team-1"],
+        slotsAvailable: 1,
+        checkConflict: conflictChecker,
+        stateMap: defaultStateMap,
+        maxConsecutiveFailures: 3,
+        getFailureCount,
+      });
+
+      expect(results[0].promoted).toBe(true);
+      expect(client.updateIssue).toHaveBeenCalled();
+    });
+
+    it("breaker disabled when maxConsecutiveFailures is undefined (back-compat)", async () => {
+      const issues = [
+        { id: "i1", identifier: "BEC-161-C", title: "Has 99 failures", description: "", priority: 2,
+          labels: { nodes: [] }, team: { id: "team-1" }, url: "https://linear.app/BEC-161-C" },
+      ];
+      const client = mockLinearClient(issues);
+      const conflictChecker = vi.fn().mockResolvedValue({ overlapRisk: "none", likelyFiles: [], reasoning: "" });
+      const getFailureCount = vi.fn().mockResolvedValue(99);
+
+      const results = await promoteReadyIssues({
+        linearClient: client as any,
+        teamIds: ["team-1"],
+        slotsAvailable: 1,
+        checkConflict: conflictChecker,
+        stateMap: defaultStateMap,
+        // maxConsecutiveFailures intentionally omitted
+        getFailureCount,
+      });
+
+      expect(results[0].promoted).toBe(true);
+      // breaker not invoked → getFailureCount must not be called
+      expect(getFailureCount).not.toHaveBeenCalled();
+    });
+  });
 });

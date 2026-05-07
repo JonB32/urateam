@@ -246,6 +246,7 @@ describe("BEC-113 CONFIRMED FIXED: scheduler integration", () => {
         stuckIssueTargetState: "Backlog",
         stuckIssueMaxPerTick: 5,
         requirePipelineLabelForPromote: false,
+        maxConsecutiveFailures: 3,
       },
       db: {} as any,
       linearApiKey: "",

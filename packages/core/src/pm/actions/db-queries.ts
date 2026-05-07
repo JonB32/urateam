@@ -1,6 +1,6 @@
 import type { AnyDb } from "../../db/client.js";
 import { pipelineRuns } from "../../db/schema.js";
-import { and, gte, inArray } from "drizzle-orm";
+import { and, desc, eq, gte, inArray } from "drizzle-orm";
 
 /** Statuses considered "active" (pipeline currently running). */
 export const ACTIVE_STATUSES = ["queued", "running"] as const;
@@ -39,4 +39,37 @@ export async function getActiveAndRecentIssueIds(
   const recentlyProcessed = new Set<string>((recentRows as any[]).map((r) => r.issueId));
 
   return { activeIssueIds, recentlyProcessed };
+}
+
+/**
+ * BEC-161: count consecutive failed pipeline runs for an issue since the last
+ * successfully-completed run (or since the first run if none completed). Active
+ * runs (queued/running) are ignored — only terminal `completed`/`failed` rows
+ * count.
+ *
+ * Promote and start-todo use this to short-circuit candidates whose pipeline
+ * keeps failing — preventing the doom loop where recover-stuck → promote →
+ * start-todo → fail repeats indefinitely on tickets the agent can't progress.
+ */
+export async function countConsecutiveFailures(
+  db: AnyDb,
+  issueId: string,
+): Promise<number> {
+  const rows = await db
+    .select({ status: pipelineRuns.status })
+    .from(pipelineRuns)
+    .where(
+      and(
+        eq(pipelineRuns.issueId, issueId),
+        inArray(pipelineRuns.status, ["completed", "failed"]),
+      ),
+    )
+    .orderBy(desc(pipelineRuns.startedAt));
+
+  let count = 0;
+  for (const row of rows as Array<{ status: string }>) {
+    if (row.status === "failed") count++;
+    else break;
+  }
+  return count;
 }
