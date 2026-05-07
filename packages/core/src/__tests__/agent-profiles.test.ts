@@ -23,15 +23,21 @@ describe("getAgentProfiles defaults", () => {
     expect(getAgentProfiles()).toEqual(DEFAULT_AGENT_PROFILES);
   });
 
-  it("ships the documented test stage budget (urateam#38 baseline)", () => {
-    // The whole point of urateam#38 is that this baseline is too tight
-    // for bootstrapping. The override path is the fix; defaults are
-    // unchanged. Asserting the known shape so a silent default bump
+  it("ships the documented test + implement stage budgets", () => {
+    // BEC-162 (2026-05-06 BEC-138 dogfood): bumped from implement=50/test=25
+    // to implement=100/test=50 after non-trivial sev-2 tickets repeatedly
+    // hit the old caps. urateam#38 (bootstrapping) and the override path
+    // are unchanged; this is just a more realistic baseline for
+    // mature-repo work. Asserting exact shape so any future silent bump
     // shows up in review.
     expect(DEFAULT_AGENT_PROFILES.test).toMatchObject({
-      maxTurns: 25,
+      maxTurns: 50,
       maxInputTokens: 30_000,
       model: "claude-haiku-4-5",
+    });
+    expect(DEFAULT_AGENT_PROFILES.implement).toMatchObject({
+      maxTurns: 100,
+      maxInputTokens: 100_000,
     });
   });
 });
@@ -88,7 +94,7 @@ describe("getAgentProfiles env override", () => {
       test: { maxTurns: 0, maxInputTokens: -1 },
     });
     const p = getAgentProfiles();
-    expect(p.test.maxTurns).toBe(25); // default kept
+    expect(p.test.maxTurns).toBe(50); // BEC-162 default kept
     expect(p.test.maxInputTokens).toBe(30_000); // default kept
   });
 
