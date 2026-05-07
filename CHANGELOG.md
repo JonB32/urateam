@@ -15,10 +15,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions below refer to the workspace version published to npm. Per-package
 notes call out when a change affects only a single package.
 
-## [Unreleased]
+## [0.1.36] — 2026-05-07
+
+Bumps:
+- `@urateam/core`: 0.1.21 → 0.1.22
+- `@urateam/cli`: 0.1.23 → 0.1.24
+- `@urateam/dashboard`: 0.1.21 → 0.1.22
+- `create-urateam`: 0.1.24 → 0.1.25
+
+### Added
+- **BEC-163** — `URATEAM_DEEP_REVIEW_PASSES` env knob to opt into BEC-134's OpenRouter multi-model fanout without forking the built-in pipeline configs. When set to a non-negative integer, applies to every pipeline that has a `review` stage in its `stages` array (so `auto-implement`, `bug`, `needs-design` — `quick-fix` is correctly excluded since it has no review stage). Default unset preserves today's behavior (every pipeline keeps `deepReviewPasses=0`). Validation rejects floats / non-integer strings. (#169, #170)
+- **BEC-158** — Multi-model review fanout now posts a fallback advisory comment with the raw model output when the structured-finding parse fails. Previously, OpenRouter calls were made (cost incurred) but the prose output was discarded if it didn't conform to the expected JSON schema. Operators now see *something* per model even when the model emits prose. Audit event `review.fanout_fallback_used` fires so deployments hitting this path are detectable. (#166)
 
 ### Fixed (OSS+)
-- **BEC-159** — RALPH evaluation agent turn cap raised from 6 to 15. The previous 6-turn cap was insufficient for acceptance criteria requiring shell-execution verification (e.g. "pnpm -r test must pass"), which requires ≥ 6 turns just to read the ticket, inspect the diff, run the command, and produce a verdict. RALPH would exhaust the cap before returning a verdict, causing correctly-implemented PRs to be incorrectly drafted for human review. Operators can override via the `RALPH_MAX_TURNS` environment variable for tickets whose acceptance criteria require more extensive shell verification.
+- **BEC-159** — RALPH evaluation agent turn cap raised from 6 to 15. The previous 6-turn cap was insufficient for acceptance criteria requiring shell-execution verification (e.g. "pnpm -r test must pass"), which requires ≥ 6 turns just to read the ticket, inspect the diff, run the command, and produce a verdict. RALPH would exhaust the cap before returning a verdict, causing correctly-implemented PRs to be incorrectly drafted for human review. Operators can override via the `RALPH_MAX_TURNS` environment variable for tickets whose acceptance criteria require more extensive shell verification. (#167)
+
+### Chore
+- `docker-compose.dogfood.yml` `args:` block sync'd to v0.1.35 versions (this got stale during BEC-138 bootstrap and silently pinned `npm install -g` to old packages until the v0.1.35 dogfood rebuild surfaced it). Future releases bump both Dockerfile ARG defaults and compose `args:` together. (#168)
 
 ## [0.1.35] — 2026-05-06
 
