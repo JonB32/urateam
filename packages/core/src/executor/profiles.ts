@@ -51,13 +51,18 @@ export const DEFAULT_AGENT_PROFILES: Record<string, AgentProfile> = deepFreeze({
   implement: {
     tools: ["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
     maxInputTokens: 100_000,
-    maxTurns: 50,
+    // BEC-162: bumped 50→100. Non-trivial sev-2 fixes (5-10 file reads +
+    // 5-10 writes + iterative bash) repeatedly hit the old cap on BEC-138
+    // dogfood. Daily budget + BEC-161 circuit breaker still bound total
+    // spend; per-stage cap just prevents single-run runaway.
+    maxTurns: 100,
     model: DEFAULT_MODEL,
   },
   test: {
     tools: ["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
     maxInputTokens: 30_000,
-    maxTurns: 25,
+    // BEC-162: bumped 25→50 for the same reason as implement above.
+    maxTurns: 50,
     model: HAIKU_MODEL,
   },
   review: {
