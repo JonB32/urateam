@@ -48,6 +48,11 @@ describe("preflightDirs (BEC-152)", () => {
   });
 
   it("exits 1 with a clear error when AGENT_RUN_DIR is not writable", async () => {
+    // chmod-based permission checks don't work when running as root.
+    // Root can always write regardless of mode bits.
+    const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+    if (isRoot) return;
+
     // Create a read-only parent dir
     const readOnlyParent = join(tempRoot, "readonly");
     mkdirSync(readOnlyParent);
@@ -68,6 +73,10 @@ describe("preflightDirs (BEC-152)", () => {
   });
 
   it("exits 1 with a clear error when REPO_CLONE_DIR is not writable", async () => {
+    // chmod-based permission checks don't work when running as root.
+    const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+    if (isRoot) return;
+
     const readOnlyParent = join(tempRoot, "readonly");
     mkdirSync(readOnlyParent);
     chmodSync(readOnlyParent, 0o555);
