@@ -122,6 +122,71 @@ describe("createReleaseManagerScheduler — single tick", () => {
     expect(octokit.git.createRef).not.toHaveBeenCalled();
   });
 
+  it("BEC-160: skip path emits a stdout log.info so operators see the tick (visibility gap fix)", async () => {
+    // Capture stdout chunks while the tick runs. Pino writes JSON-per-line to
+    // process.stdout; we assert one of those lines reflects the skip event.
+    const writes: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    const spy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: any) => {
+      writes.push(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+      return true;
+    });
+
+    try {
+      const cfg = ReleaseManagerConfigSchema.parse({
+        enabled: true,
+        triggers: { mergedPRsSince: 100 },
+      });
+      const octokit = makeMockOctokit();
+      const sched = createReleaseManagerScheduler({
+        config: cfg, db, octokit, repoUrl, isLicensed: () => true, slack: undefined,
+      });
+      await sched.tick();
+    } finally {
+      spy.mockRestore();
+      // Flush any captured noise so test runner output is unaffected
+      writes.forEach((w) => orig(w));
+    }
+
+    const logLines = writes.filter((w) => w.includes("ReleaseManager:scheduler"));
+    const skipLine = logLines.find((w) =>
+      w.includes("tick skip") || w.includes("triggers not met"),
+    );
+    expect(skipLine, `expected a tick-skip log line; got ${JSON.stringify(logLines)}`).toBeDefined();
+    expect(skipLine).toMatch(/mergedPRsSince not met/);
+  });
+
+  it("BEC-160 review: fire path also emits a stdout log.info — a successful release must not be silent", async () => {
+    // Same captured-stdout pattern as the skip-path test above. Asserts the
+    // fire branch (the production-event branch) also surfaces in docker logs.
+    const writes: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    const spy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: any) => {
+      writes.push(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+      return true;
+    });
+
+    try {
+      const cfg = ReleaseManagerConfigSchema.parse({
+        enabled: true,
+        triggers: { mergedPRsSince: 1 },
+      });
+      const octokit = makeMockOctokit();
+      const sched = createReleaseManagerScheduler({
+        config: cfg, db, octokit, repoUrl, isLicensed: () => true, slack: undefined,
+      });
+      await sched.tick();
+    } finally {
+      spy.mockRestore();
+      writes.forEach((w) => orig(w));
+    }
+
+    const logLines = writes.filter((w) => w.includes("ReleaseManager:scheduler"));
+    const fireLine = logLines.find((w) => w.includes("tick fire"));
+    expect(fireLine, `expected a tick-fire log line; got ${JSON.stringify(logLines)}`).toBeDefined();
+    expect(fireLine).toMatch(/v1\.0\.1/);
+  });
+
   it("awaiting-approval path: requireSlackApproval=true with no fresh approval → awaiting-approval row, Slack prompt, no tag", async () => {
     const cfg = ReleaseManagerConfigSchema.parse({
       enabled: true,
