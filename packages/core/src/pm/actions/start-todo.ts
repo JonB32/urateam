@@ -20,6 +20,18 @@ export interface StartTodoInput {
   maxPerTick: number;
   /** Budget evaluation from the current tick. When blocked, this action short-circuits. */
   budgetEvaluation?: BudgetEvaluation;
+  /**
+   * BEC-161: when set, Todo issues whose pipeline has ≥ this many consecutive
+   * failed runs (since the last success) are skipped. Leave undefined to
+   * disable the breaker.
+   */
+  maxConsecutiveFailures?: number;
+  /**
+   * BEC-161: returns the number of consecutive failed runs for an issue.
+   * Production wires this to `countConsecutiveFailures(db, issueId)`.
+   * Required when `maxConsecutiveFailures` is set.
+   */
+  getFailureCount?: (issueId: string) => Promise<number>;
 }
 
 export interface StartTodoResult {
@@ -103,6 +115,33 @@ export async function startTodoIssues(
   const results: StartTodoResult[] = [];
 
   for (const issue of toProcess) {
+    // BEC-161: circuit breaker — fire FIRST, before any Linear SDK round-trips
+    // (issue.team / issue.project / issue.labels each cost an API call). For a
+    // ticket that's been doom-looping, this saves three SDK calls per tick per
+    // candidate. issue.identifier is already on the result of the initial
+    // Todo-issues query, so no extra round-trip is needed for the count.
+    if (input.maxConsecutiveFailures !== undefined) {
+      if (!input.getFailureCount) {
+        throw new Error(
+          "startTodoIssues: maxConsecutiveFailures requires getFailureCount to be set",
+        );
+      }
+      const failureCount = await input.getFailureCount(issue.identifier);
+      if (failureCount >= input.maxConsecutiveFailures) {
+        results.push({
+          identifier: issue.identifier,
+          title: issue.title,
+          started: false,
+          reason: `circuit-breaker: ${failureCount} consecutive failed runs (threshold ${input.maxConsecutiveFailures})`,
+        });
+        log.warn(
+          { identifier: issue.identifier, failureCount, threshold: input.maxConsecutiveFailures },
+          "circuit-breaker engaged — skipping start",
+        );
+        continue;
+      }
+    }
+
     const team = await issue.team;
     const teamId = team?.id;
     const project = await issue.project;

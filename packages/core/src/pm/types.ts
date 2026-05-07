@@ -20,6 +20,12 @@ export const PmAgentConfigSchema = z.object({
    * set via PM_AGENT_REQUIRE_PIPELINE_LABEL_FOR_PROMOTE=true.
    */
   requirePipelineLabelForPromote: z.boolean().default(false),
+  /**
+   * BEC-161: when set, promote and start-todo skip issues with this many or
+   * more consecutive failed pipeline runs (since the last successful run).
+   * Set via PM_AGENT_MAX_CONSECUTIVE_FAILURES (default 3, 0 disables).
+   */
+  maxConsecutiveFailures: z.number().int().min(0).default(3),
   budgets: z
     .object({
       /** Default daily token budget for any team or repo not explicitly listed. Falls back to top-level dailyTokenBudget if omitted. */

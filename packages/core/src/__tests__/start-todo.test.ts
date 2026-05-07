@@ -234,4 +234,84 @@ describe("startTodoIssues", () => {
     expect(results[0].reason).toContain("clone failed");
     expect(results[1].started).toBe(true);
   });
+
+  describe("circuit breaker (BEC-161)", () => {
+    it("skips Todo issue with N+ consecutive failed runs WITHOUT touching Linear SDK (saves 3 round-trips)", async () => {
+      // Spy on the Linear-SDK awaits so we can assert the breaker fires
+      // before any of them — proving the doom-looping ticket cost is just
+      // the cheap getFailureCount call, not 3 expensive SDK round-trips.
+      const labelsSpy = vi.fn().mockResolvedValue({ nodes: [{ name: "auto-implement" }] });
+      const issue = {
+        ...makeIssue({ identifier: "BEC-161-T1" }),
+        labels: labelsSpy,
+      };
+      const teamSpy = vi.spyOn(issue as any, "team", "get");
+      const projectSpy = vi.spyOn(issue as any, "project", "get");
+      const runner = { start: vi.fn() };
+      const input: StartTodoInput = {
+        linearClient: mockLinearClient([issue]),
+        db: mockDb([]),
+        teamIds: ["team-1"],
+        runner: runner as any,
+        pipelineConfigs,
+        repoConfigs,
+        maxPerTick: 5,
+        maxConsecutiveFailures: 3,
+        getFailureCount: vi.fn().mockResolvedValue(3),
+      };
+
+      const results = await startTodoIssues(input);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].started).toBe(false);
+      expect(results[0].reason).toMatch(/circuit.breaker/i);
+      expect(runner.start).not.toHaveBeenCalled();
+      expect(labelsSpy).not.toHaveBeenCalled();
+      expect(teamSpy).not.toHaveBeenCalled();
+      expect(projectSpy).not.toHaveBeenCalled();
+    });
+
+    it("starts Todo issue with fewer than N consecutive failures", async () => {
+      const issue = makeIssue({ identifier: "BEC-161-T2" });
+      const runner = { start: vi.fn().mockResolvedValue(undefined) };
+      const input: StartTodoInput = {
+        linearClient: mockLinearClient([issue]),
+        db: mockDb([]),
+        teamIds: ["team-1"],
+        runner: runner as any,
+        pipelineConfigs,
+        repoConfigs,
+        maxPerTick: 5,
+        maxConsecutiveFailures: 3,
+        getFailureCount: vi.fn().mockResolvedValue(2),
+      };
+
+      const results = await startTodoIssues(input);
+
+      expect(results[0].started).toBe(true);
+      expect(runner.start).toHaveBeenCalledOnce();
+    });
+
+    it("breaker disabled when maxConsecutiveFailures is undefined (back-compat)", async () => {
+      const issue = makeIssue({ identifier: "BEC-161-T3" });
+      const runner = { start: vi.fn().mockResolvedValue(undefined) };
+      const getFailureCount = vi.fn().mockResolvedValue(99);
+      const input: StartTodoInput = {
+        linearClient: mockLinearClient([issue]),
+        db: mockDb([]),
+        teamIds: ["team-1"],
+        runner: runner as any,
+        pipelineConfigs,
+        repoConfigs,
+        maxPerTick: 5,
+        // maxConsecutiveFailures intentionally omitted
+        getFailureCount,
+      };
+
+      const results = await startTodoIssues(input);
+
+      expect(results[0].started).toBe(true);
+      expect(getFailureCount).not.toHaveBeenCalled();
+    });
+  });
 });
