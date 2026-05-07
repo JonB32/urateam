@@ -530,6 +530,13 @@ export function createReleaseManagerScheduler(
         mergedPrCount: state.mergedCommitsSinceLastTag,
       }),
     );
+    // BEC-160: stdout visibility for the fire path. A successful release is a
+    // production event — operators must see it in `docker logs`, not just the
+    // audit table. Slack-suppressed deployments would otherwise be silent.
+    log.info(
+      { repoUrl, branch, tag: proposedVersion, sha: state.headSha, mergedPrCount: state.mergedCommitsSinceLastTag, releaseUrl: githubResult.releaseUrl },
+      "tick fire",
+    );
     await maybePostSlack(
       `:rocket: Released *${proposedVersion}* for ${repoUrl} (${branch}). ${githubResult.releaseUrl}`,
       null,
