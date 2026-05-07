@@ -5,7 +5,7 @@
  * by writing a `.touch` test file. Exits with a clear error message if either
  * directory cannot be created or written to.
  *
- * Addresses BEC-152: default /var paths are not writable in non-root containers.
+ * Fixes BEC-152: default /var paths are not writable in non-root containers.
  */
 import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
