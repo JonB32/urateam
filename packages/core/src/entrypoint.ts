@@ -1,23 +1,13 @@
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { serve } from "@hono/node-server";
 import { createApp } from "./server.js";
 import { defaultConfigs } from "./pipeline/config.js";
-import type { GitHubConfig } from "./repo/github.js";
+import { buildGitHubConfigFromEnv } from "./repo/github-from-env.js";
 import { cleanupWorktrees } from "./repo/git.js";
 
 // Build optional GitHub config from env vars
-let github: GitHubConfig | undefined;
-if (process.env.GITHUB_APP_ID && process.env.GITHUB_PRIVATE_KEY_PATH) {
-  github = {
-    appId: process.env.GITHUB_APP_ID,
-    privateKey: readFileSync(process.env.GITHUB_PRIVATE_KEY_PATH, "utf-8"),
-    installationId: process.env.GITHUB_INSTALLATION_ID
-      ? parseInt(process.env.GITHUB_INSTALLATION_ID, 10)
-      : undefined,
-  };
-}
+const github = buildGitHubConfigFromEnv();
 
 // Build optional dashboard auth.
 // NOTE: core cannot import @urateam/dashboard (would be circular).
@@ -55,7 +45,8 @@ const config = {
   slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
   discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL,
   concurrency: parseInt(process.env.MAX_CONCURRENT_RUNS ?? "3", 10),
-  agentRunDir: process.env.AGENT_RUN_DIR,
+  agentRunDir: process.env.AGENT_RUN_DIR ?? join(homedir(), "data", "runs"),
+  repoCloneDir: process.env.REPO_CLONE_DIR ?? join(homedir(), "work", "repos"),
   github,
   dashboardAuth,
   githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET,
@@ -78,7 +69,7 @@ async function main() {
   // Failed pipeline runs preserve their worktrees for debugging.  Run an
   // initial sweep at startup, then repeat every hour so stale directories
   // don't accumulate between restarts.
-  const agentRunDir = config.agentRunDir ?? join(homedir(), "data", "runs");
+  const agentRunDir = config.agentRunDir;
   async function runWorktreeCleanup() {
     const removed = await cleanupWorktrees(agentRunDir, worktreeTtlHours);
     if (removed.length > 0) {

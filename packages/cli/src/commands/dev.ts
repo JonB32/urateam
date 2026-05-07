@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
 import { preflightClaudeAuth } from "../lib/preflight-claude-auth.js";
 import { preflightDirs } from "../lib/preflight-dirs.js";
-import { repoPluginsFromEnv } from "../lib/repo-plugins-from-env.js";
+import { buildRepoConfigsFromEnv, requireRepoConfigs } from "../lib/build-repo-configs.js";
 
 export const devCommand = new Command("dev")
   .description("Start local development server (webhook + dashboard)")
@@ -22,33 +22,7 @@ export const devCommand = new Command("dev")
         : undefined;
 
     // Build repoConfigs from env: REPO_TEAM_ID, REPO_URL, REPO_DEFAULT_BRANCH, etc.
-    const repoConfigs: Record<string, import("@urateam/core").RepoConfig> = {};
-    if (process.env.REPO_TEAM_ID && process.env.REPO_URL) {
-      const repoEntry: import("@urateam/core").RepoConfig = {
-        url: process.env.REPO_URL,
-        defaultBranch: process.env.REPO_DEFAULT_BRANCH ?? "main",
-        testCommand: process.env.REPO_TEST_CMD ?? "pnpm test",
-        buildCommand: process.env.REPO_BUILD_CMD ?? "pnpm build",
-      };
-
-      if (process.env.GITHUB_WEBHOOK_SECRET) {
-        repoEntry.githubFeedback = {
-          autoTrigger: process.env.GITHUB_FEEDBACK_AUTO_TRIGGER !== "false",
-          triggerKeyword: process.env.GITHUB_FEEDBACK_TRIGGER_KEYWORD,
-          allowedReviewers: process.env.GITHUB_FEEDBACK_ALLOWED_REVIEWERS
-            ? process.env.GITHUB_FEEDBACK_ALLOWED_REVIEWERS.split(",").filter(Boolean)
-            : undefined,
-          botLogins: process.env.GITHUB_FEEDBACK_BOT_LOGINS
-            ? process.env.GITHUB_FEEDBACK_BOT_LOGINS.split(",").filter(Boolean)
-            : undefined,
-        };
-      }
-
-      const pluginCfg = repoPluginsFromEnv();
-      if (pluginCfg) repoEntry.plugins = pluginCfg;
-
-      repoConfigs[process.env.REPO_TEAM_ID] = repoEntry;
-    }
+    const repoConfigs = buildRepoConfigsFromEnv();
 
     // Fail fast if no repoConfigs could be built. Without this, `ura dev`
     // looks healthy in logs (webhook server up, dashboard up) but every
@@ -56,16 +30,7 @@ export const devCommand = new Command("dev")
     // the user has already moved a real issue to Todo. The first-time-user
     // setup path nearly always lands here because .urateam/.env ships with
     // `REPO_URL=` and `REPO_TEAM_ID=` blank. See urateam#33.
-    if (Object.keys(repoConfigs).length === 0) {
-      console.error(
-        "Error: no repoConfigs could be built from environment variables.\n" +
-          "Set REPO_TEAM_ID and REPO_URL in .urateam/.env and restart.\n" +
-          "Example:\n" +
-          "  REPO_TEAM_ID=<your Linear team UUID — usually the same as LINEAR_TEAM_ID>\n" +
-          "  REPO_URL=https://github.com/org/repo\n",
-      );
-      process.exit(1);
-    }
+    requireRepoConfigs(repoConfigs, "ura dev");
 
     // --- Resolve and validate workspace directories ---
     const agentRunDir = process.env.AGENT_RUN_DIR ?? join(homedir(), "data", "runs");
