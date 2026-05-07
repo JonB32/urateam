@@ -1,5 +1,8 @@
 import { PipelineConfigSchema, RepoConfigSchema } from "../types.js";
 import type { PipelineConfig, RepoConfig } from "../types.js";
+import { createLogger } from "../logger.js";
+
+const log = createLogger({ component: "pipeline.config" });
 
 // Shared reduced-cost loop defaults applied to every built-in pipeline.
 // These can be overridden per-pipeline in your own config by setting explicit values.
@@ -61,6 +64,42 @@ export function validatePipelineConfigs(
     validated[key] = result.data;
   }
   return validated;
+}
+
+/**
+ * BEC-163: env-var override for `deepReviewPasses` so operators can enable
+ * BEC-134 OpenRouter fanout without forking the built-in pipeline configs.
+ *
+ * Returns a new map where every pipeline whose `stages` array includes
+ * `"review"` has its `deepReviewPasses` set to the parsed env value.
+ * Pipelines without a `review` stage are passed through untouched (the
+ * fanout has nothing to attach to and the cost would be wasted).
+ *
+ * `envValue === undefined` → returns the input unchanged.
+ * Invalid input (non-integer, negative) → logs warn, returns input unchanged.
+ */
+export function applyDeepReviewPassesOverride(
+  configs: Record<string, PipelineConfig>,
+  envValue: string | undefined,
+): Record<string, PipelineConfig> {
+  if (envValue === undefined) return configs;
+  const n = parseInt(envValue, 10);
+  if (Number.isNaN(n) || n < 0 || envValue.trim() === "") {
+    log.warn(
+      { envValue, var: "URATEAM_DEEP_REVIEW_PASSES" },
+      "URATEAM_DEEP_REVIEW_PASSES must be a non-negative integer — ignoring",
+    );
+    return configs;
+  }
+  const result: Record<string, PipelineConfig> = {};
+  for (const [key, cfg] of Object.entries(configs)) {
+    if ((cfg.stages ?? []).includes("review")) {
+      result[key] = { ...cfg, deepReviewPasses: n };
+    } else {
+      result[key] = cfg;
+    }
+  }
+  return result;
 }
 
 export function validateRepoConfigs(

@@ -10,7 +10,7 @@ export const startCommand = new Command("start")
   .option("--dashboard-port <port>", "Dashboard port", "3001")
   .action(async (options) => {
     try {
-    const { createApp, defaultConfigs, cleanupWorktrees, addLogStream, initSlackAlertManager, createSlackAlertStream } = await import("@urateam/core");
+    const { createApp, defaultConfigs, applyDeepReviewPassesOverride, cleanupWorktrees, addLogStream, initSlackAlertManager, createSlackAlertStream } = await import("@urateam/core");
 
     // --- Slack error alerts (opt-in) ---
     if (
@@ -243,10 +243,19 @@ export const startCommand = new Command("start")
       }
     }
 
+    // BEC-163: enable BEC-134 OpenRouter fanout via env. Unset = defaults
+    // unchanged (every pipeline keeps deepReviewPasses=0). Set to a
+    // non-negative integer to override on every pipeline that has a
+    // `review` stage (auto-implement, bug, needs-design — not quick-fix).
+    const pipelineConfigs = applyDeepReviewPassesOverride(
+      defaultConfigs,
+      process.env.URATEAM_DEEP_REVIEW_PASSES,
+    );
+
     const config = {
       webhookSecret: process.env.LINEAR_WEBHOOK_SECRET,
       linearApiKey: process.env.LINEAR_API_KEY ?? "",
-      pipelineConfigs: defaultConfigs,
+      pipelineConfigs,
       repoConfigs,
       databaseUrl: process.env.DATABASE_URL,
       slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
