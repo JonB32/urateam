@@ -5,13 +5,18 @@ import { createLogger } from "../../logger.js";
 
 const log = createLogger({ component: "PostFanoutComments" });
 
+export interface PostFanoutResult {
+  /** Number of runs where raw-output fallback was used (structured parse failed). */
+  fallbackCount: number;
+}
+
 export async function postFanoutCommentsToPR(
   octokit: Octokit,
   owner: string,
   repo: string,
   prNumber: number,
   runs: ReviewModelRun[],
-): Promise<void> {
+): Promise<PostFanoutResult> {
   const results = await Promise.allSettled(
     runs.map((run) =>
       addPRComment(octokit, owner, repo, prNumber, renderRunMarkdown(run)),
@@ -26,9 +31,11 @@ export async function postFanoutCommentsToPR(
       );
     }
   });
+  const fallbackCount = runs.filter((r) => r.rawOutput !== undefined).length;
+  return { fallbackCount };
 }
 
-function renderRunMarkdown(run: ReviewModelRun): string {
+export function renderRunMarkdown(run: ReviewModelRun): string {
   const tokens = `${run.inputTokens.toLocaleString()} in / ${run.outputTokens.toLocaleString()} out tokens`;
   const seconds = (run.durationMs / 1000).toFixed(1);
   const header = `🔎 Review by \`${run.modelId}\` (via OpenRouter)\n\n`;
@@ -37,6 +44,20 @@ function renderRunMarkdown(run: ReviewModelRun): string {
       header,
       `Status: failed · ${run.errorMessage ?? "unknown error"} · ${seconds}s\n\n`,
       "_Advisory only — does not block merge._\n",
+    ].join("");
+  }
+  const truncationNote =
+    run.truncatedFiles && run.truncatedFiles > 0
+      ? `\n\n_Note: input truncated; ${run.truncatedFiles} file ${run.truncatedFiles === 1 ? "body" : "bodies"} dropped to fit context window._`
+      : "";
+  // Fallback: raw output when structured parse failed
+  if (run.rawOutput !== undefined) {
+    return [
+      header,
+      `Status: completed (raw output, structured parse failed) · ${tokens} · ${seconds}s\n\n`,
+      run.rawOutput,
+      truncationNote,
+      "\n\n_Advisory only — does not block merge. See deep-review for blocking findings._\n",
     ].join("");
   }
   const table =
@@ -50,10 +71,6 @@ function renderRunMarkdown(run: ReviewModelRun): string {
               `| ${f.severity} | ${escapeCell(f.file)} | ${f.line} | ${escapeCell(f.category)} | ${escapeCell(f.description)} |`,
           ),
         ].join("\n");
-  const truncationNote =
-    run.truncatedFiles && run.truncatedFiles > 0
-      ? `\n\n_Note: input truncated; ${run.truncatedFiles} file ${run.truncatedFiles === 1 ? "body" : "bodies"} dropped to fit context window._`
-      : "";
   return [
     header,
     `Status: completed · ${tokens} · ${seconds}s\n\n`,

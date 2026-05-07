@@ -23,6 +23,8 @@ export interface ReviewModelRun {
   durationMs: number;
   errorMessage?: string;
   truncatedFiles?: number;
+  /** Raw model output, set when structured findings parse failed. */
+  rawOutput?: string;
 }
 
 export interface ReviewProvider {

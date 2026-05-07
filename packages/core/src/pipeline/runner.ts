@@ -89,7 +89,7 @@ import { createLogger, runWithLogContext } from "../logger.js";
 import { isTransientError, MAX_TRANSIENT_RETRIES } from "./error-classifier.js";
 import { evaluatePolicyGates } from "../policy/evaluate.js";
 import { buildReviewerRequest, verifyApprovalsReceived } from "../policy/index.js";
-import { logAuditEvent, policyReviewersRequestedEvent } from "../audit/index.js";
+import { logAuditEvent, policyReviewersRequestedEvent, reviewFanoutFallbackUsedEvent } from "../audit/index.js";
 import { matchesAnyPattern } from "../util/glob.js";
 
 // Module-level logger (no runId yet — used for pre-run messages)
@@ -1949,7 +1949,7 @@ export class PipelineRunner {
                 repoConfig.url,
               );
               const fanoutOctokit = await createGitHubClient(this.githubConfig);
-              await postFanoutCommentsToPR(
+              const fanoutResult = await postFanoutCommentsToPR(
                 fanoutOctokit,
                 fanoutOwner,
                 fanoutRepo,
@@ -1957,9 +1957,22 @@ export class PipelineRunner {
                 pendingFanoutRuns,
               );
               runLog.info(
-                { prNumber: fanoutPrNumber, count: pendingFanoutRuns.length },
+                { prNumber: fanoutPrNumber, count: pendingFanoutRuns.length, fallbackCount: fanoutResult.fallbackCount },
                 "fanout: posted per-model PR comments",
               );
+              if (fanoutResult.fallbackCount > 0) {
+                const fallbackModels = pendingFanoutRuns
+                  .filter((r) => r.rawOutput !== undefined)
+                  .map((r) => r.modelId);
+                void logAuditEvent(
+                  this.db as AnyDb,
+                  reviewFanoutFallbackUsedEvent({
+                    runId,
+                    prNumber: fanoutPrNumber,
+                    fallbackModels,
+                  }),
+                );
+              }
             } catch (err) {
               runLog.warn(
                 { err: err instanceof Error ? err.message : String(err) },
