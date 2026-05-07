@@ -115,6 +115,33 @@ export async function startTodoIssues(
   const results: StartTodoResult[] = [];
 
   for (const issue of toProcess) {
+    // BEC-161: circuit breaker — fire FIRST, before any Linear SDK round-trips
+    // (issue.team / issue.project / issue.labels each cost an API call). For a
+    // ticket that's been doom-looping, this saves three SDK calls per tick per
+    // candidate. issue.identifier is already on the result of the initial
+    // Todo-issues query, so no extra round-trip is needed for the count.
+    if (input.maxConsecutiveFailures !== undefined) {
+      if (!input.getFailureCount) {
+        throw new Error(
+          "startTodoIssues: maxConsecutiveFailures requires getFailureCount to be set",
+        );
+      }
+      const failureCount = await input.getFailureCount(issue.identifier);
+      if (failureCount >= input.maxConsecutiveFailures) {
+        results.push({
+          identifier: issue.identifier,
+          title: issue.title,
+          started: false,
+          reason: `circuit-breaker: ${failureCount} consecutive failed runs (threshold ${input.maxConsecutiveFailures})`,
+        });
+        log.warn(
+          { identifier: issue.identifier, failureCount, threshold: input.maxConsecutiveFailures },
+          "circuit-breaker engaged — skipping start",
+        );
+        continue;
+      }
+    }
+
     const team = await issue.team;
     const teamId = team?.id;
     const project = await issue.project;
@@ -136,29 +163,6 @@ export async function startTodoIssues(
       });
       log.info({ identifier: issue.identifier, labels: labelNames }, "no pipeline match — skipping");
       continue;
-    }
-
-    // BEC-161: circuit breaker — skip issues with too many consecutive failures.
-    if (input.maxConsecutiveFailures !== undefined) {
-      if (!input.getFailureCount) {
-        throw new Error(
-          "startTodoIssues: maxConsecutiveFailures requires getFailureCount to be set",
-        );
-      }
-      const failureCount = await input.getFailureCount(issue.identifier);
-      if (failureCount >= input.maxConsecutiveFailures) {
-        results.push({
-          identifier: issue.identifier,
-          title: issue.title,
-          started: false,
-          reason: `circuit-breaker: ${failureCount} consecutive failed runs (threshold ${input.maxConsecutiveFailures})`,
-        });
-        log.warn(
-          { identifier: issue.identifier, failureCount, threshold: input.maxConsecutiveFailures },
-          "circuit-breaker engaged — skipping start",
-        );
-        continue;
-      }
     }
 
     // Resolve repo config from team/project ID

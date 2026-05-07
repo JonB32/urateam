@@ -236,8 +236,17 @@ describe("startTodoIssues", () => {
   });
 
   describe("circuit breaker (BEC-161)", () => {
-    it("skips Todo issue with N+ consecutive failed runs", async () => {
-      const issue = makeIssue({ identifier: "BEC-161-T1" });
+    it("skips Todo issue with N+ consecutive failed runs WITHOUT touching Linear SDK (saves 3 round-trips)", async () => {
+      // Spy on the Linear-SDK awaits so we can assert the breaker fires
+      // before any of them — proving the doom-looping ticket cost is just
+      // the cheap getFailureCount call, not 3 expensive SDK round-trips.
+      const labelsSpy = vi.fn().mockResolvedValue({ nodes: [{ name: "auto-implement" }] });
+      const issue = {
+        ...makeIssue({ identifier: "BEC-161-T1" }),
+        labels: labelsSpy,
+      };
+      const teamSpy = vi.spyOn(issue as any, "team", "get");
+      const projectSpy = vi.spyOn(issue as any, "project", "get");
       const runner = { start: vi.fn() };
       const input: StartTodoInput = {
         linearClient: mockLinearClient([issue]),
@@ -257,6 +266,9 @@ describe("startTodoIssues", () => {
       expect(results[0].started).toBe(false);
       expect(results[0].reason).toMatch(/circuit.breaker/i);
       expect(runner.start).not.toHaveBeenCalled();
+      expect(labelsSpy).not.toHaveBeenCalled();
+      expect(teamSpy).not.toHaveBeenCalled();
+      expect(projectSpy).not.toHaveBeenCalled();
     });
 
     it("starts Todo issue with fewer than N consecutive failures", async () => {

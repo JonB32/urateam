@@ -64,7 +64,11 @@ export async function countConsecutiveFailures(
         inArray(pipelineRuns.status, ["completed", "failed"]),
       ),
     )
-    .orderBy(desc(pipelineRuns.startedAt));
+    // Secondary tie-breaker on `id`: SQL leaves ties on `startedAt` undefined,
+    // and runs queued in the same scheduler tick (or in fast test fixtures)
+    // can share the second-resolution timestamp. `id` is a monotonic random
+    // string, so it gives us a stable ordering when `startedAt` collides.
+    .orderBy(desc(pipelineRuns.startedAt), desc(pipelineRuns.id));
 
   let count = 0;
   for (const row of rows as Array<{ status: string }>) {
