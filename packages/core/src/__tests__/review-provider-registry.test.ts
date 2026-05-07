@@ -77,4 +77,38 @@ describe("review-provider registry — fanout selection", () => {
     const models = (fanout as unknown as { cfg: { models: string[] } }).cfg.models;
     expect(models).toEqual(["m1", "m2"]);
   });
+
+  describe("BEC-164 REVIEW_MODELS_MAX_OUTPUT_TOKENS env parsing", () => {
+    function fanoutCfg(env: NodeJS.ProcessEnv) {
+      const ps = getEnabledProviders(env);
+      const fanout = ps.find((p) => p.id === "openrouter");
+      return (fanout as unknown as { cfg: { maxOutputTokens?: number } }).cfg;
+    }
+
+    it("when env unset, maxOutputTokens is undefined (preserves model default)", () => {
+      const cfg = fanoutCfg({ REVIEW_MODELS: "m1", OPENROUTER_API_KEY: "sk" });
+      expect(cfg.maxOutputTokens).toBeUndefined();
+    });
+
+    it("when set to a positive integer, parses as number", () => {
+      const cfg = fanoutCfg({
+        REVIEW_MODELS: "m1",
+        OPENROUTER_API_KEY: "sk",
+        REVIEW_MODELS_MAX_OUTPUT_TOKENS: "4000",
+      });
+      expect(cfg.maxOutputTokens).toBe(4000);
+    });
+
+    it("invalid input (zero / negative / non-numeric) → undefined (caller's chatCompletion gets no maxTokens)", () => {
+      expect(
+        fanoutCfg({ REVIEW_MODELS: "m1", OPENROUTER_API_KEY: "sk", REVIEW_MODELS_MAX_OUTPUT_TOKENS: "0" }).maxOutputTokens,
+      ).toBeUndefined();
+      expect(
+        fanoutCfg({ REVIEW_MODELS: "m1", OPENROUTER_API_KEY: "sk", REVIEW_MODELS_MAX_OUTPUT_TOKENS: "-1" }).maxOutputTokens,
+      ).toBeUndefined();
+      expect(
+        fanoutCfg({ REVIEW_MODELS: "m1", OPENROUTER_API_KEY: "sk", REVIEW_MODELS_MAX_OUTPUT_TOKENS: "lots" }).maxOutputTokens,
+      ).toBeUndefined();
+    });
+  });
 });

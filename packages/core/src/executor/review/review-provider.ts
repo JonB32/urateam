@@ -64,6 +64,10 @@ export function getEnabledProviders(env: NodeJS.ProcessEnv): ReviewProvider[] {
       models,
       timeoutMs: parseIntOr(env.REVIEW_MODELS_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
       maxInputTokens: parseIntOr(env.REVIEW_MODELS_MAX_INPUT_TOKENS, DEFAULT_MAX_INPUT_TOKENS),
+      // BEC-164: optional output-token cap. Unset = the model's provider
+      // default applies (can be huge → 402s on limited-budget accounts).
+      // Invalid input falls through to undefined so the cap stays unset.
+      maxOutputTokens: parsePositiveIntOrUndefined(env.REVIEW_MODELS_MAX_OUTPUT_TOKENS),
     }),
   );
   return providers;
@@ -73,4 +77,10 @@ function parseIntOr(raw: string | undefined, fallback: number): number {
   if (!raw) return fallback;
   const n = parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function parsePositiveIntOrUndefined(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
 }

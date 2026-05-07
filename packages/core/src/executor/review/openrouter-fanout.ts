@@ -12,6 +12,13 @@ export interface OpenRouterFanoutConfig {
   models: string[];
   timeoutMs: number;
   maxInputTokens: number;
+  /**
+   * BEC-164: optional cap on `max_tokens` forwarded to OpenRouter. Unset
+   * means the provider's default applies (which can be very high — e.g.
+   * gemini-2.5-pro defaults to 65536 — and burn credits on accounts with
+   * limited budget). Set to a positive integer (e.g. 4000) to bound cost.
+   */
+  maxOutputTokens?: number;
 }
 
 export class OpenRouterFanoutProvider implements ReviewProvider {
@@ -66,6 +73,7 @@ export class OpenRouterFanoutProvider implements ReviewProvider {
     try {
       const result = await this.client.chatCompletion(modelId, prompt.messages, {
         signal: ac.signal,
+        ...(this.cfg.maxOutputTokens !== undefined && { maxTokens: this.cfg.maxOutputTokens }),
       });
       // Try structured parse; fall back to raw output on parse failure.
       let findings: ReviewModelRun["findings"] = [];
