@@ -80,7 +80,12 @@ describe("OpenRouterFanoutProvider", () => {
     expect(ok).toHaveLength(2);
   });
 
-  it("malformed JSON output → run failed with parser error", async () => {
+  it("malformed JSON output → run completed with raw output preserved (BEC-158 fallback)", async () => {
+    // BEC-158 contract: when the model emits prose that doesn't parse as
+    // structured findings, the run should NOT be marked failed. Instead, the
+    // raw content is preserved on `rawOutput` so post-fanout-comments can
+    // post it as a fallback advisory comment. A parser exception ≠ provider
+    // failure; the API call succeeded and we paid for it.
     chatCompletion.mockResolvedValue({ content: "not json", inputTokens: 1, outputTokens: 1 });
     const { OpenRouterFanoutProvider } = await import(
       "../executor/review/openrouter-fanout.js"
@@ -90,8 +95,10 @@ describe("OpenRouterFanoutProvider", () => {
       models: ["m1"], timeoutMs: 1000, maxInputTokens: 100_000,
     });
     const runs = await p.runReview(ctx());
-    expect(runs[0].status).toBe("failed");
-    expect(runs[0].errorMessage).toContain("not parseable");
+    expect(runs[0].status).toBe("completed");
+    expect(runs[0].findings).toEqual([]);
+    expect(runs[0].rawOutput).toBe("not json");
+    expect(runs[0].errorMessage).toBeUndefined();
   });
 
   it("all models fail → returns N failed runs (does not throw)", async () => {
