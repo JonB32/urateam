@@ -76,6 +76,17 @@ export class LinearNotifier implements Notifier {
     const tasks: Promise<void>[] = [this.postComment(run.issueId, comment)];
     if (result.autoMerged) {
       tasks.push(this.transitionState(run.issueId, LINEAR_STATES.DONE));
+    } else if (result.prUrl) {
+      // BEC-165: ensure every pipeline that opens a PR moves Linear off
+      // "In Progress". Previously this was delegated to onHumanReviewNeeded,
+      // but the runner doesn't call that on every PR-creating path (e.g.
+      // auto-implement with autoMerge:false, no draft-flagging, no rebase
+      // conflict). Without this catch-all, the issue stayed on "In Progress"
+      // and recover-stuck moved it back to Backlog 30 min later → re-run
+      // loop on completed work, burning agent + OpenRouter tokens.
+      // Idempotent w/ onHumanReviewNeeded's transition (paths that call both
+      // see one extra Linear API call, no behavior change).
+      tasks.push(this.transitionState(run.issueId, LINEAR_STATES.IN_REVIEW));
     }
     await Promise.all(tasks);
   }

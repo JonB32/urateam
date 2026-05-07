@@ -29,7 +29,12 @@ export interface StuckIssueResult {
   title: string;
   previousState: string;
   lastRunStatus: string | null;
-  targetState: "Backlog" | "Todo";
+  /**
+   * BEC-165: includes "In Review" when the open-PR override redirects
+   * (last run completed AND has a pr_url AND a workspace In Review state
+   * exists). Otherwise the caller's input targetState ("Backlog" | "Todo").
+   */
+  targetState: "Backlog" | "Todo" | "In Review";
 }
 
 /**
@@ -105,14 +110,17 @@ export async function recoverStuckInProgressIssues(
   const toProcess = stuckIssues.slice(0, maxPerTick);
   const stuckIdentifiers = toProcess.map((i: any) => i.identifier);
 
-  // 5. Batch-fetch most recent pipeline run status for each stuck issue
+  // 5. Batch-fetch most recent pipeline run status + prUrl for each stuck issue.
+  //    BEC-165: prUrl is needed for the open-PR override below.
   const lastRunStatusMap = new Map<string, string>();
+  const lastRunPrUrlMap = new Map<string, string | null>();
   if (stuckIdentifiers.length > 0) {
     const runs = await db
       .select({
         issueId: pipelineRuns.issueId,
         status: pipelineRuns.status,
         startedAt: pipelineRuns.startedAt,
+        prUrl: pipelineRuns.prUrl,
       })
       .from(pipelineRuns)
       .where(inArray(pipelineRuns.issueId, stuckIdentifiers));
@@ -126,6 +134,7 @@ export async function recoverStuckInProgressIssues(
     for (const run of sorted) {
       if (!lastRunStatusMap.has(run.issueId)) {
         lastRunStatusMap.set(run.issueId, run.status);
+        lastRunPrUrlMap.set(run.issueId, run.prUrl ?? null);
       }
     }
   }
@@ -140,11 +149,28 @@ export async function recoverStuckInProgressIssues(
     // Linear SDK lazy relations — must await team and state
     const team = await issue.team;
     const teamId = team?.id;
-    const targetStateId = teamId ? stateMap.get(`${teamId}:${targetState}`) : undefined;
+    const lastRunStatus = lastRunStatusMap.get(issue.identifier) ?? null;
+    const lastRunPrUrl = lastRunPrUrlMap.get(issue.identifier) ?? null;
 
-    if (!targetStateId) {
+    // BEC-165: open-PR override — if the most recent run completed AND
+    // produced a PR, the runner forgot to move Linear → "In Review" (the
+    // bug fixed in linear.ts onPipelineComplete). Recovering to "Backlog"
+    // here would re-promote the issue and burn another full pipeline cycle
+    // on already-merged-or-pending work. Redirect to "In Review" instead.
+    // Falls back to caller's targetState if the workspace lacks an "In
+    // Review" state (custom Linear column setups).
+    const inReviewOverride =
+      lastRunStatus === "completed" && lastRunPrUrl !== null && teamId
+        ? stateMap.get(`${teamId}:In Review`)
+        : undefined;
+    const effectiveTargetState: "Backlog" | "Todo" | "In Review" =
+      inReviewOverride !== undefined ? "In Review" : targetState;
+    const effectiveTargetStateId = inReviewOverride
+      ?? (teamId ? stateMap.get(`${teamId}:${targetState}`) : undefined);
+
+    if (!effectiveTargetStateId) {
       log.warn(
-        { identifier: issue.identifier, teamId, targetState },
+        { identifier: issue.identifier, teamId, targetState: effectiveTargetState },
         "no target state ID found for team — skipping stuck issue",
       );
       continue;
@@ -152,22 +178,22 @@ export async function recoverStuckInProgressIssues(
 
     const state = await issue.state;
     const previousStateName: string = state?.name ?? "In Progress";
-    const lastRunStatus = lastRunStatusMap.get(issue.identifier) ?? null;
 
     try {
-      // Move the issue to the configured target state
-      await linearClient.updateIssue(issue.id, { stateId: targetStateId });
+      await linearClient.updateIssue(issue.id, { stateId: effectiveTargetStateId });
 
-      // Post a comment on the Linear issue explaining the auto-recovery
       const runNote = lastRunStatus
-        ? `Most recent pipeline run status: \`${lastRunStatus}\`.`
+        ? `Most recent pipeline run status: \`${lastRunStatus}\`${lastRunPrUrl ? ` (PR: ${lastRunPrUrl})` : ""}.`
         : "No pipeline run record found in the database.";
+      const overrideNote = inReviewOverride
+        ? "\n\n*BEC-165 override: completed run produced a PR — moving to In Review instead of re-promoting.*"
+        : "";
       await linearClient.createComment({
         issueId: issue.id,
         body:
           `🤖 **PM Agent — Auto-recovered stuck issue**\n\n` +
           `This issue was detected in **In Progress** state with no active pipeline run. ` +
-          `It has been automatically moved to **${targetState}** for re-evaluation.\n\n${runNote}`,
+          `It has been automatically moved to **${effectiveTargetState}** for re-evaluation.\n\n${runNote}${overrideNote}`,
       });
 
       results.push({
@@ -176,7 +202,7 @@ export async function recoverStuckInProgressIssues(
         title: issue.title,
         previousState: previousStateName,
         lastRunStatus,
-        targetState,
+        targetState: effectiveTargetState,
       });
 
       log.info(
@@ -184,7 +210,8 @@ export async function recoverStuckInProgressIssues(
           identifier: issue.identifier,
           previousState: previousStateName,
           lastRunStatus,
-          targetState,
+          targetState: effectiveTargetState,
+          inReviewOverride: inReviewOverride !== undefined,
         },
         "auto-recovered stuck In Progress issue",
       );
