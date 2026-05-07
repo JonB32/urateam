@@ -17,7 +17,7 @@ export { createDb, isPostgres, sqlDateGroup, sqlDaysAgoFilter, type Db } from ".
 export { pipelineRuns, stageRuns, agentLogs, activeWork, pmApprovals } from "./db/index.js";
 export { createApp, type ServerConfig } from "./server.js";
 export { PipelineRunner, type PipelineRunnerConfig, type LinearIssue } from "./pipeline/index.js";
-export { defaultConfigs, validatePipelineConfigs, validateRepoConfigs, resolvePipeline } from "./pipeline/index.js";
+export { defaultConfigs, validatePipelineConfigs, validateRepoConfigs, applyDeepReviewPassesOverride, resolvePipeline } from "./pipeline/index.js";
 export { createWebhookHandler } from "./webhook/index.js";
 export {
   CompositeNotifier,

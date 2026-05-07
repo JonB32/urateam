@@ -1,4 +1,9 @@
-export { defaultConfigs, validatePipelineConfigs, validateRepoConfigs } from "./config.js";
+export {
+  defaultConfigs,
+  validatePipelineConfigs,
+  validateRepoConfigs,
+  applyDeepReviewPassesOverride,
+} from "./config.js";
 export { resolvePipeline } from "./router.js";
 export { createQueue, type WorkQueue } from "./queue.js";
 export { PipelineRunner, type PipelineRunnerConfig, type LinearIssue } from "./runner.js";
