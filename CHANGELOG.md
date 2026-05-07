@@ -15,6 +15,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions below refer to the workspace version published to npm. Per-package
 notes call out when a change affects only a single package.
 
+## [0.1.37] — 2026-05-07
+
+Bumps:
+- `@urateam/core`: 0.1.22 → 0.1.23
+- `@urateam/cli`: 0.1.24 → 0.1.25
+- `@urateam/dashboard`: 0.1.22 → 0.1.23
+- `create-urateam`: 0.1.25 → 0.1.26
+
+### Fixed
+- **BEC-165** — Pipeline runs that successfully open a PR now move Linear to "In Review" 100% of the time. Previously the transition was conditionally delegated to `onHumanReviewNeeded`, which not every PR-creating runner path called (e.g. auto-implement with `autoMerge:false`, no draft-flagging, no rebase conflict). Issues stayed on "In Progress" → recover-stuck moved them back to Backlog 30 min later → re-promote → re-run loop on shipped work, burning agent + OpenRouter tokens. Two-layer fix: (1) `onPipelineComplete` is the catch-all source of truth — sets `IN_REVIEW` when `prUrl` is set and not auto-merged. (2) `recover-stuck` is defense-in-depth — when recovering a stuck issue, redirects to `In Review` if the most recent run completed with a `pr_url` (catches the case where layer 1's transition itself failed). (#176)
+- **BEC-152** — `REPO_CLONE_DIR` and `AGENT_RUN_DIR` defaults switched from `/var/agent-{repos,runs}` to `homedir()/{work/repos,data/runs}` so non-root containers (the dogfood `USER ura` setup) work without operator-side env overrides. Adds startup `preflightDirs` that `mkdir -p`s and write-tests both paths with an actionable error if either fails. Existing operators with explicit env-var overrides are unchanged. (#173)
+- **BEC-153** — Dogfood Dockerfile installs the `sqlite3` CLI alongside the better-sqlite3 binding so the runbook queries documented in `docs/superpowers/runbooks/2026-05-04-bec-138-dogfood-soak.md` work without the `apk add --user 0` host workaround. (#172)
+
+### Added
+- **BEC-164** — New `REVIEW_MODELS_MAX_OUTPUT_TOKENS` env var caps the `max_tokens` forwarded to OpenRouter on every fanout request. Unset = today's behavior (the model's provider default applies, which can be 65536 for gemini-2.5-pro / 16384 for gpt-4o → 402 errors on accounts with limited credit). Validation rejects floats / non-integer strings; values below 256 emit a warn at boot pointing at 1024 as a sane minimum. (#174, #175)
+
 ## [0.1.36] — 2026-05-07
 
 Bumps:
