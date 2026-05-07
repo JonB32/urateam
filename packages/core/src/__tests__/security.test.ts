@@ -1,3 +1,5 @@
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { describe, it, expect } from "vitest";
 import {
   SECURITY_REVIEW_CHECKLIST,
@@ -31,9 +33,11 @@ describe("SECURITY_REVIEW_CHECKLIST", () => {
 });
 
 describe("createSandboxConfig", () => {
-  it("creates config with run-specific workdir", () => {
+  it("creates config with run-specific workdir under default HOME-relative base", () => {
+    // BEC-152: default is now HOME-relative, not /var/agent-runs
     const config = createSandboxConfig("run-abc123");
-    expect(config.workdir).toBe("/var/agent-runs/run-abc123/worktree");
+    const expectedBase = join(homedir(), "data", "runs");
+    expect(config.workdir).toBe(`${expectedBase}/run-abc123/worktree`);
   });
 
   it("includes all allowlisted domains", () => {

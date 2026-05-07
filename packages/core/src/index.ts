@@ -48,6 +48,7 @@ export { cleanupWorktrees } from "./repo/git.js";
 export { isClaudeAuthValid, resetAuthCheckCache } from "./executor/auth-check.js";
 export type { GitHubConfig } from "./repo/github.js";
 export { createGitHubClient } from "./repo/github.js";
+export { buildGitHubConfigFromEnv } from "./repo/github-from-env.js";
 export { postSlackMessage } from "./pm/slack-helpers.js";
 export type { GitLabConfig, CreateMROptions } from "./repo/gitlab.js";
 export { createPmScheduler } from "./pm/scheduler.js";

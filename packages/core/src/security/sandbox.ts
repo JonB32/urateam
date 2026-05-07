@@ -1,6 +1,12 @@
+import { join } from "node:path";
+import { homedir } from "node:os";
 import type { SandboxConfig } from "../types.js";
 
-const DEFAULT_BASE_DIR = "/var/agent-runs";
+// Default to $HOME/data/runs — writable for both root and non-root containers.
+// In practice this constant is only used when callers omit baseDir; the
+// production pipeline always passes an explicit baseDir derived from the
+// AGENT_RUN_DIR env var (see runner.ts). See BEC-152.
+const DEFAULT_BASE_DIR = join(homedir(), "data", "runs");
 
 const ALLOWED_DOMAINS = [
   "github.com",

@@ -27,6 +27,7 @@ import { DEFAULT_AGENT_CLAUDE_MD } from "../executor/agent-config.js";
 import { generatePRDescription } from "./pr-description.js";
 import { access, readdir, writeFile, appendFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -131,8 +132,8 @@ export interface PipelineRunnerConfig {
   db: Db;
   notifier: Notifier;
   concurrency?: number; // default 3
-  agentRunDir?: string; // default /var/agent-runs
-  repoCloneDir?: string; // default /var/agent-repos
+  agentRunDir?: string; // default $HOME/data/runs
+  repoCloneDir?: string; // default $HOME/work/repos
   github?: GitHubConfig; // optional — PR creation skipped if not provided
   gitlab?: GitLabConfig; // optional — GitLab MR creation
   /**
@@ -178,8 +179,8 @@ export class PipelineRunner {
     this.notifier = config.notifier;
     this.queue = createQueue(config.concurrency ?? 3);
     this.pushQueue = createQueue(1);
-    this.agentRunDir = config.agentRunDir ?? "/var/agent-runs";
-    this.repoCloneDir = config.repoCloneDir ?? "/var/agent-repos";
+    this.agentRunDir = config.agentRunDir ?? join(homedir(), "data", "runs");
+    this.repoCloneDir = config.repoCloneDir ?? join(homedir(), "work", "repos");
     this.githubConfig = config.github;
     this.gitlabConfig = config.gitlab;
     this.lockAdapter = createBranchLockAdapter(config.db as AnyDb);
