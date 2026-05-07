@@ -89,11 +89,30 @@ Be strict but fair. If the code addresses the intent of a criterion even if not 
   try {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
+    /**
+     * Why 15 turns (raised from 6 in BEC-159):
+     * Shell-execution acceptance criteria (e.g. "pnpm -r test must pass") require
+     * RALPH to: (1) read the ticket, (2) read the diff, (3) decide on the diff,
+     * (4) run a verification command, (5) read the output, (6) produce a verdict.
+     * That is ≥ 6 turns for the simplest case, leaving NO headroom for reading
+     * multiple files or handling tool errors. With 6 turns, RALPH would hit the
+     * cap before producing a verdict, causing correctly-implemented PRs to appear
+     * as "RALPH did not approve" when RALPH simply ran out of turns.
+     *
+     * 15 turns gives RALPH enough room for multi-file reads + one shell verification
+     * + verdict production. The existing token budget (PM_AGENT_DAILY_TOKEN_BUDGET)
+     * is the primary cost guardrail — raising the turn cap does not remove that gate.
+     *
+     * Operators can override via the RALPH_MAX_TURNS environment variable for
+     * tickets whose acceptance criteria require more extensive shell verification.
+     */
+    const maxTurns = process.env.RALPH_MAX_TURNS ? parseInt(process.env.RALPH_MAX_TURNS, 10) : 15;
+
     const messages = query({
       prompt,
       options: {
         allowedTools: ["Read", "Glob", "Grep"],
-        maxTurns: 6,
+        maxTurns,
         cwd: workdir,
         model: RALPH_MODEL,
         permissionMode: "default",

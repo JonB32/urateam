@@ -120,6 +120,50 @@ describe("checkRequirements", () => {
     expect(result.evaluationError).toContain("no parseable structured output");
   });
 
+  it("passes maxTurns: 15 to query by default (BEC-159)", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    (query as any).mockReturnValue(
+      (async function* () {
+        yield {
+          type: "assistant",
+          content: [{ type: "text", text: '```json\n{"satisfied": true, "gaps": [], "suggestions": []}\n```' }],
+        };
+      })(),
+    );
+
+    delete process.env.RALPH_MAX_TURNS;
+    await checkRequirements(issue, makeHandoff(), "/tmp");
+    expect(query).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.objectContaining({ maxTurns: 15 }),
+      }),
+    );
+  });
+
+  it("respects RALPH_MAX_TURNS env var (BEC-159)", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    (query as any).mockReturnValue(
+      (async function* () {
+        yield {
+          type: "assistant",
+          content: [{ type: "text", text: '```json\n{"satisfied": true, "gaps": [], "suggestions": []}\n```' }],
+        };
+      })(),
+    );
+
+    process.env.RALPH_MAX_TURNS = "20";
+    try {
+      await checkRequirements(issue, makeHandoff(), "/tmp");
+      expect(query).toHaveBeenCalledWith(
+        expect.objectContaining({
+          options: expect.objectContaining({ maxTurns: 20 }),
+        }),
+      );
+    } finally {
+      delete process.env.RALPH_MAX_TURNS;
+    }
+  });
+
   it("does NOT mark evaluationFailed when agent legitimately returns satisfied: false with gaps", async () => {
     // Negative-control: a genuine "agent ran successfully and found gaps"
     // case must not get flagged as eval failure.

@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions below refer to the workspace version published to npm. Per-package
 notes call out when a change affects only a single package.
 
+## [Unreleased]
+
+### Fixed (OSS+)
+- **BEC-159** — RALPH evaluation agent turn cap raised from 6 to 15. The previous 6-turn cap was insufficient for acceptance criteria requiring shell-execution verification (e.g. "pnpm -r test must pass"), which requires ≥ 6 turns just to read the ticket, inspect the diff, run the command, and produce a verdict. RALPH would exhaust the cap before returning a verdict, causing correctly-implemented PRs to be incorrectly drafted for human review. Operators can override via the `RALPH_MAX_TURNS` environment variable for tickets whose acceptance criteria require more extensive shell verification.
+
 ## [0.1.35] — 2026-05-06
 
 Bumps:
