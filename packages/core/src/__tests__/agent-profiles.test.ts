@@ -44,11 +44,14 @@ describe("getAgentProfiles defaults", () => {
 
 describe("getAgentProfiles env override", () => {
   it("merges a partial override on top of defaults", () => {
+    // BEC-162 review: pick a maxTurns value that does NOT match the default
+    // (50 post-bump). Otherwise a regression that drops the merge logic and
+    // falls back to the default would silently pass this assertion.
     process.env.URATEAM_AGENT_PROFILES = JSON.stringify({
-      test: { maxTurns: 50, maxInputTokens: 80_000 },
+      test: { maxTurns: 75, maxInputTokens: 80_000 },
     });
     const p = getAgentProfiles();
-    expect(p.test.maxTurns).toBe(50);
+    expect(p.test.maxTurns).toBe(75);
     expect(p.test.maxInputTokens).toBe(80_000);
     // Untouched fields keep their default
     expect(p.test.model).toBe("claude-haiku-4-5");
@@ -76,15 +79,16 @@ describe("getAgentProfiles env override", () => {
   });
 
   it("ignores malformed individual fields without dropping the rest of the stage", () => {
+    // BEC-162 review: 75, not 50 — see "merges a partial override" above.
     process.env.URATEAM_AGENT_PROFILES = JSON.stringify({
       test: {
-        maxTurns: 50,            // valid → applied
+        maxTurns: 75,            // valid → applied
         maxInputTokens: "lots",  // invalid → ignored
         model: "",               // invalid (empty) → ignored
       },
     });
     const p = getAgentProfiles();
-    expect(p.test.maxTurns).toBe(50);
+    expect(p.test.maxTurns).toBe(75);
     expect(p.test.maxInputTokens).toBe(30_000); // default kept
     expect(p.test.model).toBe("claude-haiku-4-5"); // default kept
   });
