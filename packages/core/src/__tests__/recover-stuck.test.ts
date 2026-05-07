@@ -191,6 +191,127 @@ describe("recoverStuckInProgressIssues", () => {
     });
   });
 
+  it("BEC-165: stuck-In-Progress with completed last run + pr_url moves to In Review (not Backlog)", async () => {
+    // Defense-in-depth: even when the runner forgot to move Linear → In Review
+    // after PR creation (the original BEC-165 bug at the source), recover-stuck
+    // should NOT move the issue back to Backlog and re-trigger the doom loop.
+    // It should detect the open PR and move to In Review instead.
+    const issue = {
+      id: "issue-uuid-completed-with-pr",
+      identifier: "BEC-153",
+      title: "Stuck issue with completed PR",
+      team: Promise.resolve({ id: "team-1" }),
+      state: Promise.resolve({ name: "In Progress" }),
+    };
+    const linearClient = makeLinearClient([issue]);
+    const db = makeDb([], [
+      {
+        issueId: "BEC-153",
+        status: "completed",
+        startedAt: new Date("2026-05-07T15:13:00Z"),
+        prUrl: "https://github.com/JonB32/urateam/pull/172",
+      },
+    ]);
+    const stateMap = new Map([
+      ["team-1:Backlog", "state-backlog-1"],
+      ["team-1:In Review", "state-in-review-1"],
+    ]);
+
+    const result = await recoverStuckInProgressIssues({
+      linearClient,
+      db: db as any,
+      teamIds: ["team-1"],
+      targetState: "Backlog",  // caller wanted Backlog…
+      maxPerTick: 5,
+      stateMap,
+    });
+
+    expect(result).toHaveLength(1);
+    expect(result[0].lastRunStatus).toBe("completed");
+    // …but the open-PR override redirected to In Review.
+    expect(result[0].targetState).toBe("In Review");
+    expect(linearClient.updateIssue).toHaveBeenCalledWith("issue-uuid-completed-with-pr", {
+      stateId: "state-in-review-1",
+    });
+  });
+
+  it("BEC-165: completed last run WITHOUT pr_url falls through to caller's targetState (genuine no-progress recovery)", async () => {
+    // Distinguish from the override path — a completed run with no PR is a
+    // legitimate "no work shipped" recovery; should still go to Backlog.
+    const issue = {
+      id: "issue-uuid-completed-no-pr",
+      identifier: "BEC-99",
+      title: "Stuck no-op completed run",
+      team: Promise.resolve({ id: "team-1" }),
+      state: Promise.resolve({ name: "In Progress" }),
+    };
+    const linearClient = makeLinearClient([issue]);
+    const db = makeDb([], [
+      {
+        issueId: "BEC-99",
+        status: "completed",
+        startedAt: new Date("2026-04-02"),
+        prUrl: null,
+      },
+    ]);
+    const stateMap = new Map([
+      ["team-1:Backlog", "state-backlog-1"],
+      ["team-1:In Review", "state-in-review-1"],
+    ]);
+
+    const result = await recoverStuckInProgressIssues({
+      linearClient,
+      db: db as any,
+      teamIds: ["team-1"],
+      targetState: "Backlog",
+      maxPerTick: 5,
+      stateMap,
+    });
+
+    expect(result[0].targetState).toBe("Backlog");
+    expect(linearClient.updateIssue).toHaveBeenCalledWith("issue-uuid-completed-no-pr", {
+      stateId: "state-backlog-1",
+    });
+  });
+
+  it("BEC-165: open-PR override falls back to caller's targetState when In Review state-id is missing", async () => {
+    // Defense in depth shouldn't crash if the workspace has no In Review state
+    // (some Linear setups customize the column names). Fall back to original
+    // behavior so the issue still moves out of stuck In Progress.
+    const issue = {
+      id: "issue-uuid-no-in-review",
+      identifier: "BEC-100",
+      title: "Workspace lacks In Review",
+      team: Promise.resolve({ id: "team-1" }),
+      state: Promise.resolve({ name: "In Progress" }),
+    };
+    const linearClient = makeLinearClient([issue]);
+    const db = makeDb([], [
+      {
+        issueId: "BEC-100",
+        status: "completed",
+        startedAt: new Date("2026-04-02"),
+        prUrl: "https://github.com/x/y/pull/1",
+      },
+    ]);
+    // Note: stateMap intentionally omits "In Review"
+    const stateMap = new Map([["team-1:Backlog", "state-backlog-1"]]);
+
+    const result = await recoverStuckInProgressIssues({
+      linearClient,
+      db: db as any,
+      teamIds: ["team-1"],
+      targetState: "Backlog",
+      maxPerTick: 5,
+      stateMap,
+    });
+
+    expect(result[0].targetState).toBe("Backlog");
+    expect(linearClient.updateIssue).toHaveBeenCalledWith("issue-uuid-no-in-review", {
+      stateId: "state-backlog-1",
+    });
+  });
+
   it("recovers orphaned issue with no DB record", async () => {
     const issue = {
       id: "issue-orphan",

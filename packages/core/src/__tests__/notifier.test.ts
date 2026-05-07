@@ -184,7 +184,7 @@ describe("LinearNotifier", () => {
     expect(body).toContain("500 output");
   });
 
-  it("formats pipeline complete comment correctly (no auto-merge)", async () => {
+  it("formats pipeline complete comment correctly (no auto-merge) and transitions to In Review", async () => {
     const notifier = new TestableLinearNotifier();
     const run = makeRun();
     const result = makePipelineResult();
@@ -196,7 +196,27 @@ describe("LinearNotifier", () => {
     expect(body).toContain("Pipeline Complete");
     expect(body).toContain("https://github.com/org/repo/pull/42");
     expect(body).toContain("3");
-    // "In Review" is now set by onHumanReviewNeeded, not onPipelineComplete
+    // BEC-165: any pipeline that ends with a PR but isn't auto-merged must
+    // transition to "In Review". Previously this responsibility was delegated
+    // to onHumanReviewNeeded — but not every PR-creating runner path calls it
+    // (auto-implement with autoMerge:false skips both onHumanReviewNeeded and
+    // any state-transition path), leaving Linear stuck on "In Progress" → the
+    // recover-stuck → re-run loop documented in BEC-165.
+    expect(notifier.transitions).toEqual([{ issueId: "TEAM-123", stateName: "In Review" }]);
+  });
+
+  it("BEC-165: pipeline complete without PR (rare) does not transition state", async () => {
+    const notifier = new TestableLinearNotifier();
+    const run = makeRun();
+    // The PipelineResult type declares prUrl as required string; runner.ts
+    // passes "" or a real URL. Empty string is the "no PR opened" signal that
+    // the production callsite uses (`if (result.prUrl)` falsy check).
+    const result = { ...makePipelineResult(), prUrl: "" };
+
+    await notifier.onPipelineComplete(run, result);
+
+    // No PR opened (e.g. no-op run, hard failure earlier) — leave state alone
+    // so a separate failure-handler path can decide.
     expect(notifier.transitions).toEqual([]);
   });
 
