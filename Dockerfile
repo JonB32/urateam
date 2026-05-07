@@ -8,9 +8,10 @@ WORKDIR /app
 # - github-cli (gh): PR auth path for the executor when no GitHub App is configured;
 #   `gh auth login --with-token` after boot uses the captured PAT (gh credentials
 #   persist in the .claude volume's parent, /home/ura/.config/gh)
+# - sqlite: standalone sqlite3 CLI for runbook queries (e.g. docker exec urateam-dogfood sqlite3 ...)
 # - tini: PID 1 signal handling for clean shutdown
 # - python3, make, g++: better-sqlite3 native build fallback if no prebuild matches alpine-musl
-RUN apk add --no-cache git openssh-client github-cli tini python3 make g++
+RUN apk add --no-cache git openssh-client github-cli sqlite tini python3 make g++
 
 # Pinned versions — image is reproducible per build.
 ARG URATEAM_CORE_VERSION=0.1.22
