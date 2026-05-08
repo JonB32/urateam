@@ -4,7 +4,7 @@ import { resolveWorkflowStates } from "../linear-helpers.js";
 import { resolvePipeline } from "../../pipeline/router.js";
 import { createLogger } from "../../logger.js";
 import type { AnyDb } from "../../db/client.js";
-import { logAuditEventUnchecked, pmPromotedEvent } from "../../audit/index.js";
+import { logAuditEventUnchecked, pmPromotedEvent, pmSkippedCircuitBreakerEvent } from "../../audit/index.js";
 
 const log = createLogger({ component: "PmAgent:promote" });
 
@@ -122,6 +122,17 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
           { issueId: candidate.identifier, failureCount, threshold: input.maxConsecutiveFailures },
           "skipped promote: circuit-breaker engaged (too many consecutive failures)",
         );
+        if (input.db) {
+          void logAuditEventUnchecked(
+            input.db,
+            pmSkippedCircuitBreakerEvent({
+              issueId: candidate.identifier,
+              failureCount,
+              threshold: input.maxConsecutiveFailures,
+              action: "promote",
+            }),
+          );
+        }
         results.push({
           issueId: candidate.identifier,
           issueTitle: candidate.title,

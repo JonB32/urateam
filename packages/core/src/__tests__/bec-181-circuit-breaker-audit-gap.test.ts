@@ -1,28 +1,24 @@
 /**
- * BEC-181 — Reproduce: circuit breaker fires silently (no audit event emitted).
+ * BEC-181 — Fix: circuit breaker now emits pm.skipped_circuit_breaker audit events.
  *
- * This file proves two things:
+ * This file verifies:
  *
  * 1. WORKING: The circuit breaker correctly skips issues in both promoteReadyIssues
  *    and startTodoIssues when an issue has ≥ maxConsecutiveFailures failed runs.
  *    countConsecutiveFailures returns 4 for 4 consecutive failed runs with no
  *    intervening completion.
  *
- * 2. MISSING (the gap): When the breaker fires in promote or start-todo, NO audit
- *    event is written to the database. The `pm.skipped_circuit_breaker` event type
- *    does not exist in AuditEventTypeSchema, there is no pmSkippedCircuitBreakerEvent
- *    builder in audit/events.ts, and neither promoteReadyIssues nor startTodoIssues
- *    calls logAuditEventUnchecked when the breaker engages. Operators cannot
- *    distinguish "breaker prevented a re-promotion" from "issue was never a
- *    candidate" by querying audit_events — only grepping application logs works.
+ * 2. FIXED: When the breaker fires in promote or start-todo, a `pm.skipped_circuit_breaker`
+ *    audit event is now written to the database. Operators can distinguish
+ *    "breaker prevented a re-promotion" from "issue was never a candidate"
+ *    by querying audit_events.
  *
  * Acceptance criteria from BEC-181 that this test covers:
  *   - countConsecutiveFailures is verified to return 4 for 4 consecutive failures
  *   - promote and start-todo skip issues at/above the threshold (end-to-end)
- *   - audit_events table is empty after a circuit-breaker skip (proves the gap)
- *
- * When the fix lands, the last assertion in each "MISSING" test must be updated
- * to expect 1 row with eventType "pm.skipped_circuit_breaker".
+ *   - audit_events table has 1 row with eventType "pm.skipped_circuit_breaker" after a skip
+ *   - AuditEventTypeSchema contains "pm.skipped_circuit_breaker"
+ *   - audit/events.ts exports pmSkippedCircuitBreakerEvent builder
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
@@ -104,7 +100,7 @@ describe("BEC-181 Part 1: countConsecutiveFailures (working correctly)", () => {
 // ---------------------------------------------------------------------------
 
 describe("BEC-181 Part 2: promoteReadyIssues circuit-breaker skip (working correctly)", () => {
-  it("skips promotion for issue with 4 consecutive failures and does NOT write an audit event (gap)", async () => {
+  it("skips promotion for issue with 4 consecutive failures and writes a pm.skipped_circuit_breaker audit event (fix verified)", async () => {
     const db = await makeDb() as any;
     await seedConsecutiveFailures(db, "BEC-147", 4);
 
@@ -148,10 +144,17 @@ describe("BEC-181 Part 2: promoteReadyIssues circuit-breaker skip (working corre
     // Breaker fires before conflict detection (saves tokens)
     expect(conflictChecker).not.toHaveBeenCalled();
 
-    // CONFIRMED GAP: no audit event is written when the breaker fires
-    // After the fix, this should expect 1 row with eventType "pm.skipped_circuit_breaker"
+    // Give the void-logAuditEventUnchecked microtask a chance to flush
+    await new Promise((r) => setImmediate(r));
+
+    // VERIFIED FIX: audit event is now written when the breaker fires
     const auditRows = await (db as any).select().from(auditEvents);
-    expect(auditRows).toHaveLength(0); // <-- proves the observability gap
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0].eventType).toBe("pm.skipped_circuit_breaker");
+    expect(auditRows[0].issueId).toBe("BEC-147");
+    expect(JSON.parse(auditRows[0].payload).failureCount).toBe(4);
+    expect(JSON.parse(auditRows[0].payload).threshold).toBe(3);
+    expect(JSON.parse(auditRows[0].payload).action).toBe("promote");
   });
 
   it("skips promotion for BEC-157 with exactly 3 consecutive failures (at threshold)", async () => {
@@ -195,9 +198,17 @@ describe("BEC-181 Part 2: promoteReadyIssues circuit-breaker skip (working corre
     expect(client.updateIssue).not.toHaveBeenCalled();
     expect(conflictChecker).not.toHaveBeenCalled();
 
-    // CONFIRMED GAP: no audit event emitted on breaker fire
+    // Give the void-logAuditEventUnchecked microtask a chance to flush
+    await new Promise((r) => setImmediate(r));
+
+    // VERIFIED FIX: audit event is now written when the breaker fires
     const auditRows = await (db as any).select().from(auditEvents);
-    expect(auditRows).toHaveLength(0); // <-- proves the observability gap
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0].eventType).toBe("pm.skipped_circuit_breaker");
+    expect(auditRows[0].issueId).toBe("BEC-157");
+    expect(JSON.parse(auditRows[0].payload).failureCount).toBe(3);
+    expect(JSON.parse(auditRows[0].payload).threshold).toBe(3);
+    expect(JSON.parse(auditRows[0].payload).action).toBe("promote");
   });
 });
 
@@ -218,7 +229,7 @@ describe("BEC-181 Part 3: startTodoIssues circuit-breaker skip (working correctl
     },
   };
 
-  it("skips start for issue with 4 consecutive failures WITHOUT touching Linear SDK, and does NOT write an audit event (gap)", async () => {
+  it("skips start for issue with 4 consecutive failures WITHOUT touching Linear SDK, and writes an audit event (fix verified)", async () => {
     const db = await makeDb() as any;
     await seedConsecutiveFailures(db, "BEC-147", 4);
 
@@ -235,29 +246,19 @@ describe("BEC-181 Part 3: startTodoIssues circuit-breaker skip (working correctl
       labels: labelsSpy,
     };
 
-    // Mock DB for getActiveAndRecentIssueIds to return no active/recent runs
-    // (the issue IS orphaned — breaker is the only thing stopping a re-start)
-    const mockDbForLinear = {
-      select: vi.fn().mockReturnValue({
-        from: vi.fn().mockReturnValue({
-          where: vi.fn()
-            .mockResolvedValueOnce([]) // no active runs
-            .mockResolvedValueOnce([]), // no recent runs
-        }),
-      }),
-    };
-
+    // Use the real DB — seeded rows are 1 hour old, outside the 30-minute recent window,
+    // and all are "failed" (not "queued"/"running"), so getActiveAndRecentIssueIds
+    // correctly returns empty sets, making BEC-147 appear as an orphaned Todo issue.
     const runner = { start: vi.fn() };
     const input: StartTodoInput = {
       linearClient: { issues: vi.fn().mockResolvedValue({ nodes: [issue] }) },
-      db: mockDbForLinear as any,
+      db,
       teamIds: ["team-1"],
       runner: runner as any,
       pipelineConfigs,
       repoConfigs,
       maxPerTick: 5,
       maxConsecutiveFailures: 3,
-      // Use a real DB for the failure count
       getFailureCount: (issueId) => countConsecutiveFailures(db, issueId),
     };
 
@@ -272,28 +273,33 @@ describe("BEC-181 Part 3: startTodoIssues circuit-breaker skip (working correctl
     // Breaker fires BEFORE Linear SDK calls (saves 3 round-trips per tick per doom-looping issue)
     expect(labelsSpy).not.toHaveBeenCalled();
 
-    // CONFIRMED GAP: startTodoIssues has no `db` write path for audit events on skip,
-    // so nothing is emitted. The real DB has the pipeline run rows, but no audit event.
+    // Give the void-logAuditEventUnchecked microtask a chance to flush
+    await new Promise((r) => setImmediate(r));
+
+    // VERIFIED FIX: audit event is now written when the circuit breaker fires in start-todo
     const auditRows = await (db as any).select().from(auditEvents);
-    expect(auditRows).toHaveLength(0); // <-- proves the observability gap
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0].eventType).toBe("pm.skipped_circuit_breaker");
+    expect(auditRows[0].issueId).toBe("BEC-147");
+    expect(JSON.parse(auditRows[0].payload).failureCount).toBe(4);
+    expect(JSON.parse(auditRows[0].payload).threshold).toBe(3);
+    expect(JSON.parse(auditRows[0].payload).action).toBe("start-todo");
   });
 });
 
 // ---------------------------------------------------------------------------
-// PART 4: Confirm pm.skipped_circuit_breaker is absent from AuditEventTypeSchema
+// PART 4: Confirm pm.skipped_circuit_breaker is present in AuditEventTypeSchema (fix verified)
 // ---------------------------------------------------------------------------
 
-describe("BEC-181 Part 4: pm.skipped_circuit_breaker event type is not yet defined (the schema gap)", () => {
-  it("AuditEventTypeSchema does not contain pm.skipped_circuit_breaker", async () => {
+describe("BEC-181 Part 4: pm.skipped_circuit_breaker event type is now defined (gap closed)", () => {
+  it("AuditEventTypeSchema contains pm.skipped_circuit_breaker", async () => {
     const { AuditEventTypeSchema } = await import("../types.js");
     const types: string[] = AuditEventTypeSchema.options;
-    // This test documents the gap — it should FAIL after the fix adds the event type.
-    expect(types).not.toContain("pm.skipped_circuit_breaker");
+    expect(types).toContain("pm.skipped_circuit_breaker");
   });
 
-  it("audit/events.ts does not export pmSkippedCircuitBreakerEvent (no builder yet)", async () => {
+  it("audit/events.ts exports pmSkippedCircuitBreakerEvent builder", async () => {
     const auditModule = await import("../audit/events.js");
-    // This test documents the gap — it should FAIL after the fix adds the builder.
-    expect((auditModule as any).pmSkippedCircuitBreakerEvent).toBeUndefined();
+    expect(typeof (auditModule as any).pmSkippedCircuitBreakerEvent).toBe("function");
   });
 });

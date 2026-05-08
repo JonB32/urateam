@@ -102,6 +102,25 @@ export function pmTriageClassifiedEvent(args: {
   });
 }
 
+export function pmSkippedCircuitBreakerEvent(args: {
+  issueId: string;
+  failureCount: number;
+  threshold: number;
+  action: "promote" | "start-todo";
+}): AuditEvent {
+  return base({
+    eventType: "pm.skipped_circuit_breaker",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    issueId: args.issueId,
+    payload: {
+      failureCount: args.failureCount,
+      threshold: args.threshold,
+      action: args.action,
+    },
+  });
+}
+
 export function budgetRefusedEvent(args: {
   scope: string;
   scopeType: "global" | "team" | "repo";

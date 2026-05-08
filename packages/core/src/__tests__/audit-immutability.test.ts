@@ -64,6 +64,7 @@ describe("audit_events immutability", () => {
       "packages/core/src/pm/scheduler.ts",
       "packages/core/src/pm/actions/triage.ts",
       "packages/core/src/pm/actions/promote.ts",
+      "packages/core/src/pm/actions/start-todo.ts",
       "packages/core/src/pm/actions/resolve-approvals.ts",
       "packages/core/src/release-manager/scheduler.ts",
       "packages/core/src/release-manager/slack-handler.ts",

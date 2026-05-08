@@ -6,6 +6,7 @@ import type { PipelineConfig, RepoConfig } from "../../types.js";
 import type { PipelineRunner, LinearIssue } from "../../pipeline/runner.js";
 import type { BudgetEvaluation } from "../types.js";
 import { createLogger } from "../../logger.js";
+import { logAuditEventUnchecked, pmSkippedCircuitBreakerEvent } from "../../audit/index.js";
 
 const log = createLogger({ component: "PmAgent:startTodo" });
 
@@ -128,16 +129,25 @@ export async function startTodoIssues(
       }
       const failureCount = await input.getFailureCount(issue.identifier);
       if (failureCount >= input.maxConsecutiveFailures) {
+        log.warn(
+          { identifier: issue.identifier, failureCount, threshold: input.maxConsecutiveFailures },
+          "circuit-breaker engaged — skipping start",
+        );
+        void logAuditEventUnchecked(
+          db,
+          pmSkippedCircuitBreakerEvent({
+            issueId: issue.identifier,
+            failureCount,
+            threshold: input.maxConsecutiveFailures,
+            action: "start-todo",
+          }),
+        );
         results.push({
           identifier: issue.identifier,
           title: issue.title,
           started: false,
           reason: `circuit-breaker: ${failureCount} consecutive failed runs (threshold ${input.maxConsecutiveFailures})`,
         });
-        log.warn(
-          { identifier: issue.identifier, failureCount, threshold: input.maxConsecutiveFailures },
-          "circuit-breaker engaged — skipping start",
-        );
         continue;
       }
     }
