@@ -38,8 +38,30 @@ It is a pnpm monorepo with 4 packages:
 - `packages/observers/` — Quality observer (first-tick dedup seeding, GitHub Issues filing, SQLite store)
 - `deploy/` — Docker, Caddy, setup script, env example, CLAUDE.md template
 - `examples/` — Example configurations (basic, monorepo, multi-repo, custom stages)
-- `scripts/` — Setup scripts for Linear webhook and GitHub App
+- `scripts/` — Setup scripts for Linear webhook and GitHub App; `gh-linear-sync.ts` (GH→Linear sync entry point)
 - `docs/` — Design specs and documentation
+
+### GitHub Issues → Linear Sync (BEC-173)
+
+Autonomous incident/change-management bridge. Open GitHub issues are synced to Linear tickets in the Triage state every hour via a scheduled GitHub Action.
+
+- **Deployment:** GitHub Action (`.github/workflows/gh-linear-sync.yml`) — zero host infra, free for public repos
+- **Entry point:** `scripts/gh-linear-sync.ts` (run with `pnpm tsx`)
+- **Core logic:** `packages/core/src/sync/gh-linear-sync.ts` (mockable client interfaces, exported from `@urateam/core`)
+- **Setup guide:** `deploy/GH_LINEAR_SYNC_SETUP.md`
+
+**Operator mental model:** GitHub = inbound (public filings, Quality Observer findings). Linear = triage / work-tracking / autonomous-pipeline routing.
+
+Key exported functions:
+- `runGhLinearSync(config, clients)` — main orchestrator; idempotent via `[GH#NNN]` title prefix
+- `findLinearTicketForGhIssue(client, ghNumber, teamId)` — checks for existing Linear ticket
+- `createLinearTicketForGhIssue(client, ghIssue, teamId, stateId)` — creates Triage ticket with idempotency marker
+- `makeIdempotencyMarker(n)` → `<!-- gh-linear-sync:N -->`
+- `createGitHubSyncClientFromToken(token)` / `createLinearSyncClientFromApiKey(apiKey)` — real client factories
+
+Config env vars: `GH_LINEAR_SYNC_GITHUB_TOKEN`, `GH_LINEAR_SYNC_GITHUB_REPO`, `GH_LINEAR_SYNC_LINEAR_API_KEY`, `GH_LINEAR_SYNC_LINEAR_TEAM_ID`, `GH_LINEAR_SYNC_LABEL_FILTERS`, `GH_LINEAR_SYNC_TRIAGE_STATE`, `GH_LINEAR_SYNC_BIDIRECTIONAL_CLOSE`, `GH_LINEAR_SYNC_DRY_RUN`
+
+Bidirectional close-out (GH issue closed when Linear ticket reaches Done state) is opt-in via `GH_LINEAR_SYNC_BIDIRECTIONAL_CLOSE=true`.
 
 ## Key Patterns
 
