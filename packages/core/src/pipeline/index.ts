@@ -3,6 +3,7 @@ export {
   validatePipelineConfigs,
   validateRepoConfigs,
   applyDeepReviewPassesOverride,
+  applyAutoMergeOverride,
 } from "./config.js";
 export { resolvePipeline } from "./router.js";
 export { createQueue, type WorkQueue } from "./queue.js";
