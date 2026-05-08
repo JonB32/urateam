@@ -90,6 +90,8 @@ export const stageRuns = sqliteTable("stage_runs", {
   completedAt: crossTimestamp("completed_at"),
   inputTokens: integer("input_tokens").notNull().default(0),
   outputTokens: integer("output_tokens").notNull().default(0),
+  cacheCreationInputTokens: integer("cache_creation_input_tokens").notNull().default(0),
+  cacheReadInputTokens: integer("cache_read_input_tokens").notNull().default(0),
   turns: integer("turns").notNull().default(0),
   handoffArtifact: text("handoff_artifact"),
   errorMessage: text("error_message"),
