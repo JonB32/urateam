@@ -4,6 +4,8 @@ export {
   findLinearTicketForGhIssue,
   createLinearTicketForGhIssue,
   makeIdempotencyMarker,
+  getErrorMessage,
+  DEFAULT_TRIAGE_STATE_NAME,
   createGitHubSyncClientFromToken,
   createLinearSyncClientFromApiKey,
   type GhLinearSyncConfig,

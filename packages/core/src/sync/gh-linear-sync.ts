@@ -21,6 +21,40 @@ import { createLogger } from "../logger.js";
 const log = createLogger({ component: "gh-linear-sync" });
 
 // ---------------------------------------------------------------------------
+// Module-level constants
+// ---------------------------------------------------------------------------
+
+/** Default workflow state name to use when creating new Linear tickets. */
+export const DEFAULT_TRIAGE_STATE_NAME = "Triage";
+
+/** Maximum number of GitHub issues fetched per page from the REST API. */
+const GITHUB_ISSUES_PER_PAGE = 100;
+
+/**
+ * Linear state `type` values that indicate a ticket is fully complete.
+ * The `type` field is an enum on the Linear side and is the preferred check.
+ */
+const COMPLETED_STATE_TYPES: ReadonlySet<string> = new Set(["completed"]);
+
+/**
+ * Linear state `name` values (lower-cased) that indicate a ticket is Done.
+ * Used as a fallback when `type` is absent from the API response.
+ */
+const COMPLETED_STATE_NAMES: ReadonlySet<string> = new Set(["done"]);
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract a human-readable error message from an unknown thrown value.
+ * Avoids duplicating `err instanceof Error ? err.message : String(err)` across files.
+ */
+export function getErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -115,7 +149,7 @@ export interface GhLinearSyncConfig {
   labelFilters?: string[];
   /**
    * Name of the Linear workflow state for new tickets.
-   * Defaults to `"Triage"`.
+   * Defaults to `DEFAULT_TRIAGE_STATE_NAME` ("Triage").
    */
   triageStateName?: string;
   /**
@@ -224,6 +258,9 @@ export async function createLinearTicketForGhIssue(
  *
  * The operation is **idempotent**: calling it multiple times for the same
  * GitHub issue will not create duplicate Linear tickets.
+ *
+ * Linear lookups are parallelised with `Promise.all` to minimise wall-clock
+ * time when processing many issues.
  */
 export async function runGhLinearSync(
   config: GhLinearSyncConfig,
@@ -240,7 +277,7 @@ export async function runGhLinearSync(
     errors: [],
   };
 
-  const triageStateName = config.triageStateName ?? "Triage";
+  const triageStateName = config.triageStateName ?? DEFAULT_TRIAGE_STATE_NAME;
 
   // Resolve workflow states once up-front.
   const statesResp = await clients.linear.workflowStates({
@@ -256,7 +293,14 @@ export async function runGhLinearSync(
     );
   }
 
-  const [owner, repo] = config.githubRepo.split("/");
+  // Validate and split the githubRepo string before any API call.
+  const parts = config.githubRepo.split("/");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    throw new Error(
+      `Invalid githubRepo format '${config.githubRepo}'. Expected 'owner/repo'.`,
+    );
+  }
+  const [owner, repo] = parts as [string, string];
 
   // Fetch open GitHub issues (filtered by labels when provided).
   const ghIssues = await clients.github.listIssues({
@@ -264,7 +308,7 @@ export async function runGhLinearSync(
     repo,
     labels: config.labelFilters?.join(","),
     state: "open",
-    per_page: 100,
+    per_page: GITHUB_ISSUES_PER_PAGE,
   });
 
   log.info(
@@ -272,16 +316,30 @@ export async function runGhLinearSync(
     "fetched open GitHub issues",
   );
 
-  for (const ghIssue of ghIssues) {
+  // Parallelise all Linear "does this ticket exist?" lookups before processing.
+  // With N issues this reduces wall-clock time from O(N × RTT) to O(RTT).
+  const existingTickets = await Promise.all(
+    ghIssues.map((issue) =>
+      findLinearTicketForGhIssue(
+        clients.linear,
+        issue.number,
+        config.linearTeamId,
+      ).catch((err) => {
+        log.warn(
+          { err, ghNumber: issue.number },
+          "failed to look up Linear ticket for GH issue; will treat as not found",
+        );
+        return null;
+      }),
+    ),
+  );
+
+  for (let i = 0; i < ghIssues.length; i++) {
+    const ghIssue = ghIssues[i]!;
+    const existing = existingTickets[i] ?? null;
     result.processed++;
 
     try {
-      const existing = await findLinearTicketForGhIssue(
-        clients.linear,
-        ghIssue.number,
-        config.linearTeamId,
-      );
-
       if (existing) {
         log.info(
           { ghNumber: ghIssue.number, linearId: existing.identifier },
@@ -292,8 +350,8 @@ export async function runGhLinearSync(
         // Bidirectional close: close GH issue if Linear ticket is Done.
         if (config.bidirectionalClose) {
           const isDone =
-            existing.state.type === "completed" ||
-            existing.state.name.toLowerCase() === "done";
+            COMPLETED_STATE_TYPES.has(existing.state.type ?? "") ||
+            COMPLETED_STATE_NAMES.has(existing.state.name?.toLowerCase() ?? "");
 
           if (isDone) {
             if (!config.dryRun) {
@@ -340,7 +398,7 @@ export async function runGhLinearSync(
         result.created++;
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = getErrorMessage(err);
       log.error({ err, ghNumber: ghIssue.number }, "failed to sync GH issue");
       result.errors.push(`GH#${ghIssue.number}: ${msg}`);
     }
@@ -371,10 +429,12 @@ export async function createGitHubSyncClientFromToken(
         repo,
         labels,
         state: state ?? "open",
-        per_page: per_page ?? 100,
+        per_page: per_page ?? GITHUB_ISSUES_PER_PAGE,
       });
       // Octokit's `listForRepo` returns both issues and PRs; filter PRs out.
-      // Cast via unknown to bridge the Octokit item type to our minimal interface.
+      // Cast via `unknown` to bridge Octokit's detailed item type to our minimal
+      // interface — the fields we rely on (`number`, `title`, `body`, `html_url`,
+      // `labels`, `state`) are always present on non-PR issue responses.
       return resp.data.filter(
         (i) => !("pull_request" in i && i.pull_request),
       ) as unknown as GitHubIssue[];
@@ -396,6 +456,12 @@ export async function createGitHubSyncClientFromToken(
  * The Linear SDK uses lazy Promise-like relations for fields such as `state`.
  * The factory casts via `unknown` to bridge the SDK's complex types to our
  * minimal flat interface (which the real data satisfies at runtime).
+ *
+ * The `as Promise<...>` casts below are safe because:
+ * 1. The SDK returns objects that match the interface at runtime — we only
+ *    request fields present in every Linear issue/state/workflow-state response.
+ * 2. Tests use mock clients that satisfy the interface without any SDK coupling,
+ *    so mismatches surface immediately in CI if the SDK changes shape.
  */
 export async function createLinearSyncClientFromApiKey(
   apiKey: string,

@@ -20,6 +20,8 @@ import {
   runGhLinearSync,
   createGitHubSyncClientFromToken,
   createLinearSyncClientFromApiKey,
+  getErrorMessage,
+  DEFAULT_TRIAGE_STATE_NAME,
   type GhLinearSyncConfig,
 } from "@urateam/core";
 
@@ -43,7 +45,7 @@ async function main(): Promise<void> {
     labelFilters: process.env.GH_LINEAR_SYNC_LABEL_FILTERS
       ? process.env.GH_LINEAR_SYNC_LABEL_FILTERS.split(",").map((l) => l.trim()).filter(Boolean)
       : undefined,
-    triageStateName: process.env.GH_LINEAR_SYNC_TRIAGE_STATE ?? "Triage",
+    triageStateName: process.env.GH_LINEAR_SYNC_TRIAGE_STATE ?? DEFAULT_TRIAGE_STATE_NAME,
     bidirectionalClose: process.env.GH_LINEAR_SYNC_BIDIRECTIONAL_CLOSE === "true",
     dryRun: process.env.GH_LINEAR_SYNC_DRY_RUN === "true",
   };
@@ -76,9 +78,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-  console.error(
-    "Fatal error:",
-    err instanceof Error ? err.message : String(err),
-  );
+  console.error("Fatal error:", getErrorMessage(err));
   process.exit(1);
 });

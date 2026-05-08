@@ -4,6 +4,8 @@ import {
   findLinearTicketForGhIssue,
   createLinearTicketForGhIssue,
   makeIdempotencyMarker,
+  getErrorMessage,
+  DEFAULT_TRIAGE_STATE_NAME,
   type GhLinearSyncConfig,
   type GitHubSyncClient,
   type LinearSyncClient,
@@ -98,6 +100,32 @@ const defaultConfig: GhLinearSyncConfig = {
   linearApiKey: "lin-key",
   linearTeamId: TEAM_ID,
 };
+
+// ---------------------------------------------------------------------------
+// getErrorMessage
+// ---------------------------------------------------------------------------
+
+describe("getErrorMessage", () => {
+  it("returns the message from an Error instance", () => {
+    expect(getErrorMessage(new Error("boom"))).toBe("boom");
+  });
+
+  it("stringifies non-Error values", () => {
+    expect(getErrorMessage("plain string")).toBe("plain string");
+    expect(getErrorMessage(42)).toBe("42");
+    expect(getErrorMessage({ toString: () => "custom" })).toBe("custom");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DEFAULT_TRIAGE_STATE_NAME
+// ---------------------------------------------------------------------------
+
+describe("DEFAULT_TRIAGE_STATE_NAME", () => {
+  it("equals 'Triage'", () => {
+    expect(DEFAULT_TRIAGE_STATE_NAME).toBe("Triage");
+  });
+});
 
 // ---------------------------------------------------------------------------
 // makeIdempotencyMarker
@@ -254,6 +282,30 @@ describe("runGhLinearSync", () => {
     await expect(
       runGhLinearSync(defaultConfig, { github: ghClient, linear: linClient }),
     ).rejects.toThrow(/"Triage" not found/);
+  });
+
+  it("throws on invalid githubRepo format (no slash)", async () => {
+    const { client: ghClient } = makeMockGitHub([]);
+    const { client: linClient } = makeMockLinear([], [triageState]);
+
+    await expect(
+      runGhLinearSync(
+        { ...defaultConfig, githubRepo: "no-slash-here" },
+        { github: ghClient, linear: linClient },
+      ),
+    ).rejects.toThrow(/Invalid githubRepo format/);
+  });
+
+  it("throws on invalid githubRepo format (empty owner)", async () => {
+    const { client: ghClient } = makeMockGitHub([]);
+    const { client: linClient } = makeMockLinear([], [triageState]);
+
+    await expect(
+      runGhLinearSync(
+        { ...defaultConfig, githubRepo: "/repo" },
+        { github: ghClient, linear: linClient },
+      ),
+    ).rejects.toThrow(/Invalid githubRepo format/);
   });
 
   it("respects triageStateName override", async () => {
