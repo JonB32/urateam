@@ -1,4 +1,5 @@
 import pino from "pino";
+import type { Cron } from "croner";
 import type { ObserverStore, QualityFinding, TickResult } from "./types.js";
 import { isFirstTick, seedDedupOnFirstTick, processFindings } from "./engine.js";
 
@@ -43,8 +44,7 @@ export function createObserverScheduler(
   deps: ObserverSchedulerDeps
 ): ObserverScheduler {
   const { store, computeFindings, fileGithubIssue } = deps;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let cronJob: any = null;
+  let cronJob: Cron | null = null;
 
   async function tick(): Promise<TickResult> {
     // Resolve first-tick-file flag:
@@ -103,7 +103,6 @@ export function createObserverScheduler(
 
     stop(): void {
       if (cronJob) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         cronJob.stop();
         cronJob = null;
         log.info("quality observer stopped");

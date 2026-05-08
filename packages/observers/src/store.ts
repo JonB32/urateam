@@ -1,6 +1,9 @@
 import Database from "better-sqlite3";
 import type { ObserverStore } from "./types.js";
 
+/** Meta key used to record when the first tick completed. */
+const FIRST_TICK_META_KEY = "firstTickAt";
+
 /**
  * Creates a SQLite-backed observer store at the given path.
  * Pass ":memory:" for an in-memory store (useful in tests).
@@ -25,16 +28,23 @@ export function createObserverStore(dbPath: string): ObserverStore {
     );
   `);
 
+  /** Private helper — executes the findings COUNT query and returns the raw integer. */
+  function _countFindings(): number {
+    const row = db
+      .prepare("SELECT COUNT(*) as n FROM observer_findings")
+      .get() as { n: number };
+    return row.n;
+  }
+
   return {
     isFirstTick(): boolean {
-      const row = db
-        .prepare("SELECT COUNT(*) as n FROM observer_findings")
-        .get() as { n: number };
       const meta = db
-        .prepare("SELECT value FROM observer_meta WHERE key = 'firstTickAt'")
-        .get();
+        .prepare(
+          "SELECT value FROM observer_meta WHERE key = ?"
+        )
+        .get(FIRST_TICK_META_KEY);
       // True when findings table is empty OR firstTickAt row is absent
-      return row.n === 0 || !meta;
+      return _countFindings() === 0 || !meta;
     },
 
     hasFingerprint(fingerprint: string): boolean {
@@ -52,18 +62,15 @@ export function createObserverStore(dbPath: string): ObserverStore {
     setFirstTickAt(): void {
       db.prepare(
         `INSERT INTO observer_meta (key, value)
-         VALUES ('firstTickAt', ?)
+         VALUES (?, ?)
          ON CONFLICT (key) DO UPDATE
            SET value = excluded.value,
                updated_at = strftime('%s', 'now')`
-      ).run(new Date().toISOString());
+      ).run(FIRST_TICK_META_KEY, new Date().toISOString());
     },
 
     countFingerprints(): number {
-      const row = db
-        .prepare("SELECT COUNT(*) as n FROM observer_findings")
-        .get() as { n: number };
-      return row.n;
+      return _countFindings();
     },
 
     close(): void {
