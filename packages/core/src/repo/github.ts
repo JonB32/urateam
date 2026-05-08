@@ -109,6 +109,28 @@ export async function addPRComment(
 }
 
 /**
+ * Return true if the PR already has a comment whose body starts with `prefix`.
+ * Used to dedup idempotent bot comments (e.g. cost summaries) across pipeline
+ * re-runs on the same PR. Best-effort: rejects (rather than swallows) on API
+ * failure so callers can decide their own fail-safety policy.
+ */
+export async function prHasCommentStartingWith(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  prefix: string,
+): Promise<boolean> {
+  const { data: comments } = await octokit.issues.listComments({
+    owner,
+    repo,
+    issue_number: prNumber,
+    per_page: 100,
+  });
+  return comments.some((c) => (c.body ?? "").startsWith(prefix));
+}
+
+/**
  * Count the number of unique approving reviews on a PR.
  * Uses the latest state per reviewer — a reviewer who approved then requested changes
  * is not counted as approving.
