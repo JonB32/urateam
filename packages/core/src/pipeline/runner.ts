@@ -29,7 +29,7 @@ import type { ReviewModelRun } from "../executor/review/review-provider.js";
 import { extractHandoff } from "../executor/extract-handoff.js";
 import { DEFAULT_AGENT_CLAUDE_MD } from "../executor/agent-config.js";
 import { generatePRDescription } from "./pr-description.js";
-import { access, readdir, writeFile, appendFile } from "node:fs/promises";
+import { access, writeFile, appendFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execFile as execFileCb } from "node:child_process";
@@ -53,8 +53,8 @@ import {
   getChangedFiles,
   checkDuplicateBranch,
   branchName,
-  gitExecSafe,
   createWorktreeFromRemote,
+  pruneWorktreesInRepoDirs,
 } from "../repo/git.js";
 import {
   addPRComment,
@@ -2580,24 +2580,11 @@ export class PipelineRunner {
 
   /**
    * Run `git worktree prune` on every repository directory found under
-   * repoCloneDir. Uses gitExecSafe so failures (e.g. non-git directories)
-   * are silently ignored.
+   * repoCloneDir. BEC-180: skips entries with no `.git/` (e.g. the BEC-174
+   * `.agent-sweep/` parent dir) so they don't produce noisy ERROR logs.
    */
   private async pruneAllWorktreeRefs(): Promise<void> {
-    let entries: string[];
-    try {
-      entries = await readdir(this.repoCloneDir);
-    } catch {
-      // repoCloneDir does not exist yet — nothing to prune.
-      return;
-    }
-
-    await Promise.all(
-      entries.map((entry) =>
-        // gitExecSafe returns "" on error, so non-git directories are harmless.
-        gitExecSafe(["worktree", "prune"], join(this.repoCloneDir, entry)),
-      ),
-    );
+    await pruneWorktreesInRepoDirs(this.repoCloneDir);
   }
 
   /**
