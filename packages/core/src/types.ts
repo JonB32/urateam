@@ -207,6 +207,18 @@ export const RepoConfigSchema = z.object({
   githubFeedback: GitHubFeedbackConfigSchema.optional(),
   /** BEC-135: Release Manager agent (Pro feature). */
   releaseManager: ReleaseManagerConfigSchema.optional(),
+  /**
+   * BEC-177: Label-based repo routing. When set, this repo is selected for pipeline runs
+   * whose resolved pipeline label matches this pattern (case-insensitive exact match).
+   * Takes priority over the teamId/projectId key lookup.
+   *
+   * Example: set `labelPattern: "observer-fix"` to route all Linear tickets with the
+   * "observer-fix" pipeline label to this repo instead of the default repo.
+   *
+   * Backwards compatible: existing entries without `labelPattern` continue to be
+   * resolved by their teamId/projectId key.
+   */
+  labelPattern: z.string().optional(),
 });
 export type RepoConfig = z.infer<typeof RepoConfigSchema>;
 

@@ -35,6 +35,7 @@ pnpm monorepo with 4 packages:
 Autonomous backlog manager in `packages/core/src/pm/`:
 - `scheduler.ts` — cron-based tick: budget → recover retriable → recover stuck → **startTodoIssues** → triage → resolve approvals → promote → deprioritize → cancel → digest
 - `actions/start-todo.ts` — scans Linear for issues in "Todo" state with no active pipeline run, starts pipelines for orphaned issues (closes gap when webhooks are missed or process restarts)
+- `actions/select-repo-config.ts` — **BEC-177**: `selectRepoConfig(pipelineLabel, teamId, projectId, repoConfigs)` — label-pattern lookup first (multi-repo routing), teamId/projectId key fallback (backwards compat)
 - `actions/triage.ts` — classifies issues via Claude Haiku, adds pipeline label (auto-implement/bug/quick-fix), generates acceptance criteria
 - `actions/promote.ts` — moves highest-priority non-conflicting issues Backlog → Todo
 - `actions/recover-stuck.ts` — detects issues stuck in "In Progress" with no active run, moves to Backlog

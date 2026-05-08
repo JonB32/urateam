@@ -7,6 +7,7 @@ import type { PipelineRunner, LinearIssue } from "../../pipeline/runner.js";
 import type { BudgetEvaluation } from "../types.js";
 import { createLogger } from "../../logger.js";
 import { logAuditEventUnchecked, pmSkippedCircuitBreakerEvent } from "../../audit/index.js";
+import { selectRepoConfig } from "./select-repo-config.js";
 
 const log = createLogger({ component: "PmAgent:startTodo" });
 
@@ -187,16 +188,20 @@ export async function startTodoIssues(
       continue;
     }
 
-    // Resolve repo config from team/project ID
-    const repoConfig = repoConfigs[teamId] ?? repoConfigs[projectId ?? ""] ?? null;
+    // Resolve repo config: label-pattern lookup first (BEC-177 multi-repo routing),
+    // then teamId / projectId key lookup (backwards compatible).
+    const repoConfig = selectRepoConfig(resolved.key, teamId, projectId, repoConfigs);
     if (!repoConfig) {
       results.push({
         identifier: issue.identifier,
         title: issue.title,
         started: false,
-        reason: `no repo config for team ${teamId}`,
+        reason: `no repo config for label "${resolved.key}" (team ${teamId})`,
       });
-      log.warn({ identifier: issue.identifier, teamId, projectId }, "no repo mapping — skipping");
+      log.warn(
+        { identifier: issue.identifier, teamId, projectId, pipelineLabel: resolved.key },
+        "no repo mapping — skipping (checked labelPattern and teamId/projectId keys)",
+      );
       continue;
     }
 

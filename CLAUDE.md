@@ -78,6 +78,7 @@ It is a pnpm monorepo with 4 packages:
 - Autonomous backlog manager running on cron (default 30 min)
 - Tick sequence: budget check → **recover retriable runs** → recover stuck In Progress → **startTodoIssues** → triage → resolve approvals → promote → deprioritize → cancel → digest
 - **startTodoIssues** (`actions/start-todo.ts`): scans Linear for issues in "Todo" state with no active pipeline run, starts pipelines for orphans. Closes the gap when webhooks are missed or process restarts with issues already in Todo. Respects maxInFlight budget.
+- **Multi-repo routing (BEC-177)**: `RepoConfig` supports an optional `labelPattern` field. `selectRepoConfig()` (`actions/select-repo-config.ts`) selects the repo by label-pattern match first, falling back to teamId/projectId key lookup. Wired into both `start-todo.ts` and `webhook/handler.ts`. Configure by adding `labelPattern: "observer-fix"` to a `RepoConfig` entry; tickets with that pipeline label will clone that repo. Backwards compatible — existing teamId-keyed configs need no changes.
 - Triage: Claude Haiku classifies issues, adds pipeline label (`auto-implement`/`bug`/`quick-fix`), generates acceptance criteria and appends to issue description (for RALPH)
 - Promote: moves highest-priority non-conflicting issues to "Todo" (triggers webhook pipeline). Runs AFTER startTodoIssues so existing orphaned issues fill slots first.
 - Approval-gated: deprioritize/cancel require Slack reaction approval (48h timeout) via shared `requestApprovalIfNotPending()`
