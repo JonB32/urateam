@@ -60,6 +60,7 @@ import {
   addPRComment,
   createGitHubClient,
   createPR,
+  prHasCommentStartingWith,
   rerequestPRReview,
   type GitHubConfig,
 } from "../repo/github.js";
@@ -2287,17 +2288,35 @@ export class PipelineRunner {
                 repoConfig.url,
               );
               const summaryOctokit = await createGitHubClient(this.githubConfig);
-              await addPRComment(
+              // Dedup: skip when a prior pipeline run on this PR already
+              // posted a cost summary. We use the markdown header as the
+              // sentinel so the check survives any token/dollar diff between
+              // runs.
+              const alreadyPosted = await prHasCommentStartingWith(
                 summaryOctokit,
                 summaryOwner,
                 summaryRepo,
                 summaryPrNumber,
-                body,
+                "🤖 **Pipeline cost summary**",
               );
-              runLog.info(
-                { prNumber: summaryPrNumber },
-                "BEC-175: posted PR cost summary",
-              );
+              if (alreadyPosted) {
+                runLog.info(
+                  { prNumber: summaryPrNumber },
+                  "BEC-175: cost summary already exists on PR — skipping",
+                );
+              } else {
+                await addPRComment(
+                  summaryOctokit,
+                  summaryOwner,
+                  summaryRepo,
+                  summaryPrNumber,
+                  body,
+                );
+                runLog.info(
+                  { prNumber: summaryPrNumber },
+                  "BEC-175: posted PR cost summary",
+                );
+              }
             }
           }
         } catch (err) {
