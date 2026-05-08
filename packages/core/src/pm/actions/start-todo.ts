@@ -62,6 +62,13 @@ export async function startTodoIssues(
     return [];
   }
 
+  // BEC-161: validate circuit-breaker config eagerly (fail-fast, before any network call)
+  if (input.maxConsecutiveFailures !== undefined && !input.getFailureCount) {
+    throw new Error(
+      "startTodoIssues: maxConsecutiveFailures requires getFailureCount to be set",
+    );
+  }
+
   // 1. Query Linear for all "Todo" issues across configured teams
   const issuesResponse = await linearClient.issues({
     filter: {
@@ -121,13 +128,9 @@ export async function startTodoIssues(
     // ticket that's been doom-looping, this saves three SDK calls per tick per
     // candidate. issue.identifier is already on the result of the initial
     // Todo-issues query, so no extra round-trip is needed for the count.
+    // getFailureCount presence is validated eagerly above, before this loop.
     if (input.maxConsecutiveFailures !== undefined) {
-      if (!input.getFailureCount) {
-        throw new Error(
-          "startTodoIssues: maxConsecutiveFailures requires getFailureCount to be set",
-        );
-      }
-      const failureCount = await input.getFailureCount(issue.identifier);
+      const failureCount = await input.getFailureCount!(issue.identifier);
       if (failureCount >= input.maxConsecutiveFailures) {
         log.warn(
           { identifier: issue.identifier, failureCount, threshold: input.maxConsecutiveFailures },
@@ -229,8 +232,11 @@ export async function startTodoIssues(
     }
   }
 
-  const started = results.filter((r) => r.started).length;
-  const skipped = results.filter((r) => !r.started);
+  let started = 0;
+  const skipped: StartTodoResult[] = [];
+  for (const r of results) {
+    r.started ? started++ : skipped.push(r);
+  }
   if (skipped.length > 0) {
     log.info(
       { started, skipped: skipped.map((s) => ({ id: s.identifier, reason: s.reason })) },
