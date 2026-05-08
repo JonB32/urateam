@@ -12,7 +12,7 @@ export const startCommand = new Command("start")
   .option("--dashboard-port <port>", "Dashboard port", "3001")
   .action(async (options) => {
     try {
-    const { createApp, defaultConfigs, applyDeepReviewPassesOverride, applyAutoMergeOverride, cleanupWorktrees, runAgentBranchSweep, addLogStream, initSlackAlertManager, createSlackAlertStream } = await import("@urateam/core");
+    const { createApp, defaultConfigs, applyDeepReviewPassesOverride, applyAutoMergeOverride, cleanupWorktrees, runAgentBranchSweep, addLogStream, initSlackAlertManager, createSlackAlertStream, validateReviewModels } = await import("@urateam/core");
 
     // --- Slack error alerts (opt-in) ---
     if (
@@ -214,6 +214,10 @@ export const startCommand = new Command("start")
       ),
       process.env.URATEAM_AUTO_MERGE,
     );
+
+    // BEC-171: validate REVIEW_MODELS against the OpenRouter catalog at startup
+    // so typos surface visibly instead of silently 404-ing at fanout runtime.
+    await validateReviewModels(process.env);
 
     // --- Resolve and validate workspace directories ---
     const agentRunDir = process.env.AGENT_RUN_DIR ?? join(homedir(), "data", "runs");

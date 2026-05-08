@@ -11,7 +11,7 @@ export const devCommand = new Command("dev")
   .option("--port <port>", "Webhook server port", "3000")
   .option("--dashboard-port <port>", "Dashboard port", "3001")
   .action(async (options) => {
-    const { createApp, defaultConfigs } = await import("@urateam/core");
+    const { createApp, defaultConfigs, validateReviewModels } = await import("@urateam/core");
     const { createDashboard } = await import("@urateam/dashboard");
 
     const dashboardUser = process.env.DASHBOARD_USER;
@@ -40,6 +40,10 @@ export const devCommand = new Command("dev")
     // OSS-tier auth pre-flight (urateam#40). Run before opening the DB so a
     // bad auth state doesn't leave any resources to clean up.
     await preflightClaudeAuth({ command: "ura dev" });
+
+    // BEC-171: validate REVIEW_MODELS against the OpenRouter catalog at startup
+    // so typos surface visibly instead of silently 404-ing at fanout runtime.
+    await validateReviewModels(process.env);
 
     const config = {
       webhookSecret: process.env.LINEAR_WEBHOOK_SECRET ?? "dev-secret",
