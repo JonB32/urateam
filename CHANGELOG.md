@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions below refer to the workspace version published to npm. Per-package
 notes call out when a change affects only a single package.
 
+## [0.1.38] — 2026-05-08
+
+Bumps:
+- `@urateam/core`: 0.1.23 → 0.1.24
+- `@urateam/cli`: 0.1.25 → 0.1.26
+- `@urateam/dashboard`: 0.1.23 → 0.1.24
+- `create-urateam`: 0.1.26 → 0.1.27
+
+### Added
+- **BEC-174** — Periodic sweep of stale `origin/agent/*` branches with no open PR. Runs on the same hourly cadence as the worktree-cleanup cron. New env `PM_AGENT_AGENT_BRANCH_TTL_DAYS` (default `7`) controls the staleness cutoff; branches with open PRs are always preserved. Failures from the open-PR check are treated as "has PR" — a transient GitHub outage can never wipe a branch we couldn't verify. Emits one `pm.agent_branch_swept` audit event per delete. Per-repo sweep dirs (keyed by `sha256(repoUrl).slice(0,8)`) prevent cross-repo collisions in multi-repo deployments. (#185)
+- **BEC-175** — Optional per-PR cost summary comment posted after `onPipelineComplete`, showing per-stage tokens (implement / test / review / fanout) and total dollar cost. Gated by `URATEAM_PR_COST_SUMMARY=true` (default off). Idempotent: a prior pipeline run on the same PR will not be duplicated — the new `prHasCommentStartingWith` helper checks for the `🤖 **Pipeline cost summary**` header before posting. Best-effort: failures never block pipeline completion. (#186)
+
 ## [0.1.37] — 2026-05-07
 
 Bumps:
