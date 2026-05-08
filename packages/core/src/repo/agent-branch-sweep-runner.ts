@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { AnyDb } from "../db/client.js";
 import { logAuditEventUnchecked } from "../audit/writer.js";
@@ -65,11 +66,15 @@ export async function runAgentBranchSweep(
   deps: RunAgentBranchSweepDeps,
 ): Promise<void> {
   const seen = new Set<string>();
-  const sweepDir = join(deps.repoCloneDir, ".agent-sweep");
   for (const repoUrl of deps.repoUrls) {
     if (seen.has(repoUrl)) continue;
     seen.add(repoUrl);
     try {
+      // Per-repo sweep dir: prevents cross-repo collisions when multiple
+      // repoUrls are configured (cloneRepo's "wrong remote" path errors out
+      // on a populated dir) and serialises overlapping ticks for the same repo.
+      const repoSlug = createHash("sha256").update(repoUrl).digest("hex").slice(0, 8);
+      const sweepDir = join(deps.repoCloneDir, ".agent-sweep", repoSlug);
       await cloneRepo(repoUrl, sweepDir);
       const result = await sweepStaleAgentBranches({
         workCwd: sweepDir,

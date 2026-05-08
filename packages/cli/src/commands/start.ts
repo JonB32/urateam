@@ -423,6 +423,7 @@ export const startCommand = new Command("start")
     function shutdown() {
       console.log("Shutting down...");
       clearInterval(cleanupInterval);
+      clearInterval(branchSweepInterval);
       if (pmInterval) clearInterval(pmInterval);
       rmScheduler?.stop();
       let closed = 0;

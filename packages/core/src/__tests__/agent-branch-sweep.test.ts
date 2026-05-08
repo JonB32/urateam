@@ -135,6 +135,14 @@ describe("sweepStaleAgentBranches", () => {
     expect(result.skippedHasPR).toContain("agent/BEC-100-stale-no-pr");
     expect(result.skippedHasPR).toContain("agent/BEC-101-stale-with-pr");
     expect(result.skippedFresh).toEqual(["agent/BEC-102-fresh"]);
+
+    // Defence-in-depth: assert the bare remote was untouched. A future
+    // regression that ran the delete BEFORE hasOpenPR would still pass an
+    // in-memory assertion alone — verifying remote refs guards that.
+    const remoteRefs = git(["ls-remote", "--heads", bareRepo], cloneDir);
+    expect(remoteRefs).toContain("agent/BEC-100-stale-no-pr");
+    expect(remoteRefs).toContain("agent/BEC-101-stale-with-pr");
+    expect(remoteRefs).toContain("agent/BEC-102-fresh");
   });
 });
 
