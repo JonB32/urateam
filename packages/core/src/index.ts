@@ -45,6 +45,16 @@ export {
 } from "./repo/devcontainer.js";
 export { checkRequirements, buildRalphContext, type RalphCheckResult } from "./executor/ralph.js";
 export { cleanupWorktrees } from "./repo/git.js";
+export {
+  sweepStaleAgentBranches,
+  type SweepInput,
+  type SweepResult,
+  type SweptBranch,
+} from "./repo/agent-branch-sweep.js";
+export {
+  runAgentBranchSweep,
+  type RunAgentBranchSweepDeps,
+} from "./repo/agent-branch-sweep-runner.js";
 export { isClaudeAuthValid, resetAuthCheckCache } from "./executor/auth-check.js";
 export type { GitHubConfig } from "./repo/github.js";
 export { createGitHubClient } from "./repo/github.js";

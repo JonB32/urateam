@@ -421,6 +421,7 @@ export const AuditEventTypeSchema = z.enum([
   "pm.approval_requested", "pm.approval_resolved",
   "pm.issue_promoted", "pm.issue_deprioritized", "pm.issue_cancelled",
   "pm.triage_classified",
+  "pm.agent_branch_swept",
   "budget.alert_fired", "budget.run_refused",
   "license.validation_failed", "config.loaded",
   "dashboard.manual_action",

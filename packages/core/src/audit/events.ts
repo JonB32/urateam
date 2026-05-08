@@ -71,6 +71,23 @@ export function pmCancelledEvent(args: {
   });
 }
 
+export function pmAgentBranchSweptEvent(args: {
+  branch: string;
+  ageDays: number;
+  reason: string;
+}): AuditEvent {
+  return base({
+    eventType: "pm.agent_branch_swept",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    payload: {
+      branch: args.branch,
+      ageDays: args.ageDays,
+      reason: args.reason,
+    },
+  });
+}
+
 export function pmTriageClassifiedEvent(args: {
   issueId: string;
   label: string;
