@@ -12,7 +12,7 @@ export const startCommand = new Command("start")
   .option("--dashboard-port <port>", "Dashboard port", "3001")
   .action(async (options) => {
     try {
-    const { createApp, defaultConfigs, applyDeepReviewPassesOverride, cleanupWorktrees, addLogStream, initSlackAlertManager, createSlackAlertStream } = await import("@urateam/core");
+    const { createApp, defaultConfigs, applyDeepReviewPassesOverride, cleanupWorktrees, runAgentBranchSweep, addLogStream, initSlackAlertManager, createSlackAlertStream } = await import("@urateam/core");
 
     // --- Slack error alerts (opt-in) ---
     if (
@@ -293,6 +293,42 @@ export const startCommand = new Command("start")
     await runCleanup();
     const cleanupInterval = setInterval(runCleanup, 60 * 60 * 1000);
     cleanupInterval.unref();
+
+    // --- Stale agent-branch sweep cron (BEC-174) ---
+    // Sweeps `agent/*` branches on origin whose tip commit is older than
+    // PM_AGENT_AGENT_BRANCH_TTL_DAYS (default 7) AND that have no open PR.
+    // Skips branches with open PRs to preserve active human review.
+    const _parsedAgentBranchTtl = parseInt(
+      process.env.PM_AGENT_AGENT_BRANCH_TTL_DAYS ?? "7",
+      10,
+    );
+    const agentBranchTtlDays =
+      Number.isFinite(_parsedAgentBranchTtl) && _parsedAgentBranchTtl > 0
+        ? _parsedAgentBranchTtl
+        : 7;
+
+    const repoUrls = Object.values(config.repoConfigs).map(
+      (r) => (r as { url: string }).url,
+    );
+
+    async function runBranchSweepTick() {
+      try {
+        await runAgentBranchSweep({
+          db,
+          repoUrls,
+          repoCloneDir: config.repoCloneDir,
+          ttlDays: agentBranchTtlDays,
+        });
+      } catch (err) {
+        console.error("Branch sweep tick failed:", (err as Error).message);
+      }
+    }
+    void runBranchSweepTick();
+    const branchSweepInterval = setInterval(
+      () => void runBranchSweepTick(),
+      60 * 60 * 1000,
+    );
+    branchSweepInterval.unref();
 
     // --- PM Agent (opt-in) ---
     let pmInterval: ReturnType<typeof setInterval> | undefined;
