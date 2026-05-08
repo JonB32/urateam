@@ -61,7 +61,7 @@ It is a pnpm monorepo with 3 packages:
 - Token budget: optional maxTokens with 80% alert and hard abort
 - Per-stage model override: `stageModels` map in `PipelineConfig` (e.g. `{ implement: "claude-opus-4-6" }`); resolved as `config.stageModels?.[stage] ?? profile.model`
 - Transient failure recovery: auth/network/rate-limit errors classified as `"retriable"`, worktree preserved, PM Agent auto-resumes on next tick (max 3 retries)
-- Worktree auto-recovery: `createWorktree` detects "already checked out" errors, force-removes stale worktree, and retries
+- Worktree auto-recovery: `createWorktree` detects both "already checked out" and "already used by worktree" errors (urateam#112), force-removes the stale worktree, runs `git worktree prune` to clear metadata (BEC-179), and retries with idempotent `-B <branch>` to guarantee the worktree HEAD is on a symbolic ref (not detached)
 - GitHub PR feedback: `/webhooks/github` receives PR review comments (`pull_request_review`, `pull_request_review_comment`) and regular PR comments (`issue_comment`), triggers `review-feedback` pipeline runs that check out the existing branch and address comments. Supports `@ateam` trigger keyword from the regular PR comment box.
 
 ### Agent Execution
