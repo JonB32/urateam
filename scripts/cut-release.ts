@@ -13,7 +13,7 @@
  * again — re-running cleanly is the operator's responsibility).
  */
 
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -125,6 +125,20 @@ function applyPatches(patches: FilePatch[]): void {
   }
 }
 
+/**
+ * Run a command via spawnSync (no shell — argv is passed directly so backticks
+ * and other shell metacharacters in arguments are never interpreted). Throws
+ * with the exit status on failure.
+ */
+function run(cmd: string, argv: string[]): void {
+  const r = spawnSync(cmd, argv, { cwd: REPO_ROOT, stdio: "inherit" });
+  if (r.status !== 0) {
+    throw new Error(
+      `${cmd} ${argv.join(" ")} failed (status ${r.status ?? "spawn error"})`,
+    );
+  }
+}
+
 interface CliArgs {
   bump: BumpKind;
   dryRun: boolean;
@@ -180,32 +194,41 @@ function main(): void {
     return;
   }
 
+  // Create the branch BEFORE writing files. If `git checkout -b` fails (e.g.
+  // the branch already exists from a prior half-cut run), the working tree
+  // stays clean — operator can delete the branch and retry without manual
+  // `git checkout -- .` cleanup.
+  const branch = `chore/release-${releaseTag}`;
+  console.log(`\nCreating branch ${branch}...`);
+  try {
+    run("git", ["checkout", "-b", branch]);
+  } catch (err) {
+    throw new Error(
+      `${(err as Error).message}\nIf the branch exists from a previous run: \`git branch -D ${branch}\` and retry.`,
+    );
+  }
+
   applyPatches(patches);
 
-  const branch = `chore/release-${releaseTag}`;
-  console.log(`\nCreating branch ${branch} and committing...`);
-  execSync(`git checkout -b ${branch}`, { cwd: REPO_ROOT, stdio: "inherit" });
-  execSync(`git add ${patches.map((p) => p.path).join(" ")}`, {
-    cwd: REPO_ROOT,
-    stdio: "inherit",
-  });
   const message = `chore(release): ${releaseTag}\n\nBumps:\n` +
     `- @urateam/core:        ${prev.core} → ${next.core}\n` +
     `- @urateam/cli:         ${prev.cli} → ${next.cli}\n` +
     `- @urateam/dashboard:   ${prev.dashboard} → ${next.dashboard}\n` +
     `- create-urateam:       ${prev.createUrateam} → ${next.createUrateam}\n`;
-  execSync(`git commit -m ${JSON.stringify(message)}`, {
-    cwd: REPO_ROOT,
-    stdio: "inherit",
-  });
+  run("git", ["add", ...patches.map((p) => p.path)]);
+  run("git", ["commit", "-m", message]);
 
   if (args.push) {
     console.log(`\nPushing ${branch} and opening PR...`);
-    execSync(`git push -u origin ${branch}`, { cwd: REPO_ROOT, stdio: "inherit" });
-    execSync(
-      `gh pr create --title "chore(release): ${releaseTag}" --body "Automated bump via \`pnpm cut-release ${args.bump}\`. Edit the CHANGELOG TODO before merging."`,
-      { cwd: REPO_ROOT, stdio: "inherit" },
-    );
+    run("git", ["push", "-u", "origin", branch]);
+    // Argv passed directly to spawnSync — backticks in --body are NOT
+    // interpreted as bash command substitution because no shell is involved.
+    run("gh", [
+      "pr", "create",
+      "--title", `chore(release): ${releaseTag}`,
+      "--body",
+      `Automated bump via \`pnpm cut-release ${args.bump}\`. Edit the CHANGELOG TODO before merging.`,
+    ]);
   } else {
     console.log("\nDone. Next steps:");
     console.log(
