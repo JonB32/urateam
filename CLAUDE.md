@@ -6,10 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 urateam is an autonomous agent system that receives Linear issues via webhooks, runs them through configurable pipelines (triage, implement, test, review), and delivers pull requests powered by Claude.
 
-It is a pnpm monorepo with 3 packages:
+It is a pnpm monorepo with 4 packages:
 - `@urateam/core` — webhook receiver, pipeline runner, agent executor, database (Drizzle ORM), notifiers
 - `@urateam/dashboard` — Hono + HTMX ops dashboard for monitoring runs
 - `@urateam/cli` — `ura` command-line tool for local development
+- `@urateam/observers` — quality observer: detects recurring patterns in pipeline run data, files GitHub Issues for new findings, with first-tick dedup seeding to prevent batch-flooding on fresh deploy
 
 ## Build & Test Commands
 - `pnpm install` — install all dependencies
@@ -34,6 +35,7 @@ It is a pnpm monorepo with 3 packages:
 - `packages/core/` — Core library (types, webhook, pipeline, executor, DB, notifiers, security)
 - `packages/dashboard/` — Dashboard server and HTMX templates
 - `packages/cli/` — CLI entry point
+- `packages/observers/` — Quality observer (first-tick dedup seeding, GitHub Issues filing, SQLite store)
 - `deploy/` — Docker, Caddy, setup script, env example, CLAUDE.md template
 - `examples/` — Example configurations (basic, monorepo, multi-repo, custom stages)
 - `scripts/` — Setup scripts for Linear webhook and GitHub App
@@ -220,6 +222,14 @@ It is a pnpm monorepo with 3 packages:
 - `upsertActiveWork` uses atomic `onConflictDoUpdate` (requires UNIQUE on `run_id`)
 - `removeActiveWork` called in runner's `finally` block and `abort()` method
 - `checkFileOverlap` compares candidate files against active runs
+
+### Quality Observer (`packages/observers/`)
+- Module: `packages/observers/src/` — `engine.ts` (isFirstTick, seedDedupOnFirstTick, processFindings), `scheduler.ts` (createObserverScheduler), `store.ts` (SQLite-backed ObserverStore), `types.ts`
+- **First-tick dedup seeding (BEC-172):** On a fresh deploy the observer's SQLite store is empty. Without special handling, the 24h lookback window causes every historical pattern to be filed as a GitHub Issue at once. `scheduler.tick()` calls `isFirstTick(store)` before computing findings. If true (and `QUALITY_OBSERVER_FIRST_TICK_FILE` is not set), calls `seedDedupOnFirstTick(store, computeFindings)` which writes fingerprints without filing issues, then logs `"first-tick seed: N findings registered for dedup; not filed (observer is fresh-installed)"`.
+- `isFirstTick(store)` returns true when `observer_findings` is empty OR `meta.firstTickAt` row is absent.
+- `QUALITY_OBSERVER_FIRST_TICK_FILE=true` env var bypasses seeding and files normally on first tick (CI / deliberate-reset use case). Also configurable programmatically via `ObserverSchedulerDeps.firstTickFile`.
+- SQLite tables: `observer_findings` (fingerprint + timestamp), `observer_meta` (key/value, stores `firstTickAt`)
+- `createObserverScheduler(deps)` accepts pluggable `computeFindings` and `fileGithubIssue` functions — the observers package does not depend on `@urateam/core`.
 
 ## Conventions
 - Use `execFile` (never `exec`) for shell commands

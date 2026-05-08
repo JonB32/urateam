@@ -12,10 +12,11 @@ This file provides guidance to Claude Code when working on urateam.
 - `cd packages/core && npx vitest --changed` — run only tests affected by uncommitted/recent changes (fast feedback during development)
 
 ## Architecture
-pnpm monorepo with 3 packages:
+pnpm monorepo with 4 packages:
 - `@urateam/core` — webhook receiver, pipeline runner, agent executor, DB, notifiers, PM Agent
 - `@urateam/dashboard` — Hono+HTMX ops dashboard (security-hardened: CSP, CSRF, rate limiting, credential redaction)
 - `@urateam/cli` — `ura dev` for local development, `ura start` for production
+- `@urateam/observers` — quality observer with first-tick dedup seeding (BEC-172); SQLite-backed fingerprint store, pluggable `computeFindings`/`fileGithubIssue` deps
 
 ## Key Patterns
 - All types and Zod schemas in `packages/core/src/types.ts`
