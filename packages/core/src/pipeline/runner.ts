@@ -12,7 +12,11 @@ import type {
   ReviewFeedbackContext,
 } from "../types.js";
 import type { Db, AnyDb } from "../db/client.js";
-import { pipelineRuns } from "../db/schema.js";
+import { pipelineRuns, stageRuns, reviewModelRuns } from "../db/schema.js";
+import {
+  formatPRCostSummary,
+  type StageCostBreakdown,
+} from "./cost-summary.js";
 import { executeStage } from "../executor/executor.js";
 import { validateHandoff } from "../executor/validate.js";
 import { isFeatureLicensed } from "../license.js";
@@ -53,6 +57,7 @@ import {
   createWorktreeFromRemote,
 } from "../repo/git.js";
 import {
+  addPRComment,
   createGitHubClient,
   createPR,
   rerequestPRReview,
@@ -84,7 +89,7 @@ import {
   checkFileOverlap,
   getModifiedFiles,
 } from "../pm/coordination.js";
-import { eq, and, or, sql, gte, lt } from "drizzle-orm";
+import { eq, and, or, sql, gte, lt, inArray } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { createLogger, runWithLogContext } from "../logger.js";
 import { isTransientError, MAX_TRANSIENT_RETRIES } from "./error-classifier.js";
@@ -2220,6 +2225,88 @@ export class PipelineRunner {
           .length,
         autoMerged,
       });
+
+      // BEC-175: optional per-PR cost summary comment. Opt-in via
+      // URATEAM_PR_COST_SUMMARY=true. Best-effort — failures never block
+      // pipeline completion.
+      if (
+        process.env.URATEAM_PR_COST_SUMMARY === "true" &&
+        prUrl &&
+        repoConfig.provider !== "gitlab" &&
+        this.githubConfig
+      ) {
+        try {
+          const summaryPrMatch = prUrl.match(/\/pull\/(\d+)/);
+          const summaryPrNumber = summaryPrMatch
+            ? parseInt(summaryPrMatch[1]!, 10)
+            : null;
+          if (summaryPrNumber !== null) {
+            const stages = await (this.db as AnyDb)
+              .select()
+              .from(stageRuns)
+              .where(eq(stageRuns.pipelineRunId, runId));
+            const stageIds = stages.map((s: { id: string }) => s.id);
+            const modelRows =
+              stageIds.length > 0
+                ? await (this.db as AnyDb)
+                    .select()
+                    .from(reviewModelRuns)
+                    .where(inArray(reviewModelRuns.stageRunId, stageIds))
+                : [];
+            const modelsByStage = new Map<
+              string,
+              Array<{ modelId: string; inputTokens: number; outputTokens: number }>
+            >();
+            for (const mr of modelRows) {
+              const arr = modelsByStage.get(mr.stageRunId) ?? [];
+              arr.push({
+                modelId: mr.modelId,
+                inputTokens: mr.inputTokens,
+                outputTokens: mr.outputTokens,
+              });
+              modelsByStage.set(mr.stageRunId, arr);
+            }
+            const breakdown: StageCostBreakdown[] = stages.map(
+              (s: {
+                id: string;
+                stage: string;
+                inputTokens: number;
+                outputTokens: number;
+              }) => ({
+                stage: s.stage,
+                inputTokens: s.inputTokens,
+                outputTokens: s.outputTokens,
+                modelRuns: modelsByStage.get(s.id),
+              }),
+            );
+            const body = formatPRCostSummary(breakdown, run.pipelineKey, {
+              pipelineConfigs: { [run.pipelineKey]: config },
+            });
+            if (body) {
+              const { owner: summaryOwner, repo: summaryRepo } = parseRepoUrl(
+                repoConfig.url,
+              );
+              const summaryOctokit = await createGitHubClient(this.githubConfig);
+              await addPRComment(
+                summaryOctokit,
+                summaryOwner,
+                summaryRepo,
+                summaryPrNumber,
+                body,
+              );
+              runLog.info(
+                { prNumber: summaryPrNumber },
+                "BEC-175: posted PR cost summary",
+              );
+            }
+          }
+        } catch (err) {
+          runLog.warn(
+            { err: err instanceof Error ? err.message : String(err) },
+            "BEC-175: PR cost summary post failed (non-fatal)",
+          );
+        }
+      }
     } catch (error) {
       // If failPipeline was already called inside the push queue (e.g. failOnAutoCommit
       // path), run.status will already be "failed" or "retriable". Skip to avoid
