@@ -1,9 +1,17 @@
 import { execFile } from "node:child_process";
 import { join } from "node:path";
-import { access, chmod, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createLogger, getLogContext } from "../logger.js";
 
 const baseLog = createLogger({ component: "git" });
+
+/**
+ * Git porcelain status codes that indicate an unmerged (conflict) state.
+ * - UU: both sides modified the same file
+ * - AA: both sides added the file (conflict on new file)
+ * - DD: both sides deleted the file
+ */
+const GIT_CONFLICT_STATUS_CODES = ["UU", "AA", "DD"] as const;
 
 /** Return a logger enriched with the current ALS context (issueId, runId) if present. */
 function getLog() {
@@ -300,7 +308,7 @@ export async function installPrePushHook(repoDir: string): Promise<void> {
 
   // Only install/update if it is our hook or does not yet exist.
   let existing = "";
-  try { existing = await import("node:fs/promises").then(({ readFile }) => readFile(hookPath, "utf8")); } catch { /* not found */ }
+  try { existing = await readFile(hookPath, "utf8"); } catch { /* not found */ }
   if (existing && !existing.includes("# Installed by Linear Agent Framework")) {
     log.debug({ hookPath }, "pre-push hook already exists (not ours) — leaving it in place");
     return;
@@ -401,7 +409,7 @@ export async function rebaseBranch(
     // Check if a rebase is actually in progress (i.e. conflicts)
     try {
       const status = await gitExec(["status", "--porcelain"], worktreePath, 5_000);
-      const hasConflicts = status.includes("UU") || status.includes("AA") || status.includes("DD");
+      const hasConflicts = GIT_CONFLICT_STATUS_CODES.some((code) => status.includes(code));
       if (hasConflicts) {
         log.warn({ baseBranch }, "rebase failed — conflicts detected");
       } else {
@@ -676,13 +684,15 @@ export async function getAgentCommits(
   baseBranch: string,
 ): Promise<string[]> {
   const log = getLog();
+  const parseLogOutput = (output: string) =>
+    output.split("\n").map((l) => l.trim()).filter(Boolean);
   try {
     // Try using origin first (normal case in production)
     const output = await gitExec(
       ["log", "--format=%s", "--reverse", `origin/${baseBranch}..HEAD`],
       worktreePath,
     );
-    return output.split("\n").map((l) => l.trim()).filter(Boolean);
+    return parseLogOutput(output);
   } catch (originErr) {
     // Fall back to local branch (for testing or local-only repos)
     try {
@@ -690,7 +700,7 @@ export async function getAgentCommits(
         ["log", "--format=%s", "--reverse", `${baseBranch}..HEAD`],
         worktreePath,
       );
-      return output.split("\n").map((l) => l.trim()).filter(Boolean);
+      return parseLogOutput(output);
     } catch {
       log.warn({ baseBranch }, "getAgentCommits failed on both origin and local branch — commit messages will be omitted from PR");
       return [];
