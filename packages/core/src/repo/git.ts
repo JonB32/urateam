@@ -164,8 +164,13 @@ async function worktreeAddWithRetry(
       } catch {
         // If git worktree remove fails, force-delete the directory
         await rm(stalePath, { recursive: true, force: true });
-        await gitExec(["worktree", "prune"], repoDir);
       }
+      // Always prune after cleanup so git's internal .git/worktrees/ state is
+      // fully cleared before the retry.  Without this prune the branch can
+      // remain "tied" to the removed worktree directory in git's metadata even
+      // after a successful `worktree remove --force`, causing the retry to see
+      // stale state and potentially land in detached HEAD (BEC-179).
+      await gitExec(["worktree", "prune"], repoDir);
     } else {
       // Can't parse the stale path — just prune and hope
       await gitExec(["worktree", "prune"], repoDir);
@@ -178,9 +183,20 @@ async function worktreeAddWithRetry(
 
 /**
  * Create a git worktree for the given run.
- * Creates branch from HEAD. Returns the worktree path.
- * If the branch is already checked out in a stale worktree, removes it and retries.
+ *
+ * Always passes `-B <branch>` to `git worktree add` — both on the initial
+ * attempt and on the stale-worktree recovery retry.  The `-B` flag creates or
+ * resets the named branch and checks it out in the worktree, which guarantees
+ * the worktree HEAD is on a symbolic ref (e.g. `refs/heads/agent/BEC-XXX`)
+ * rather than a detached commit SHA.  Without `-B`, git falls back to a plain
+ * commit checkout, which produces a detached HEAD and causes the
+ * `verifyBranchMatch` guard to abort the run with "HEAD is on 'HEAD'" (BEC-179).
+ *
+ * If the branch is already checked out in a stale worktree, removes it, prunes
+ * git's internal worktrees metadata, and retries (idempotent `-B` on retry too).
+ *
  * Also installs a pre-push branch-safety hook in the shared .git directory.
+ * Returns the worktree path.
  */
 export async function createWorktree(
   repoDir: string,

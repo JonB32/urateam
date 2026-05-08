@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { createWorktree } from "../repo/git.js";
+import { createWorktree, getCurrentBranch } from "../repo/git.js";
 
 /**
  * Fixture that mirrors the runner's clone-then-worktree flow. Returns a
@@ -40,6 +40,9 @@ describe("createWorktree — stale-worktree recovery (urateam#112)", () => {
     const wt = await createWorktree(repoDir, "run-1", "agent/iss-1", baseDir);
     expect(existsSync(wt)).toBe(true);
     expect(wt).toContain("run-1");
+    // BEC-179: worktree must NOT be in detached HEAD state
+    const branch = await getCurrentBranch(wt);
+    expect(branch).toBe("agent/iss-1");
   });
 
   it("recovers from 'already checked out' (worktree still on disk)", async () => {
@@ -54,6 +57,9 @@ describe("createWorktree — stale-worktree recovery (urateam#112)", () => {
     expect(secondWt).toContain("run-2");
     // The first worktree should have been removed during recovery.
     expect(existsSync(firstWt)).toBe(false);
+    // BEC-179: recovered worktree must NOT be in detached HEAD state
+    const branch = await getCurrentBranch(secondWt);
+    expect(branch).toBe("agent/iss-1");
   });
 
   it("recovers from 'already used by worktree' (worktree dir deleted out from under git)", async () => {
@@ -91,6 +97,10 @@ describe("createWorktree — stale-worktree recovery (urateam#112)", () => {
     const secondWt = await createWorktree(repoDir, "run-2", "agent/iss-1", baseDir);
     expect(existsSync(secondWt)).toBe(true);
     expect(secondWt).toContain("run-2");
+    // BEC-179: recovered worktree must NOT be in detached HEAD state.
+    // `git rev-parse --abbrev-ref HEAD` returns "HEAD" for detached HEAD.
+    const branch = await getCurrentBranch(secondWt);
+    expect(branch).toBe("agent/iss-1");
   });
 
   it("propagates unrelated git errors instead of swallowing them", async () => {
