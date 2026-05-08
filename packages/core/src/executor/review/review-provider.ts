@@ -46,12 +46,20 @@ const DEFAULT_MAX_INPUT_TOKENS = 150_000;
  * (no auto-correction — preserves operator intent for unusual setups).
  */
 const SANE_OUTPUT_TOKENS_FLOOR = 256;
+/** Timeout for the one-shot startup catalog validation fetch. Short on purpose:
+ *  this is a non-blocking best-effort check and must not delay boot. */
+const CATALOG_FETCH_TIMEOUT_MS = 10_000;
+
+/** Splits a comma-separated model list, trims whitespace, drops empty entries. */
+function parseModels(raw: string): string[] {
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
 
 export function getEnabledProviders(env: NodeJS.ProcessEnv): ReviewProvider[] {
   const providers: ReviewProvider[] = [new AgenticDeepReviewProvider()];
 
   const rawModels = env.REVIEW_MODELS ?? "";
-  const models = rawModels.split(",").map((s) => s.trim()).filter(Boolean);
+  const models = parseModels(rawModels);
   const apiKey = env.OPENROUTER_API_KEY ?? "";
   const fanoutDesired = models.length > 0;
   const keyPresent = apiKey.length > 0;
@@ -112,7 +120,7 @@ export function getEnabledProviders(env: NodeJS.ProcessEnv): ReviewProvider[] {
  */
 export async function validateReviewModels(env: NodeJS.ProcessEnv): Promise<void> {
   const rawModels = env.REVIEW_MODELS ?? "";
-  const models = rawModels.split(",").map((s) => s.trim()).filter(Boolean);
+  const models = parseModels(rawModels);
   const apiKey = env.OPENROUTER_API_KEY ?? "";
 
   // Only run when both vars are configured — same symmetric requirement as
@@ -124,7 +132,7 @@ export async function validateReviewModels(env: NodeJS.ProcessEnv): Promise<void
 
   let catalogIds: string[];
   try {
-    const resp = await fetch(catalogUrl, { signal: AbortSignal.timeout(10_000) });
+    const resp = await fetch(catalogUrl, { signal: AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS) });
     if (!resp.ok) {
       log.debug(
         { status: resp.status, url: catalogUrl },
