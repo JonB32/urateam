@@ -355,7 +355,7 @@ Instructions:
 - IMPORTANT: Cross-reference the implementation against the acceptance criteria listed in the issue data above. For each criterion, verify there is corresponding code in the diff. If any acceptance criterion is NOT addressed by the code changes, report it as a blocking finding with category "incomplete-implementation".
 - DEAD CODE CHECK: For every new export (function, class, constant) in the changed files, use Grep to check if it is imported and called from at least one file other than its own test file. Re-exports in index/barrel files do NOT count as callers — there must be an actual invocation. Exception: side-effect-only registrations that run at import time are acceptable. If a new export has no callers outside its definition and test files, report it as a BLOCKING finding with category "dead-code" — the implementation is not wired into the pipeline and will have no effect at runtime.
 - DOCUMENTATION CHECK: If the changes introduce new configuration options, CLI flags, environment variables, or change existing behavior, check whether CLAUDE.md, README.md, or deploy/README.md were updated. If documentation was not updated, report it as a warning finding with category "missing-documentation".
-- Report findings using the JSON format below.
+- FINAL OUTPUT: After completing your review, emit a single HandoffArtifact JSON block as your last output (format below). The \`summary\` field must be 1–2 sentences of prose describing what was reviewed and the overall verdict — NOT JSON. All fields are required even when there are no findings.
 
 ${REVIEW_OUTPUT_FORMAT}
 `.trim();

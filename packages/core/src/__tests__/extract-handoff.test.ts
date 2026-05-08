@@ -508,6 +508,84 @@ describe("extractHandoff", () => {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // BEC-167: Review stage HandoffArtifact envelope — no soup-gate placeholder
+  // ---------------------------------------------------------------------------
+  it("review stage HandoffArtifact with reviewFindings parses as structured (BEC-167)", async () => {
+    // Reproduces the fix for BEC-167: the review agent now emits a full
+    // HandoffArtifact envelope. This must parse via the fast path
+    // (structured: true) and produce a real prose summary — not the
+    // "not parseable prose" soup-gate placeholder.
+    const reviewArtifact = {
+      stage: "review",
+      summary: "The implementation looks correct. No blocking issues found.",
+      filesChanged: ["packages/core/src/security/review-checklist.ts"],
+      approach: "Updated the output format to emit a HandoffArtifact envelope.",
+      context: {
+        issueIntent: "Fix review stage placeholder output",
+        constraints: [],
+        assumptions: [],
+        reviewFindings: [],
+      },
+      tokenBudget: {
+        contextTokensUsed: 500,
+        recommendedMaxTurns: 10,
+      },
+    };
+    const output = wrapInJsonBlock(reviewArtifact);
+    const result = await extractHandoff(output, "run-1", "ISS-1", "review", "/tmp");
+
+    // Must take the fast path — structured agent output, not git fallback
+    expect(result.structured).toBe(true);
+    // Summary must be real prose, NOT the soup-gate placeholder
+    expect(result.artifact.summary).toBe("The implementation looks correct. No blocking issues found.");
+    expect(result.artifact.summary).not.toContain("not parseable prose");
+    expect(result.artifact.summary).not.toContain("Stage review completed");
+    // reviewFindings accessible via context
+    expect(result.artifact.context.reviewFindings).toEqual([]);
+  });
+
+  it("review stage HandoffArtifact with blocking findings parses correctly (BEC-167)", async () => {
+    // Verifies that reviewFindings inside context round-trips through
+    // parseHandoffArtifact — downstream stages (review-fix loop, fanout)
+    // read handoff.context.reviewFindings to detect blocking issues.
+    const reviewArtifact = {
+      stage: "review",
+      summary: "Found one blocking security issue: SQL injection in user query.",
+      filesChanged: ["src/db/user-query.ts"],
+      approach: "Reviewed user query builder for injection vulnerabilities.",
+      context: {
+        issueIntent: "Add user search endpoint",
+        constraints: [],
+        assumptions: [],
+        reviewFindings: [
+          {
+            severity: "blocking",
+            file: "src/db/user-query.ts",
+            line: 42,
+            category: "SQL Injection",
+            description: "Unparameterized query allows SQL injection.",
+            fix: "Use parameterized statements via the ORM.",
+          },
+        ],
+      },
+      tokenBudget: {
+        contextTokensUsed: 800,
+        recommendedMaxTurns: 10,
+      },
+    };
+    const output = wrapInJsonBlock(reviewArtifact);
+    const result = await extractHandoff(output, "run-1", "ISS-1", "review", "/tmp");
+
+    expect(result.structured).toBe(true);
+    expect(result.artifact.summary).toContain("SQL injection");
+    expect(result.artifact.summary).not.toContain("not parseable prose");
+    // reviewFindings must be accessible for the review-fix loop in runner.ts
+    expect(result.artifact.context.reviewFindings).toHaveLength(1);
+    expect(result.artifact.context.reviewFindings![0].severity).toBe("blocking");
+    expect(result.artifact.context.reviewFindings![0].category).toBe("SQL Injection");
+  });
+
   it("returns structured: false when git diff fails (not a git repo)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "extract-test-"));
     // Not a git repo — no .git directory
