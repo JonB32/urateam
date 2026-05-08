@@ -165,13 +165,15 @@ export async function startTodoIssues(
       }
     }
 
-    const team = await issue.team;
+    // Parallelise the three independent Linear SDK round-trips (team, project,
+    // labels) to avoid sequential waterfall latency across the network.
+    const [team, project, labelsConnection] = await Promise.all([
+      issue.team,
+      issue.project,
+      issue.labels(),
+    ]);
     const teamId = team?.id;
-    const project = await issue.project;
     const projectId = project?.id;
-
-    // Resolve labels — Linear SDK issue.labels is a method, not a property
-    const labelsConnection = await issue.labels();
     const labelNodes = labelsConnection?.nodes ?? [];
     const labelNames: string[] = labelNodes.map((l: any) => l.name);
 
