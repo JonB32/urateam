@@ -107,6 +107,40 @@ export function applyDeepReviewPassesOverride(
   return result;
 }
 
+/**
+ * BEC-178: env-var override for `autoMerge` so operators can opt every
+ * pipeline into auto-merge without forking the built-in pipeline configs.
+ *
+ * `envValue === undefined` → returns the input unchanged.
+ * `envValue === "true"` (case-insensitive) → sets `autoMerge: true` on every pipeline.
+ * `envValue === "false"` (case-insensitive) → sets `autoMerge: false` on every pipeline.
+ * Any other value → logs warn, returns input unchanged.
+ *
+ * The runner still gates auto-merge on diff size, blocking review findings,
+ * exclude patterns, mandatory reviewers, and approving reviews — flipping
+ * `autoMerge: true` doesn't bypass those gates.
+ */
+export function applyAutoMergeOverride(
+  configs: Record<string, PipelineConfig>,
+  envValue: string | undefined,
+): Record<string, PipelineConfig> {
+  if (envValue === undefined) return configs;
+  const trimmed = envValue.trim().toLowerCase();
+  if (trimmed !== "true" && trimmed !== "false") {
+    log.warn(
+      { envValue, var: "URATEAM_AUTO_MERGE" },
+      "URATEAM_AUTO_MERGE must be 'true' or 'false' — ignoring",
+    );
+    return configs;
+  }
+  const autoMerge = trimmed === "true";
+  const result: Record<string, PipelineConfig> = {};
+  for (const [key, cfg] of Object.entries(configs)) {
+    result[key] = { ...cfg, autoMerge };
+  }
+  return result;
+}
+
 export function validateRepoConfigs(
   configs: Record<string, unknown>
 ): Record<string, RepoConfig> {

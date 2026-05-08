@@ -12,7 +12,7 @@ export const startCommand = new Command("start")
   .option("--dashboard-port <port>", "Dashboard port", "3001")
   .action(async (options) => {
     try {
-    const { createApp, defaultConfigs, applyDeepReviewPassesOverride, cleanupWorktrees, runAgentBranchSweep, addLogStream, initSlackAlertManager, createSlackAlertStream } = await import("@urateam/core");
+    const { createApp, defaultConfigs, applyDeepReviewPassesOverride, applyAutoMergeOverride, cleanupWorktrees, runAgentBranchSweep, addLogStream, initSlackAlertManager, createSlackAlertStream } = await import("@urateam/core");
 
     // --- Slack error alerts (opt-in) ---
     if (
@@ -202,9 +202,17 @@ export const startCommand = new Command("start")
     // unchanged (every pipeline keeps deepReviewPasses=0). Set to a
     // non-negative integer to override on every pipeline that has a
     // `review` stage (auto-implement, bug, needs-design — not quick-fix).
-    const pipelineConfigs = applyDeepReviewPassesOverride(
-      defaultConfigs,
-      process.env.URATEAM_DEEP_REVIEW_PASSES,
+    //
+    // BEC-178: opt every pipeline into auto-merge via env. Unset = defaults
+    // unchanged (autoMerge undefined / off). Set to "true" or "false" to
+    // override every pipeline. Auto-merge gates (diff size, blocking review
+    // findings, mandatory reviewers, etc.) still apply when true.
+    const pipelineConfigs = applyAutoMergeOverride(
+      applyDeepReviewPassesOverride(
+        defaultConfigs,
+        process.env.URATEAM_DEEP_REVIEW_PASSES,
+      ),
+      process.env.URATEAM_AUTO_MERGE,
     );
 
     // --- Resolve and validate workspace directories ---

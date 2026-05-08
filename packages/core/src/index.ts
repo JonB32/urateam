@@ -22,7 +22,7 @@ export {
   type StageCostBreakdown,
   type CostSummaryConfig,
 } from "./pipeline/cost-summary.js";
-export { defaultConfigs, validatePipelineConfigs, validateRepoConfigs, applyDeepReviewPassesOverride, resolvePipeline } from "./pipeline/index.js";
+export { defaultConfigs, validatePipelineConfigs, validateRepoConfigs, applyDeepReviewPassesOverride, applyAutoMergeOverride, resolvePipeline } from "./pipeline/index.js";
 export { createWebhookHandler } from "./webhook/index.js";
 export {
   CompositeNotifier,
