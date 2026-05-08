@@ -7,6 +7,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { findLoopingDeepReviews } from "../run-patterns.js";
+import { observeRunPatterns } from "../index.js";
 
 describe("findLoopingDeepReviews", () => {
   /**
@@ -96,5 +97,70 @@ describe("findLoopingDeepReviews", () => {
 
     const findings = findLoopingDeepReviews(runs);
     expect(findings).toHaveLength(0);
+  });
+});
+
+/**
+ * Integration path: observeRunPatterns (index.ts entry point) calls
+ * findLoopingDeepReviews internally. These tests verify the full call chain
+ * from the package's public API through to the pattern-detection logic.
+ *
+ * observeRunPatterns is the canonical entry point for the quality observer
+ * sidecar (BEC-138); it accepts raw run summaries and returns a structured
+ * report with all findings grouped by pattern type.
+ */
+describe("observeRunPatterns (index entry point)", () => {
+  it("returns empty loopingFindings for a successful PR-creating run (BEC-169 false-positive fix)", () => {
+    const runs = [
+      {
+        id: "AUEHrV8TPvNF1PHB96mVt",
+        status: "completed",
+        pr_url: "https://github.com/JonB32/urateam/pull/173",
+        total_turns: 100,
+      },
+    ];
+
+    const report = observeRunPatterns(runs);
+
+    expect(report.loopingFindings).toHaveLength(0);
+  });
+
+  it("returns a looping finding for a failed run with high turn count", () => {
+    const runs = [
+      {
+        id: "run-failed-999",
+        status: "failed",
+        pr_url: null,
+        total_turns: 80,
+      },
+    ];
+
+    const report = observeRunPatterns(runs);
+
+    expect(report.loopingFindings).toHaveLength(1);
+    expect(report.loopingFindings[0].runId).toBe("run-failed-999");
+    expect(report.loopingFindings[0].totalTurns).toBe(80);
+  });
+
+  it("aggregates findings from a mixed set of runs", () => {
+    const runs = [
+      // Should NOT fire — completed + pr_url (BEC-169 false-positive)
+      { id: "ok-run", status: "completed", pr_url: "https://github.com/org/repo/pull/1", total_turns: 100 },
+      // Should fire — failed with high turns
+      { id: "bad-run", status: "failed", pr_url: null, total_turns: 60 },
+      // Should fire — completed but no PR produced
+      { id: "noop-run", status: "completed", pr_url: null, total_turns: 55 },
+      // Should NOT fire — below threshold
+      { id: "low-run", status: "failed", pr_url: null, total_turns: 10 },
+    ];
+
+    const report = observeRunPatterns(runs);
+
+    expect(report.loopingFindings).toHaveLength(2);
+    const runIds = report.loopingFindings.map((f) => f.runId);
+    expect(runIds).toContain("bad-run");
+    expect(runIds).toContain("noop-run");
+    expect(runIds).not.toContain("ok-run");
+    expect(runIds).not.toContain("low-run");
   });
 });
