@@ -23,7 +23,9 @@ Bumps:
 - `@urateam/dashboard`: 0.1.24 → 0.1.25
 - `create-urateam`: 0.1.27 → 0.1.28
 
-<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+### Added
+- **BEC-178** — New `URATEAM_AUTO_MERGE=true|false` env override mirroring `URATEAM_DEEP_REVIEW_PASSES` (BEC-163). Operators can now opt every pipeline into auto-merge without forking the built-in pipeline configs. Case-insensitive; invalid values are ignored with a warn log. Auto-merge gates (diff size, blocking review findings, mandatory reviewers, exclude patterns, approving reviews) still apply when true. (#200)
+
 ## [0.1.38] — 2026-05-08
 
 Bumps:
