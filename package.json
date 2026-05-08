@@ -11,8 +11,10 @@
     "typecheck": "turbo typecheck",
     "test": "turbo test",
     "test:integration": "pnpm --filter @urateam/core test:integration && pnpm --filter create-urateam build && pnpm --filter create-urateam test:integration",
+    "test:scripts": "tsx --test scripts/*.test.ts",
     "lint": "turbo lint",
-    "dev": "turbo dev"
+    "dev": "turbo dev",
+    "cut-release": "tsx scripts/cut-release.ts"
   },
   "devDependencies": {
     "tsx": "^4.19.0",
