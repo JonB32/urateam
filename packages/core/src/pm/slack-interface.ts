@@ -15,6 +15,7 @@ import { sanitize } from "../executor/prompt/sanitizer.js";
 import { parseJsonObject } from "../executor/agent-stream.js";
 import { makeCallClaude, makeCallClaudeSonnet } from "./call-claude.js";
 import { postSlackMessage } from "./slack-helpers.js";
+import { createLazyLinearClient } from "./linear-helpers.js";
 
 const log = createLogger({ component: "PmAgent:slack-interface" });
 
@@ -311,14 +312,7 @@ export async function executePmCommand(
   cmd: PmCommand,
   deps: CommandExecutorDeps,
 ): Promise<string> {
-  let _linear: any = null;
-  async function getLinear() {
-    if (!_linear && deps.linearApiKey) {
-      const { LinearClient } = await import("@linear/sdk");
-      _linear = new LinearClient({ apiKey: deps.linearApiKey });
-    }
-    return _linear;
-  }
+  const { getClient: getLinear } = createLazyLinearClient(deps.linearApiKey);
 
   /**
    * Searches Linear for an issue by its identifier (e.g. "BEC-25") and returns

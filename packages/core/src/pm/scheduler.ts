@@ -21,7 +21,7 @@ import { isPostgres } from "../db/client.js";
 import { pipelineRuns } from "../db/schema.js";
 import { makeCallClaude } from "./call-claude.js";
 import { sanitize } from "../executor/prompt/sanitizer.js";
-import { resolveWorkflowStates } from "./linear-helpers.js";
+import { resolveWorkflowStates, createLazyLinearClient } from "./linear-helpers.js";
 import { sql } from "drizzle-orm";
 import { createLogger } from "../logger.js";
 import { logAuditEventUnchecked, budgetRefusedEvent, pruneAuditLog } from "../audit/index.js";
@@ -69,17 +69,9 @@ export interface PmScheduler {
 export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
   const actions = deps.actions as PmSchedulerActions | undefined;
 
-  let linearClient: any = null;
+  const { getClient: getLinearClient } = createLazyLinearClient(deps.linearApiKey);
   let slackNotifier: PmSlackNotifier | null = null;
   const callClaudeFn = makeCallClaude();
-
-  async function getLinearClient() {
-    if (!linearClient && deps.linearApiKey) {
-      const { LinearClient } = await import("@linear/sdk");
-      linearClient = new LinearClient({ apiKey: deps.linearApiKey });
-    }
-    return linearClient;
-  }
 
   function getSlackNotifier(): PmSlackNotifier {
     if (!slackNotifier) {
@@ -382,17 +374,20 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
               // Find the first cloned repo directory (runner clones to <repoCloneDir>/<slug>/)
               let repoDir = baseDir;
               try {
-                const { readdirSync, statSync } = await import("node:fs");
-                const entries = readdirSync(baseDir);
-                for (const entry of entries) {
-                  const candidate = `${baseDir}/${entry}`;
-                  try {
-                    if (statSync(`${candidate}/.git`).isDirectory()) {
-                      repoDir = candidate;
-                      break;
-                    }
-                  } catch { /* not a git repo */ }
-                }
+                const { readdir, stat } = await import("node:fs/promises");
+                const entries = await readdir(baseDir);
+                const candidates = await Promise.all(
+                  entries.map(async (entry) => {
+                    const candidate = `${baseDir}/${entry}`;
+                    try {
+                      const s = await stat(`${candidate}/.git`);
+                      if (s.isDirectory()) return candidate;
+                    } catch { /* not a git repo */ }
+                    return null;
+                  }),
+                );
+                const found = candidates.find((c) => c !== null);
+                if (found) repoDir = found;
               } catch {
                 log.warn("could not scan repoCloneDir for git repos");
               }
