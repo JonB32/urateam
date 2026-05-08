@@ -15,6 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions below refer to the workspace version published to npm. Per-package
 notes call out when a change affects only a single package.
 
+## [0.1.39] — 2026-05-08
+
+Bumps:
+- `@urateam/core`: 0.1.24 → 0.1.25
+- `@urateam/cli`: 0.1.26 → 0.1.27
+- `@urateam/dashboard`: 0.1.24 → 0.1.25
+- `create-urateam`: 0.1.27 → 0.1.28
+
+### Added
+- **BEC-178** — New `URATEAM_AUTO_MERGE=true|false` env override mirroring `URATEAM_DEEP_REVIEW_PASSES` (BEC-163). Operators can now opt every pipeline into auto-merge without forking the built-in pipeline configs. Case-insensitive; invalid values are ignored with a warn log. Auto-merge gates (diff size, blocking review findings, mandatory reviewers, exclude patterns, approving reviews) still apply when true. (#200)
+
 ## [0.1.38] — 2026-05-08
 
 Bumps:
