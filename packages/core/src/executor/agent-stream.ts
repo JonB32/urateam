@@ -5,7 +5,12 @@
 
 export interface StreamMessage {
   type?: string;
-  usage?: { input_tokens?: number; output_tokens?: number };
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+  };
   content?: Array<{ type: string; text?: string }> | string;
   /** Agent SDK wraps assistant text in `message` for some message shapes */
   message?: { content?: Array<{ type: string; text?: string }> | string } | string;
@@ -15,6 +20,8 @@ export interface ConsumeResult {
   lastText: string;
   inputTokens: number;
   outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
   turns: number;
 }
 
@@ -67,6 +74,8 @@ export async function consumeAgentStream(
 ): Promise<ConsumeResult> {
   let inputTokens = 0;
   let outputTokens = 0;
+  let cacheCreationInputTokens = 0;
+  let cacheReadInputTokens = 0;
   let turns = 0;
   let lastText = "";
   let messageCount = 0;
@@ -130,6 +139,8 @@ export async function consumeAgentStream(
     if (message.usage) {
       inputTokens += message.usage.input_tokens ?? 0;
       outputTokens += message.usage.output_tokens ?? 0;
+      cacheCreationInputTokens += message.usage.cache_creation_input_tokens ?? 0;
+      cacheReadInputTokens += message.usage.cache_read_input_tokens ?? 0;
     }
 
     if (
@@ -167,7 +178,7 @@ export async function consumeAgentStream(
     }
   }
 
-  return { lastText, inputTokens, outputTokens, turns };
+  return { lastText, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, turns };
 }
 
 /**
