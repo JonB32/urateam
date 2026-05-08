@@ -57,6 +57,9 @@ Bumps:
 - `@urateam/dashboard`: 0.1.23 → 0.1.24
 - `create-urateam`: 0.1.26 → 0.1.27
 
+### Added (OSS+)
+- **BEC-168** — OpenRouter fanout per-model PR comments are now suppressed when a model returns empty findings and no raw output (i.e. the model legitimately found nothing to flag). Previously, trivial PRs received one "🔎 Review by … — No findings." comment per fanout model, adding noise with zero signal. Comments are still posted when: findings are present, the model emitted unparseable prose (BEC-158 rawOutput fallback), or the model call failed. `PostFanoutResult` gains a `suppressedEmptyCount` field so callers can log how many comments were suppressed per PR. Audit events (`review.fanout_model_completed`) continue to fire for all models regardless of suppression.
+
 ### Added
 - **BEC-174** — Periodic sweep of stale `origin/agent/*` branches with no open PR. Runs on the same hourly cadence as the worktree-cleanup cron. New env `PM_AGENT_AGENT_BRANCH_TTL_DAYS` (default `7`) controls the staleness cutoff; branches with open PRs are always preserved. Failures from the open-PR check are treated as "has PR" — a transient GitHub outage can never wipe a branch we couldn't verify. Emits one `pm.agent_branch_swept` audit event per delete. Per-repo sweep dirs (keyed by `sha256(repoUrl).slice(0,8)`) prevent cross-repo collisions in multi-repo deployments. (#185)
 - **BEC-175** — Optional per-PR cost summary comment posted after `onPipelineComplete`, showing per-stage tokens (implement / test / review / fanout) and total dollar cost. Gated by `URATEAM_PR_COST_SUMMARY=true` (default off). Idempotent: a prior pipeline run on the same PR will not be duplicated — the new `prHasCommentStartingWith` helper checks for the `🤖 **Pipeline cost summary**` header before posting. Best-effort: failures never block pipeline completion. (#186)

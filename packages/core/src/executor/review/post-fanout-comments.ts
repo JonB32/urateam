@@ -8,6 +8,13 @@ const log = createLogger({ component: "PostFanoutComments" });
 export interface PostFanoutResult {
   /** Number of runs where raw-output fallback was used (structured parse failed). */
   fallbackCount: number;
+  /**
+   * Number of per-model comments suppressed because the model returned empty findings
+   * with no rawOutput (i.e. the model legitimately found nothing to report).
+   * Suppression rule: `findings.length === 0 && rawOutput === undefined && status !== "failed"`.
+   * Audit events (`review.fanout_model_completed`) still fire for suppressed runs.
+   */
+  suppressedEmptyCount: number;
 }
 
 export async function postFanoutCommentsToPR(
@@ -17,8 +24,27 @@ export async function postFanoutCommentsToPR(
   prNumber: number,
   runs: ReviewModelRun[],
 ): Promise<PostFanoutResult> {
+  const toPost: ReviewModelRun[] = [];
+  let suppressedEmptyCount = 0;
+
+  for (const run of runs) {
+    const shouldSuppress =
+      run.status !== "failed" &&
+      run.findings.length === 0 &&
+      run.rawOutput === undefined;
+    if (shouldSuppress) {
+      suppressedEmptyCount++;
+      log.debug(
+        { modelId: run.modelId },
+        "fanout: suppressing empty-findings comment (no findings, no rawOutput)",
+      );
+    } else {
+      toPost.push(run);
+    }
+  }
+
   const results = await Promise.allSettled(
-    runs.map((run) =>
+    toPost.map((run) =>
       addPRComment(octokit, owner, repo, prNumber, renderRunMarkdown(run)),
     ),
   );
@@ -26,13 +52,13 @@ export async function postFanoutCommentsToPR(
     if (res.status === "rejected") {
       const err = res.reason instanceof Error ? res.reason.message : String(res.reason);
       log.warn(
-        { modelId: runs[i].modelId, err },
+        { modelId: toPost[i]!.modelId, err },
         "failed to post fanout PR comment",
       );
     }
   });
   const fallbackCount = runs.filter((r) => r.rawOutput !== undefined).length;
-  return { fallbackCount };
+  return { fallbackCount, suppressedEmptyCount };
 }
 
 export function renderRunMarkdown(run: ReviewModelRun): string {
