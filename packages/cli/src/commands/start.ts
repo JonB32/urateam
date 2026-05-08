@@ -369,6 +369,9 @@ export const startCommand = new Command("start")
       pmInterval.unref();
 
       console.log(`PM Agent: enabled (every ${pmConfig.cronIntervalMs / 60000}min, max ${pmConfig.maxInFlight} in-flight)`);
+      if (process.env.PM_AGENT_PAUSED === "true") {
+        console.log(`PM Agent: PM_AGENT_PAUSED=true — promote/start-todo/recover-stuck will be skipped on every tick until the env var is cleared and the container restarted`);
+      }
     }
 
     // --- Release Manager (BEC-135 — Pro tier, opt-in) ---

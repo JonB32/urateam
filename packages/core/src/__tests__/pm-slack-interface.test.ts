@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   parsePmCommand,
   interpretNaturalLanguage,
@@ -413,6 +413,53 @@ describe("POST /slack/commands", () => {
     // Valid request headers are tested via verifySlackSignature unit tests above.
     // This test just confirms 401 is returned on missing headers (covered above).
     expect(app).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isPmPaused env-var path (BEC-170)
+// ---------------------------------------------------------------------------
+describe("isPmPaused — PM_AGENT_PAUSED env var", () => {
+  beforeEach(() => {
+    // Reset both state vectors between tests
+    delete process.env.PM_AGENT_PAUSED;
+    setPmPaused(false);
+  });
+
+  afterEach(() => {
+    delete process.env.PM_AGENT_PAUSED;
+  });
+
+  it("returns true when PM_AGENT_PAUSED=true even without Slack /pm pause", () => {
+    process.env.PM_AGENT_PAUSED = "true";
+    expect(isPmPaused()).toBe(true);
+  });
+
+  it("env-var wins: PM_AGENT_PAUSED=true AND setPmPaused(false) → still paused", () => {
+    process.env.PM_AGENT_PAUSED = "true";
+    setPmPaused(false);
+    expect(isPmPaused()).toBe(true);
+  });
+
+  it("Slack path preserved: PM_AGENT_PAUSED unset AND setPmPaused(true) → paused", () => {
+    // PM_AGENT_PAUSED is unset (done in beforeEach)
+    setPmPaused(true);
+    expect(isPmPaused()).toBe(true);
+  });
+
+  it("returns false when neither env var is set nor Slack pause active", () => {
+    // Both reset in beforeEach
+    expect(isPmPaused()).toBe(false);
+  });
+
+  it("does not treat PM_AGENT_PAUSED=false as paused", () => {
+    process.env.PM_AGENT_PAUSED = "false";
+    expect(isPmPaused()).toBe(false);
+  });
+
+  it("does not treat PM_AGENT_PAUSED=1 as paused (must be exactly 'true')", () => {
+    process.env.PM_AGENT_PAUSED = "1";
+    expect(isPmPaused()).toBe(false);
   });
 });
 

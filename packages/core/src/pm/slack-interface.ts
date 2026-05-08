@@ -119,8 +119,20 @@ export interface DailySummaryEntry {
 
 let paused = false;
 
+/**
+ * Returns `true` if the PM Agent is currently paused.
+ *
+ * Pause is active when EITHER of the following is true (OR logic):
+ * - `process.env.PM_AGENT_PAUSED === "true"` — env-var path for no-Slack incident
+ *   response. Toggling requires a container restart (env vars are read at each
+ *   tick invocation, not at module load time).
+ * - `setPmPaused(true)` has been called via the Slack `/pm pause` command.
+ *
+ * The env-var takes priority: setting `PM_AGENT_PAUSED=true` keeps the agent
+ * paused even if `setPmPaused(false)` is subsequently called via Slack.
+ */
 export function isPmPaused(): boolean {
-  return paused;
+  return process.env.PM_AGENT_PAUSED === "true" || paused;
 }
 
 export function setPmPaused(value: boolean): void {
@@ -319,7 +331,7 @@ export async function executePmCommand(
 
   switch (cmd.type) {
     case "status": {
-      const state = paused ? "⏸ *Paused*" : "▶️ *Running*";
+      const state = isPmPaused() ? "⏸ *Paused*" : "▶️ *Running*";
       return `PM Agent is ${state}.\nUse \`/pm pause\` or \`/pm resume\` to control autonomous assignment.`;
     }
 

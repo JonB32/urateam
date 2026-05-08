@@ -18,6 +18,7 @@ notes call out when a change affects only a single package.
 ## [Unreleased]
 
 ### Added (OSS+)
+- **BEC-170** — PM Agent env-var pause mechanism for no-Slack incident response. Setting `PM_AGENT_PAUSED=true` causes `isPmPaused()` to return `true` on every PM scheduler tick, preventing `promote`, `start-todo`, and `recover-stuck` from running — without stopping the container (dashboard and RM scheduler continue). OR'd with the existing Slack `/pm pause` path; either source can pause the agent independently. A container restart is required to toggle the env-var path (env vars are read at each tick invocation). Boot log emits `PM_AGENT_PAUSED=true` at container startup so operators have an observable signal in `docker logs`. Intended for incident-response use cases where Slack is unavailable or the wrong channel.
 - **BEC-171** — `validateReviewModels()` validates every model ID in `REVIEW_MODELS` against the public OpenRouter catalog at startup (`ura start` / `ura dev`). Unknown IDs emit a `log.warn` with up to 3 closest-name suggestions so operators catch typos before they burn API budget on silent 404s. If the catalog endpoint is unreachable a debug log is emitted and startup continues normally — the check is never a blocking dependency. Surfaced from BEC-138 dogfood (PR #157 + PR #172 fanout 404s on `anthropic/claude-3.5-sonnet`).
 
 ## [0.1.40] — 2026-05-09

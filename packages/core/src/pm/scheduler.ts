@@ -267,7 +267,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
         }
 
         // --- Stuck In Progress issue recovery sweep ---
-        if (config.stuckIssueRecovery !== false) {
+        if (config.stuckIssueRecovery !== false && !isPmPaused()) {
           try {
             const stuckResult = actions?.recoverStuckInProgressIssues
               ? await actions.recoverStuckInProgressIssues({} as any)
@@ -300,7 +300,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
         // --- Start pipelines for orphaned Todo issues ---
         if (deps.runner?.start && deps.pipelineConfigs && deps.repoConfigs) {
           try {
-            if (slotsAvailable > 0 && !tick.budgetGuard.promoteBlocked) {
+            if (slotsAvailable > 0 && !tick.budgetGuard.promoteBlocked && !isPmPaused()) {
               const todoResults = actions?.startTodoIssues
                 ? await actions.startTodoIssues({} as any)
                 : await startTodoIssues({
@@ -367,7 +367,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
 
         if (isPmPaused()) {
           tick.paused = true;
-          log.info("PM Agent is paused — skipping promote, deprioritize, and cancel");
+          log.info("PM Agent is paused — skipping start-todo, recover-stuck, promote, deprioritize, and cancel");
         }
 
         if (!tick.budgetGuard.promoteBlocked && !isPmPaused()) {
