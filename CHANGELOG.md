@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions below refer to the workspace version published to npm. Per-package
 notes call out when a change affects only a single package.
 
+## [0.1.39] — 2026-05-08
+
+Bumps:
+- `@urateam/core`: 0.1.24 → 0.1.25
+- `@urateam/cli`: 0.1.26 → 0.1.27
+- `@urateam/dashboard`: 0.1.24 → 0.1.25
+- `create-urateam`: 0.1.27 → 0.1.28
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
 ## [0.1.38] — 2026-05-08
 
 Bumps:
