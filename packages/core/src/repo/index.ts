@@ -21,6 +21,7 @@ export {
   verifyBranchMatch,
   installPrePushHook,
   cleanupWorktrees,
+  pruneWorktreesInRepoDirs,
 } from "./git.js";
 
 export {
