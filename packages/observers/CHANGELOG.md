@@ -2,6 +2,12 @@
 
 All notable changes to this package will be documented in this file.
 
+## [0.1.1] — 2026-05-09
+
+### Added
+
+- **BEC-169** — `findLoopingDeepReviews(runs)` and `observeRunPatterns(runs)`. Detects pipeline runs whose total turn count exceeded the threshold (`LOOP_TURN_THRESHOLD = 50`) WITHOUT having shipped a PR. Successful PR-creating runs are excluded — deep-review fanout legitimately produces high turn counts on the way to a successful PR. Driven by the BEC-152 false-positive (run `AUEHrV8TPvNF1PHB96mVt` hit 77 turns legitimately and produced PR #173, but was flagged as a loop).
+
 ## [0.1.0] — 2026-05-08
 
 ### Added
