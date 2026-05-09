@@ -21,6 +21,7 @@ import { executeStage } from "../executor/executor.js";
 import { validateHandoff } from "../executor/validate.js";
 import { isFeatureLicensed } from "../license.js";
 import { checkRequirements, buildRalphContext } from "../executor/ralph.js";
+import { computeEffectiveRalphIterations } from "./runner-ralph-helpers.js";
 import { checkTestQuality } from "../executor/test-quality.js";
 import { buildDeepReviewContext } from "../executor/deep-review.js";
 import { runReviewProviders } from "./review-providers-runner.js";
@@ -593,6 +594,7 @@ export class PipelineRunner {
 
     const run = this.buildPipelineRun(runId, issue, pipelineKey, repoConfig, branch);
     run.prUrl = prUrl;
+    run.runType = "review-feedback";
 
     // Register in activeFeedbackRuns BEFORE enqueue so rate-limit check works
     this.activeFeedbackRuns.set(prUrl, runId);
@@ -815,9 +817,11 @@ export class PipelineRunner {
       // don't waste time hunting for a non-existent failed requirement.
       let ralphEvaluationFailed = false;
       let ralphEvaluationError: string | undefined;
-      const effectiveRalphIterations = isFeatureLicensed("deep-review")
-        ? config.ralphIterations ?? 2
-        : Math.min(config.ralphIterations ?? 1, 1);
+      const effectiveRalphIterations = computeEffectiveRalphIterations(
+        run,
+        config.ralphIterations,
+        isFeatureLicensed("deep-review"),
+      );
       const ralphIterations = effectiveRalphIterations;
 
       // Execute each stage

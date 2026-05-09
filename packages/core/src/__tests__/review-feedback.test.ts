@@ -395,8 +395,9 @@ describe("implementTemplate with reviewFeedback", () => {
 
   it("instructs agent to address each comment and not refactor unrelated code", () => {
     const result = implementTemplate(issue, repo, undefined, feedback);
-    expect(result).toContain("Address each review comment");
-    expect(result).toContain("Do not refactor unrelated code");
+    // BEC-182: prompt rewritten with tighter scoping language
+    expect(result).toContain("Address ONLY the listed comments");
+    expect(result).toContain("Do NOT refactor adjacent code");
   });
 
   it("includes the review feedback block", () => {

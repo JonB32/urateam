@@ -155,8 +155,10 @@ describe("Prompt templates", () => {
         comments: [],
       };
       const result = implementTemplate(issue, repo, undefined, reviewFeedback);
-      expect(result).toContain("Run the build command: npm run build");
-      expect(result).toContain("If either fails, fix the errors before declaring completion.");
+      // BEC-182: build/test are now conditional on non-text-only changes
+      expect(result).toContain("npm run build");
+      expect(result).toContain("npm test");
+      expect(result).toContain("Skip build/test ONLY if every change is text-only");
     });
   });
 

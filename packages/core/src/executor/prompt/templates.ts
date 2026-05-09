@@ -253,7 +253,7 @@ The work is complete when \`git status\` shows no conflicted paths and no \`reba
   }
 
   if (reviewFeedback) {
-    return `You are the implement agent. Your job is to address PR review feedback on the existing implementation.
+    return `You are the implement agent. Your job is to address PR review feedback on an existing implementation. Scope is small and bounded.
 
 ${issueDataBlock(issue)}
 
@@ -265,13 +265,13 @@ ${handoffBlock(handoff)}
 
 Instructions:
 - Stay on the current branch (\`${reviewFeedback.prBranch}\`) — the worktree is already configured. Do NOT run \`git checkout\`; switching branches inside a worktree is unsafe and can corrupt other concurrent runs.
-- Address each review comment listed above. Do not refactor unrelated code.
-- Commit your changes with the message: fix: address review feedback on ${issue.id}
-- Push to the same branch (${reviewFeedback.prBranch}) — do NOT create a new PR.
-- Run the build command: ${repo.buildCommand}
-- Run the test command: ${repo.testCommand}
-- If either fails, fix the errors before declaring completion.
-- Keep changes minimal and focused on the specific feedback.
+- Read the existing diff first: \`git log --oneline origin/${repo.defaultBranch}..HEAD\` then \`git diff origin/${repo.defaultBranch}...HEAD\`. The reviewer is responding to THIS diff.
+- Address ONLY the listed comments. Do NOT refactor adjacent code, restructure files, or edit files that the comments don't reference. Each comment is bounded — keep changes minimal.
+- Commit with the message: \`fix: address review feedback on ${issue.id}\`
+- Push to the same branch (\`${reviewFeedback.prBranch}\`) — do NOT create a new PR.
+- Skip build/test ONLY if every change is text-only (docs, comments, string literals with no behavior change). Otherwise run: \`${repo.buildCommand}\` then \`${repo.testCommand}\`.
+- If a step fails (build, test, push), stop and report what blocks the resolution. Do NOT spelunk for a workaround or run unrelated commands.
+- You have a tight turn budget. Plan: read diff → make N small edits → commit → push → done.
 `.trim();
   }
 
