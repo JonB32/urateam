@@ -210,6 +210,20 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       logBatch = [];
     }
 
+    // BEC-183: capture the iterator that consumeAgentStream will create so we
+    // can call .return() for cleanup if the wall-clock timeout fires before the
+    // inner firstMessageTimeoutMs guard does. consumeAgentStream calls
+    // messages[Symbol.asyncIterator]() exactly once — the wrapper intercepts
+    // that call and stores the reference.
+    let capturedMessagesIterator: AsyncIterator<unknown> | undefined;
+    const messagesWithCapture: AsyncIterable<unknown> = {
+      [Symbol.asyncIterator]() {
+        const iter = messages[Symbol.asyncIterator]();
+        capturedMessagesIterator = iter;
+        return iter;
+      },
+    };
+
     // BEC-183: wall-clock stage timeout — second defensive layer independent
     // of the in-stream watchdog. Fires as StagePreStreamStalledError so the
     // catch block below sets status=failed with a clear message.
@@ -222,7 +236,7 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
     });
 
     const result = await Promise.race([
-      consumeAgentStream(messages, {
+      consumeAgentStream(messagesWithCapture, {
         onProgress: (stats) => {
           log.info(stats, "stage still in progress");
         },
@@ -240,7 +254,16 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
         firstMessageTimeoutMs: FIRST_MESSAGE_TIMEOUT_MS,
       }),
       stageTimeoutPromise,
-    ]).finally(() => {
+    ]).catch((err: unknown) => {
+      // When the wall-clock timeout fires before consumeAgentStream's own
+      // firstMessageTimeoutMs guard, the internal iterator is still pending.
+      // Signal it to release any SDK network connections or event listeners.
+      // Best-effort: if the generator is truly blocked on a never-resolving
+      // Promise, .return() won't unblock it, but the GC will eventually
+      // collect it once this run's references are dropped.
+      capturedMessagesIterator?.return?.()?.catch(() => {});
+      throw err;
+    }).finally(() => {
       // Always clear the wall-clock timer whether the stream succeeds, stalls,
       // or throws any other error — prevents the timer from dangling after the
       // stage exits the happy path.

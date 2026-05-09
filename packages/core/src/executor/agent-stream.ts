@@ -2,6 +2,9 @@
  * Shared helpers for consuming Agent SDK message streams and parsing
  * JSON blocks from agent output.
  */
+import { createLogger } from "../logger.js";
+
+const log = createLogger({ component: "AgentStream" });
 
 export interface StreamMessage {
   type?: string;
@@ -155,7 +158,7 @@ export async function consumeAgentStream(
         // never-resolving await (the exact zombie pattern from urateam#122),
         // awaiting iterator.return() would hang forever waiting for that
         // await to settle. Best-effort signal; let the GC handle the rest.
-        iterator.return?.().catch(() => {});
+        iterator.return?.()?.catch((err) => log.debug({ err }, "iterator cleanup failed"));
         if (!firstMessageReceived) {
           // Pre-stream hang: the iterator never yielded its first message
           // within firstMsgTimeoutMs. Throw StagePreStreamStalledError so
@@ -246,17 +249,34 @@ export function extractText(
 }
 
 /**
- * Extract and parse a bare JSON object from text (finds first `{...}` match).
- * Returns null if no object is found or if parsing fails.
+ * Internal helper: apply `regex` to `text`, then JSON-parse the capture group
+ * at `groupIndex`. Returns null if the regex doesn't match or parsing fails.
+ * Eliminates the try-catch boilerplate duplicated in parseJsonObject and
+ * parseJsonBlock.
  */
-export function parseJsonObject(text: string): any | null {
-  const match = text.match(/\{[\s\S]*\}/);
+function parseJsonWithRegex(text: string, regex: RegExp, groupIndex: number = 0): unknown | null {
+  const match = text.match(regex);
   if (!match) return null;
   try {
-    return JSON.parse(match[0]);
+    return JSON.parse(match[groupIndex]);
   } catch {
     return null;
   }
+}
+
+/**
+ * Extract and parse a bare JSON object from text (finds first `{...}` match).
+ * Returns null if no object is found or if parsing fails.
+ *
+ * Uses non-greedy matching so that if the text contains multiple top-level
+ * JSON-like blocks separated by non-JSON content (e.g. log lines), the first
+ * parseable object is returned rather than a greedy span that crosses all of
+ * them and fails to parse. Trade-off: non-greedy does not correctly handle
+ * deeply nested objects — for those, prefer `parseJsonBlock` (fenced block).
+ * In practice, PM-agent Haiku responses are flat JSON, so non-greedy is safe.
+ */
+export function parseJsonObject(text: string): any | null {
+  return parseJsonWithRegex(text, /\{[\s\S]*?\}/, 0) as any | null;
 }
 
 /**
@@ -264,11 +284,5 @@ export function parseJsonObject(text: string): any | null {
  * Returns null if no block is found or if parsing fails.
  */
 export function parseJsonBlock(text: string): unknown | null {
-  const match = text.match(/```json\s*\n([\s\S]*?)\n```/);
-  if (!match) return null;
-  try {
-    return JSON.parse(match[1]);
-  } catch {
-    return null;
-  }
+  return parseJsonWithRegex(text, /```json\s*\n([\s\S]*?)\n```/, 1);
 }
