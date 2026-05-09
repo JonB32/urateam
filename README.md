@@ -46,6 +46,16 @@ cd packages/core && npx vitest run src/__tests__/<file>       # specific test
 cd packages/core && npx vitest --changed                      # tests affected by uncommitted changes
 ```
 
+## Releases
+
+```bash
+pnpm cut-release patch          # bump all 4 packages + Dockerfile + compose + CHANGELOG; commit on a release branch
+pnpm cut-release patch --push   # also push the branch and open the PR via gh
+pnpm cut-release patch --dry-run # show what would change, write nothing
+```
+
+After the release PR merges: `git tag vX.Y.Z <merge-sha> && git push origin vX.Y.Z` fires the npm OIDC publish workflow; then `gh release create vX.Y.Z` for the user-facing release page.
+
 ## Documentation
 
 - `CLAUDE.md` — architecture, conventions, module map. Kept current as features ship.
