@@ -12,7 +12,7 @@ export {
 } from "./test-quality.js";
 export { parseHandoffArtifact } from "./handoff.js";
 export { executeStage, type ExecuteStageContext } from "./executor.js";
-export { consumeAgentStream, parseJsonBlock } from "./agent-stream.js";
+export { consumeAgentStream, parseJsonBlock, StageStalledError, StagePreStreamStalledError } from "./agent-stream.js";
 export { sanitize, mapIssueToSchema, assemblePrompt } from "./prompt/index.js";
 export {
   runDeepReview,

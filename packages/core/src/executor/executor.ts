@@ -20,8 +20,24 @@ import { resolveTooling } from "./mcp-resolver.js";
 import type { TechStackProfile } from "../repo/tech-stack.js";
 import type { DevcontainerSession } from "../repo/devcontainer.js";
 import { createLogger } from "../logger.js";
-import { consumeAgentStream, type StreamMessage } from "./agent-stream.js";
+import { consumeAgentStream, StagePreStreamStalledError, type StreamMessage } from "./agent-stream.js";
 import { isClaudeAuthValid } from "./auth-check.js";
+
+/**
+ * BEC-183: wall-clock stage timeouts. Independent of the in-stream watchdog
+ * (StageStalledError / StagePreStreamStalledError inside consumeAgentStream),
+ * this is a second defensive layer that covers the case where the SDK's
+ * query() or iterator setup hangs before any message arrives and the
+ * firstMessageTimeoutMs timer inside consumeAgentStream somehow fails to fire.
+ * Default: 60 min for implement (longest legitimate stage), 30 min for others.
+ */
+const WALL_CLOCK_STAGE_TIMEOUT_MS: Partial<Record<string, number>> = {
+  implement: 60 * 60_000, // 60 min — longest legitimate stage
+};
+const DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS = 30 * 60_000; // 30 min for all others
+
+/** First-message timeout passed to consumeAgentStream (BEC-183). */
+const FIRST_MESSAGE_TIMEOUT_MS = 5 * 60_000; // 5 min
 
 /**
  * BEC-182: review-feedback runs are bounded — N comments, push, done.
@@ -194,21 +210,41 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       logBatch = [];
     }
 
-    const result = await consumeAgentStream(messages, {
-      onProgress: (stats) => {
-        log.info(stats, "stage still in progress");
-      },
-      onToolMessage: (msg: StreamMessage) => {
-        logBatch.push({
-          id: nanoid(),
-          stageRunId: stageRunId,
-          type: msg.type!,
-          content: JSON.stringify(msg).slice(0, 2048),
-        });
-        if (logBatch.length >= BATCH_SIZE) {
-          flushLogBatch().catch((err) => log.warn({ err }, "mid-stream log batch flush failed"));
-        }
-      },
+    // BEC-183: wall-clock stage timeout — second defensive layer independent
+    // of the in-stream watchdog. Fires as StagePreStreamStalledError so the
+    // catch block below sets status=failed with a clear message.
+    const stageTimeoutMs = WALL_CLOCK_STAGE_TIMEOUT_MS[stage] ?? DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS;
+    let stageTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    const stageTimeoutPromise = new Promise<never>((_, reject) => {
+      stageTimeoutTimer = setTimeout(() => {
+        reject(new StagePreStreamStalledError(stageTimeoutMs));
+      }, stageTimeoutMs);
+    });
+
+    const result = await Promise.race([
+      consumeAgentStream(messages, {
+        onProgress: (stats) => {
+          log.info(stats, "stage still in progress");
+        },
+        onToolMessage: (msg: StreamMessage) => {
+          logBatch.push({
+            id: nanoid(),
+            stageRunId: stageRunId,
+            type: msg.type!,
+            content: JSON.stringify(msg).slice(0, 2048),
+          });
+          if (logBatch.length >= BATCH_SIZE) {
+            flushLogBatch().catch((err) => log.warn({ err }, "mid-stream log batch flush failed"));
+          }
+        },
+        firstMessageTimeoutMs: FIRST_MESSAGE_TIMEOUT_MS,
+      }),
+      stageTimeoutPromise,
+    ]).finally(() => {
+      // Always clear the wall-clock timer whether the stream succeeds, stalls,
+      // or throws any other error — prevents the timer from dangling after the
+      // stage exits the happy path.
+      if (stageTimeoutTimer) clearTimeout(stageTimeoutTimer);
     });
 
     // Flush remaining log entries

@@ -1,18 +1,23 @@
 /**
- * BEC-183 reproduction: pre-stream stall — query() hangs before first message;
- * watchdog doesn't apply.
+ * BEC-183: pre-stream stall — verify the fix.
  *
- * This file documents and exercises the CURRENT (buggy) behaviour to confirm
- * the feature gap before the fix is applied.  Run with:
+ * Tests verify:
+ *  1. StagePreStreamStalledError is exported from agent-stream.ts
+ *  2. consumeAgentStream throws it when no message arrives within firstMessageTimeoutMs
+ *  3. Mid-stream stall (after ≥1 message) still throws StageStalledError (regression guard)
+ *  4. executor.ts source contains wall-clock stage timeout (WALL_CLOCK_STAGE_TIMEOUT_MS)
+ *     and passes firstMessageTimeoutMs to consumeAgentStream
  *
+ * Run with:
  *   cd packages/core && npx vitest run src/__tests__/bec-183-pre-stream-stall.test.ts
- *
- * All assertions below are written to PASS against the current (unfixed) code,
- * demonstrating the three concrete gaps that BEC-183 must close.
  */
 import { describe, it, expect } from "vitest";
 import * as agentStreamModule from "../executor/agent-stream.js";
-import { consumeAgentStream, StageStalledError } from "../executor/agent-stream.js";
+import {
+  consumeAgentStream,
+  StageStalledError,
+  StagePreStreamStalledError,
+} from "../executor/agent-stream.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -38,70 +43,97 @@ async function* hangsAfterOne(): AsyncIterable<unknown> {
 }
 
 // ---------------------------------------------------------------------------
-// Gap 1 — StagePreStreamStalledError class is missing
+// Fix 1 — StagePreStreamStalledError class is exported
 // ---------------------------------------------------------------------------
-describe("BEC-183 gap 1 — StagePreStreamStalledError class is missing", () => {
-  it("StagePreStreamStalledError is NOT exported from agent-stream.ts", () => {
-    // @ts-expect-error — the class does not exist yet; this is the missing piece
+describe("BEC-183 fix 1 — StagePreStreamStalledError class is exported", () => {
+  it("StagePreStreamStalledError is exported from agent-stream.ts", () => {
     const cls = (agentStreamModule as Record<string, unknown>)["StagePreStreamStalledError"];
-    expect(cls).toBeUndefined();
-    // ---- expected after fix: cls should be a non-undefined constructor ----
+    expect(cls).toBeDefined();
+    expect(typeof cls).toBe("function");
+  });
+
+  it("StagePreStreamStalledError is a distinct class from StageStalledError", () => {
+    const preStream = new StagePreStreamStalledError(5000);
+    expect(preStream).toBeInstanceOf(StagePreStreamStalledError);
+    expect(preStream).not.toBeInstanceOf(StageStalledError);
+    expect(preStream.name).toBe("StagePreStreamStalledError");
+    expect(preStream.timeoutMs).toBe(5000);
+    expect(preStream.message).toContain("pre-stream stall");
+    expect(preStream.message).toContain("5s");
   });
 });
 
 // ---------------------------------------------------------------------------
-// Gap 2 — consumeAgentStream has no firstMessageTimeoutMs parameter;
-//          a never-yielding iterator is only protected by the blunt
-//          progressTimeoutMs watchdog (defaults to 30 minutes in production).
+// Fix 2 — consumeAgentStream throws StagePreStreamStalledError when iterator
+//          never yields its first message within firstMessageTimeoutMs
 // ---------------------------------------------------------------------------
-describe("BEC-183 gap 2 — no firstMessageTimeoutMs; falls through to progressTimeoutMs", () => {
+describe("BEC-183 fix 2 — firstMessageTimeoutMs fires StagePreStreamStalledError", () => {
   it(
-    "neverYields iterator throws StageStalledError after progressTimeoutMs, not a dedicated pre-stream error",
+    "neverYields iterator throws StagePreStreamStalledError after firstMessageTimeoutMs (not StageStalledError)",
     async () => {
-      // Use 150 ms so the test finishes quickly.  In production executor.ts
-      // passes NO progressTimeoutMs, so the default is 30 * 60_000 ms = 30 min.
-      // A 5-min firstMessageTimeoutMs would catch it 6× faster.
-      const start = Date.now();
-
       const err = await consumeAgentStream(neverYields(), {
-        progressTimeoutMs: 150,
-        // firstMessageTimeoutMs is not a recognised option yet — it will be silently ignored
-        // @ts-expect-error
-        firstMessageTimeoutMs: 50, // even if passed, has no effect
+        firstMessageTimeoutMs: 150, // short for test speed
+        progressTimeoutMs: 5_000,   // large; must not fire first
       }).catch((e: unknown) => e);
 
-      const elapsed = Date.now() - start;
-
-      // The error that fires is StageStalledError (the mid-stream watchdog),
-      // NOT a StagePreStreamStalledError (which doesn't exist yet).
-      expect(err).toBeInstanceOf(StageStalledError);
-      expect(err).not.toBeInstanceOf(
-        // @ts-expect-error — class does not exist yet
-        (agentStreamModule as Record<string, unknown>)["StagePreStreamStalledError"] ?? class {},
-      );
-
-      // Fires around progressTimeoutMs (150 ms), NOT after the shorter
-      // firstMessageTimeoutMs (50 ms) — because firstMessageTimeoutMs doesn't exist.
-      expect(elapsed).toBeGreaterThanOrEqual(140); // respects progressTimeoutMs
+      // Must be StagePreStreamStalledError, not the mid-stream StageStalledError
+      expect(err).toBeInstanceOf(StagePreStreamStalledError);
+      expect(err).not.toBeInstanceOf(StageStalledError);
+      const preStream = err as StagePreStreamStalledError;
+      expect(preStream.timeoutMs).toBe(150);
     },
-    3_000, // generous wall-clock budget for the test
+    3_000,
   );
 
-  it("mid-stream stall (after ≥1 message) still throws StageStalledError — regression guard", async () => {
-    // This existing behaviour must NOT be broken by the fix.
-    await expect(
-      consumeAgentStream(hangsAfterOne(), { progressTimeoutMs: 150 }),
-    ).rejects.toBeInstanceOf(StageStalledError);
-  });
+  it(
+    "when firstMessageTimeoutMs fires first, StagePreStreamStalledError is thrown; StageStalledError fires only after first message arrives",
+    async () => {
+      // firstMessageTimeoutMs (100ms) fires before progressTimeoutMs (1000ms)
+      // and no first message has arrived → StagePreStreamStalledError
+      const errPreStream = await consumeAgentStream(neverYields(), {
+        firstMessageTimeoutMs: 100,
+        progressTimeoutMs: 1_000,
+      }).catch((e: unknown) => e);
+      expect(errPreStream).toBeInstanceOf(StagePreStreamStalledError);
+
+      // A first message arrives immediately; then hangs.
+      // firstMessageTimeoutMs (1000ms) does NOT fire because firstMessageReceived=true.
+      // progressTimeoutMs (100ms) fires after mid-stream silence → StageStalledError.
+      const errStalled = await consumeAgentStream(hangsAfterOne(), {
+        firstMessageTimeoutMs: 1_000,
+        progressTimeoutMs: 100,
+      }).catch((e: unknown) => e);
+      expect(errStalled).toBeInstanceOf(StageStalledError);
+    },
+    5_000,
+  );
 });
 
 // ---------------------------------------------------------------------------
-// Gap 3 — executor.ts has no wall-clock stage timeout
+// Fix 3 — mid-stream stall still throws StageStalledError (regression guard)
+// ---------------------------------------------------------------------------
+describe("BEC-183 fix 3 — mid-stream stall regression guard", () => {
+  it(
+    "iterator that yields once then hangs throws StageStalledError, not StagePreStreamStalledError",
+    async () => {
+      const err = await consumeAgentStream(hangsAfterOne(), {
+        firstMessageTimeoutMs: 5_000, // large; must not fire (first message arrives quickly)
+        progressTimeoutMs: 150,       // short; fires after mid-stream hang
+      }).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(StageStalledError);
+      expect(err).not.toBeInstanceOf(StagePreStreamStalledError);
+    },
+    3_000,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Fix 4 — executor.ts has wall-clock stage timeout
 //          (static analysis check — we inspect the source text)
 // ---------------------------------------------------------------------------
-describe("BEC-183 gap 3 — executor.ts has no wall-clock stage timeout", () => {
-  it("executeStage source contains no Promise.race / AbortSignal.timeout against a wall-clock cap", async () => {
-    // Dynamic import of the raw source text to verify absence of wall-clock guard.
+describe("BEC-183 fix 4 — executor.ts wall-clock stage timeout", () => {
+  it("executeStage source contains WALL_CLOCK_STAGE_TIMEOUT_MS constant", async () => {
     const fs = await import("node:fs");
     const path = await import("node:path");
     const url = await import("node:url");
@@ -112,17 +144,11 @@ describe("BEC-183 gap 3 — executor.ts has no wall-clock stage timeout", () => 
       "utf8",
     );
 
-    // These identifiers/patterns would be present after the fix:
-    const hasWallClockTimeout =
-      /WALL_CLOCK_STAGE_TIMEOUT/i.test(executorSrc) ||
-      /stageTimeoutMs/i.test(executorSrc) ||
-      /AbortSignal\.timeout/i.test(executorSrc);
-
-    expect(hasWallClockTimeout).toBe(false);
-    // ---- expected after fix: one of those patterns should be present ----
+    expect(executorSrc).toContain("WALL_CLOCK_STAGE_TIMEOUT_MS");
+    expect(executorSrc).toContain("stageTimeoutMs");
   });
 
-  it("consumeAgentStream call in executor.ts passes no firstMessageTimeoutMs", async () => {
+  it("consumeAgentStream call in executor.ts passes firstMessageTimeoutMs", async () => {
     const fs = await import("node:fs");
     const path = await import("node:path");
     const url = await import("node:url");
@@ -133,7 +159,25 @@ describe("BEC-183 gap 3 — executor.ts has no wall-clock stage timeout", () => 
       "utf8",
     );
 
-    expect(executorSrc).not.toContain("firstMessageTimeoutMs");
-    // ---- expected after fix: executor.ts should pass firstMessageTimeoutMs ----
+    expect(executorSrc).toContain("firstMessageTimeoutMs");
+  });
+
+  it("executor.ts default stage timeout is 30 min and implement is 60 min", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const url = await import("node:url");
+
+    const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
+    const executorSrc = fs.readFileSync(
+      path.resolve(__dirname, "../executor/executor.ts"),
+      "utf8",
+    );
+
+    // 60 min for implement
+    expect(executorSrc).toContain("60 * 60_000");
+    // 30 min default
+    expect(executorSrc).toContain("30 * 60_000");
+    // implement key explicitly named
+    expect(executorSrc).toContain("implement");
   });
 });

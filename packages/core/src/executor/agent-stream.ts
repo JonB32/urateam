@@ -45,6 +45,24 @@ export class StageStalledError extends Error {
 }
 
 /**
+ * Thrown when no message is received from the agent stream before the
+ * `firstMessageTimeoutMs` deadline. This covers the pre-stream hang class
+ * (BEC-183) where query() returns an iterator that never yields its first
+ * message — e.g., blocked on an SDK-internal auth-retry loop, MCP init
+ * failure, or a never-resolving Promise before the iterator advances.
+ *
+ * Distinct from StageStalledError (mid-stream silence after ≥1 message).
+ */
+export class StagePreStreamStalledError extends Error {
+  constructor(public readonly timeoutMs: number) {
+    super(
+      `stage pre-stream stall — no message received within ${Math.round(timeoutMs / 1000)}s of starting`,
+    );
+    this.name = "StagePreStreamStalledError";
+  }
+}
+
+/**
  * Consume an Agent SDK message stream, accumulating token usage and
  * extracting the last assistant text content.
  *
@@ -70,6 +88,15 @@ export async function consumeAgentStream(
      * tool calls, raise this value (or chunk the work).
      */
     progressTimeoutMs?: number;
+    /**
+     * Throw StagePreStreamStalledError if no message at all arrives within
+     * this window. Default 5 minutes. Protects against SDK hangs that occur
+     * before the first message is emitted (e.g., auth-retry loop inside
+     * query(), MCP server boot failure, never-resolving iterator setup).
+     * BEC-183: distinct from progressTimeoutMs (mid-stream silence after ≥1
+     * message). Set shorter than progressTimeoutMs to catch hangs early.
+     */
+    firstMessageTimeoutMs?: number;
   },
 ): Promise<ConsumeResult> {
   let inputTokens = 0;
@@ -83,12 +110,26 @@ export async function consumeAgentStream(
   let lastTokenAdvanceAt = Date.now();
   const progressInterval = options?.progressIntervalMs ?? 30_000;
   const stallTimeoutMs = options?.progressTimeoutMs ?? 30 * 60_000;
+  // BEC-183: first-message timeout — fires if the iterator never yields its
+  // first message (pre-stream hang). Default 5 min; covers auth refresh,
+  // MCP boot, and model warmup latencies while still detecting SDK deadlocks.
+  const firstMsgTimeoutMs = options?.firstMessageTimeoutMs ?? 5 * 60_000;
+  const streamStartAt = Date.now();
+  let firstMessageReceived = false;
 
   const iterator = (messages as AsyncIterable<unknown>)[Symbol.asyncIterator]();
   const STALLED = { __stalled: true } as const;
   type StallSentinel = typeof STALLED;
   while (true) {
-    const remainingUntilStall = stallTimeoutMs - (Date.now() - lastTokenAdvanceAt);
+    const stallRemaining = stallTimeoutMs - (Date.now() - lastTokenAdvanceAt);
+    // First-message timeout: only active until the first real message arrives.
+    const firstMsgRemaining = firstMessageReceived
+      ? Infinity
+      : firstMsgTimeoutMs - (Date.now() - streamStartAt);
+    // Use whichever deadline is sooner; clamp to 0 to fire immediately if
+    // either has already elapsed.
+    const remainingUntilTimeout = Math.max(Math.min(stallRemaining, firstMsgRemaining), 0);
+
     let stallTimer: ReturnType<typeof setTimeout> | undefined;
     let nextSettled = false;
     let nextValue: IteratorResult<unknown> | undefined;
@@ -98,7 +139,7 @@ export async function consumeAgentStream(
       return v;
     });
     const stallPromise = new Promise<StallSentinel>((resolve) => {
-      stallTimer = setTimeout(() => resolve(STALLED), Math.max(remainingUntilStall, 0));
+      stallTimer = setTimeout(() => resolve(STALLED), remainingUntilTimeout);
     });
 
     const raced = await Promise.race([next, stallPromise]);
@@ -115,6 +156,12 @@ export async function consumeAgentStream(
         // awaiting iterator.return() would hang forever waiting for that
         // await to settle. Best-effort signal; let the GC handle the rest.
         iterator.return?.().catch(() => {});
+        if (!firstMessageReceived) {
+          // Pre-stream hang: the iterator never yielded its first message
+          // within firstMsgTimeoutMs. Throw StagePreStreamStalledError so
+          // callers can distinguish this from a mid-stream stall. BEC-183.
+          throw new StagePreStreamStalledError(firstMsgTimeoutMs);
+        }
         throw new StageStalledError(Date.now() - lastTokenAdvanceAt, {
           messageCount,
           turns,
@@ -126,6 +173,9 @@ export async function consumeAgentStream(
 
     const result = (raced === STALLED ? nextValue! : raced) as IteratorResult<unknown>;
     if (result.done) break;
+
+    // Mark that at least one message has arrived; deactivates first-message timer.
+    firstMessageReceived = true;
 
     const message = result.value as StreamMessage;
     messageCount++;
