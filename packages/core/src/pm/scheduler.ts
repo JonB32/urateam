@@ -21,7 +21,7 @@ import { isPostgres } from "../db/client.js";
 import { pipelineRuns } from "../db/schema.js";
 import { makeCallClaude } from "./call-claude.js";
 import { sanitize } from "../executor/prompt/sanitizer.js";
-import { resolveWorkflowStates } from "./linear-helpers.js";
+import { resolveWorkflowStates, createLazyLinearClient } from "./linear-helpers.js";
 import { sql } from "drizzle-orm";
 import { createLogger } from "../logger.js";
 import { logAuditEventUnchecked, budgetRefusedEvent, pruneAuditLog } from "../audit/index.js";
@@ -69,17 +69,9 @@ export interface PmScheduler {
 export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
   const actions = deps.actions as PmSchedulerActions | undefined;
 
-  let linearClient: any = null;
+  const { getClient: getLinearClient } = createLazyLinearClient(deps.linearApiKey);
   let slackNotifier: PmSlackNotifier | null = null;
   const callClaudeFn = makeCallClaude();
-
-  async function getLinearClient() {
-    if (!linearClient && deps.linearApiKey) {
-      const { LinearClient } = await import("@linear/sdk");
-      linearClient = new LinearClient({ apiKey: deps.linearApiKey });
-    }
-    return linearClient;
-  }
 
   function getSlackNotifier(): PmSlackNotifier {
     if (!slackNotifier) {
@@ -267,7 +259,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
         }
 
         // --- Stuck In Progress issue recovery sweep ---
-        if (config.stuckIssueRecovery !== false) {
+        if (config.stuckIssueRecovery !== false && !isPmPaused()) {
           try {
             const stuckResult = actions?.recoverStuckInProgressIssues
               ? await actions.recoverStuckInProgressIssues({} as any)
@@ -300,7 +292,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
         // --- Start pipelines for orphaned Todo issues ---
         if (deps.runner?.start && deps.pipelineConfigs && deps.repoConfigs) {
           try {
-            if (slotsAvailable > 0 && !tick.budgetGuard.promoteBlocked) {
+            if (slotsAvailable > 0 && !tick.budgetGuard.promoteBlocked && !isPmPaused()) {
               const todoResults = actions?.startTodoIssues
                 ? await actions.startTodoIssues({} as any)
                 : await startTodoIssues({
@@ -367,7 +359,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
 
         if (isPmPaused()) {
           tick.paused = true;
-          log.info("PM Agent is paused — skipping promote, deprioritize, and cancel");
+          log.info("PM Agent is paused — skipping start-todo, recover-stuck, promote, deprioritize, and cancel");
         }
 
         if (!tick.budgetGuard.promoteBlocked && !isPmPaused()) {
@@ -382,17 +374,20 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
               // Find the first cloned repo directory (runner clones to <repoCloneDir>/<slug>/)
               let repoDir = baseDir;
               try {
-                const { readdirSync, statSync } = await import("node:fs");
-                const entries = readdirSync(baseDir);
-                for (const entry of entries) {
-                  const candidate = `${baseDir}/${entry}`;
-                  try {
-                    if (statSync(`${candidate}/.git`).isDirectory()) {
-                      repoDir = candidate;
-                      break;
-                    }
-                  } catch { /* not a git repo */ }
-                }
+                const { readdir, stat } = await import("node:fs/promises");
+                const entries = await readdir(baseDir);
+                const candidates = await Promise.all(
+                  entries.map(async (entry) => {
+                    const candidate = `${baseDir}/${entry}`;
+                    try {
+                      const s = await stat(`${candidate}/.git`);
+                      if (s.isDirectory()) return candidate;
+                    } catch { /* not a git repo */ }
+                    return null;
+                  }),
+                );
+                const found = candidates.find((c) => c !== null);
+                if (found) repoDir = found;
               } catch {
                 log.warn("could not scan repoCloneDir for git repos");
               }

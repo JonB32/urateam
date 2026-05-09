@@ -15,6 +15,7 @@ import { sanitize } from "../executor/prompt/sanitizer.js";
 import { parseJsonObject } from "../executor/agent-stream.js";
 import { makeCallClaude, makeCallClaudeSonnet } from "./call-claude.js";
 import { postSlackMessage } from "./slack-helpers.js";
+import { createLazyLinearClient } from "./linear-helpers.js";
 
 const log = createLogger({ component: "PmAgent:slack-interface" });
 
@@ -119,8 +120,20 @@ export interface DailySummaryEntry {
 
 let paused = false;
 
+/**
+ * Returns `true` if the PM Agent is currently paused.
+ *
+ * Pause is active when EITHER of the following is true (OR logic):
+ * - `process.env.PM_AGENT_PAUSED === "true"` — env-var path for no-Slack incident
+ *   response. Toggling requires a container restart (env vars are read at each
+ *   tick invocation, not at module load time).
+ * - `setPmPaused(true)` has been called via the Slack `/pm pause` command.
+ *
+ * The env-var takes priority: setting `PM_AGENT_PAUSED=true` keeps the agent
+ * paused even if `setPmPaused(false)` is subsequently called via Slack.
+ */
 export function isPmPaused(): boolean {
-  return paused;
+  return process.env.PM_AGENT_PAUSED === "true" || paused;
 }
 
 export function setPmPaused(value: boolean): void {
@@ -299,14 +312,7 @@ export async function executePmCommand(
   cmd: PmCommand,
   deps: CommandExecutorDeps,
 ): Promise<string> {
-  let _linear: any = null;
-  async function getLinear() {
-    if (!_linear && deps.linearApiKey) {
-      const { LinearClient } = await import("@linear/sdk");
-      _linear = new LinearClient({ apiKey: deps.linearApiKey });
-    }
-    return _linear;
-  }
+  const { getClient: getLinear } = createLazyLinearClient(deps.linearApiKey);
 
   /**
    * Searches Linear for an issue by its identifier (e.g. "BEC-25") and returns
@@ -319,7 +325,7 @@ export async function executePmCommand(
 
   switch (cmd.type) {
     case "status": {
-      const state = paused ? "⏸ *Paused*" : "▶️ *Running*";
+      const state = isPmPaused() ? "⏸ *Paused*" : "▶️ *Running*";
       return `PM Agent is ${state}.\nUse \`/pm pause\` or \`/pm resume\` to control autonomous assignment.`;
     }
 
