@@ -12,7 +12,6 @@ import { resolveApprovals, type ResolveApprovalsInput, type ResolveApprovalsResu
 import { recoverRetriableRuns, type RecoverResult } from "./actions/recover.js";
 import { recoverStuckInProgressIssues, type StuckIssueResult } from "./actions/recover-stuck.js";
 import { startTodoIssues, type StartTodoInput, type StartTodoResult } from "./actions/start-todo.js";
-import { countConsecutiveFailures } from "./actions/db-queries.js";
 import { getActiveFileMaps, predictConflict, type ActiveRun } from "./conflict.js";
 import { PmSlackNotifier } from "./slack.js";
 import { isPmPaused } from "./slack-interface.js";
@@ -316,8 +315,9 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                     maxConsecutiveFailures: config.maxConsecutiveFailures > 0
                       ? config.maxConsecutiveFailures
                       : undefined,
-                    getFailureCount: (issueId) =>
-                      countConsecutiveFailures(deps.db as AnyDb, issueId),
+                    // BEC-181: omit getFailureCount so startTodoIssues uses the batch
+                    // batchCountConsecutiveFailures path (single DB round-trip for all
+                    // candidates) instead of per-issue N+1 queries.
                   });
               const started = todoResults.filter((r) => r.started);
               if (started.length > 0) {
@@ -422,8 +422,9 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                 maxConsecutiveFailures: config.maxConsecutiveFailures > 0
                   ? config.maxConsecutiveFailures
                   : undefined,
-                getFailureCount: (issueId) =>
-                  countConsecutiveFailures(db, issueId),
+                // BEC-181: omit getFailureCount so promoteReadyIssues uses the batch
+                // batchCountConsecutiveFailures path (single DB round-trip for all
+                // candidates) instead of per-issue N+1 queries.
               });
             }
           } catch (err) {

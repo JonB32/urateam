@@ -64,7 +64,7 @@ SELECT
   timestamp,
   json_extract(payload, '$.failureCount') AS failure_count,
   json_extract(payload, '$.threshold')    AS threshold,
-  json_extract(payload, '$.action')       AS skipped_from
+  json_extract(payload, '$.action')       AS action
 FROM audit_events
 WHERE event_type = 'pm.skipped_circuit_breaker'
   AND timestamp >= datetime('now', '-7 days')
@@ -129,12 +129,16 @@ ORDER BY consecutive_failures DESC;
 
 ## How to Verify the Circuit Breaker is Working
 
-### 1. Check `countConsecutiveFailures` is called at the right sites
+### 1. Check the batch failure-count query is used at the right sites
 
-The breaker is wired at two call sites in the PM scheduler (`packages/core/src/pm/scheduler.ts`):
+The breaker is wired at two call sites in the PM scheduler (`packages/core/src/pm/scheduler.ts`).
+Both calls omit `getFailureCount`, so each function fetches failure counts internally via
+`batchCountConsecutiveFailures` (a single DB round-trip for all candidates):
 
-- **`promoteReadyIssues`** (line ~413): passes `getFailureCount: (issueId) => countConsecutiveFailures(db, issueId)`
-- **`startTodoIssues`** (line ~307): passes the same callback
+- **`promoteReadyIssues`** (line ~413): passes `db` and `maxConsecutiveFailures`; internally calls
+  `batchCountConsecutiveFailures(db, candidateIds)` before the per-candidate loop.
+- **`startTodoIssues`** (line ~307): same pattern — `db` + `maxConsecutiveFailures`; internally
+  calls `batchCountConsecutiveFailures(db, candidateIds)` before the per-issue loop.
 
 Both are gated on `config.maxConsecutiveFailures > 0`, which means the breaker is disabled when
 `maxConsecutiveFailures` is `0` or unset in the config.
@@ -155,13 +159,14 @@ cd packages/core
 npx vitest run src/__tests__/bec-181-circuit-breaker-audit-gap.test.ts
 ```
 
-Expected output: all 8 tests pass, including:
-- `countConsecutiveFailures returns 4 for 4 consecutive failures`
-- `promoteReadyIssues skips and writes pm.skipped_circuit_breaker audit event (BEC-147)`
-- `promoteReadyIssues skips and writes pm.skipped_circuit_breaker audit event (BEC-157)`
-- `startTodoIssues skips and writes pm.skipped_circuit_breaker audit event (BEC-147)`
-- `AuditEventTypeSchema contains pm.skipped_circuit_breaker`
-- `audit/events.ts exports pmSkippedCircuitBreakerEvent builder`
+Expected output: all 7 tests pass, including:
+- `BEC-181 Part 1 > returns 4 when issue has 4 consecutive failed runs and no completed run`
+- `BEC-181 Part 1 > returns 3 when issue has exactly 3 consecutive failed runs (at default threshold)`
+- `BEC-181 Part 2 > skips promotion for issue with 4 consecutive failures and writes a pm.skipped_circuit_breaker audit event (fix verified)`
+- `BEC-181 Part 2 > skips promotion for BEC-157 with exactly 3 consecutive failures (at threshold)`
+- `BEC-181 Part 3 > skips start for issue with 4 consecutive failures WITHOUT touching Linear SDK, and writes an audit event (fix verified)`
+- `BEC-181 Part 4 > AuditEventTypeSchema contains pm.skipped_circuit_breaker`
+- `BEC-181 Part 4 > audit/events.ts exports pmSkippedCircuitBreakerEvent builder`
 
 ### 4. Observe in production via audit events
 
@@ -188,7 +193,10 @@ count from `pipeline_runs`. If a completed run now appears before the failed one
 |---|---|
 | `packages/core/src/types.ts` | Added `"pm.skipped_circuit_breaker"` to `AuditEventTypeSchema` |
 | `packages/core/src/audit/events.ts` | Added `pmSkippedCircuitBreakerEvent()` builder |
-| `packages/core/src/pm/actions/promote.ts` | Emits `pm.skipped_circuit_breaker` when circuit breaker fires |
-| `packages/core/src/pm/actions/start-todo.ts` | Emits `pm.skipped_circuit_breaker` when circuit breaker fires |
-| `packages/core/src/__tests__/bec-181-circuit-breaker-audit-gap.test.ts` | Updated tests to verify audit events are emitted |
+| `packages/core/src/pm/actions/db-queries.ts` | Added `batchCountConsecutiveFailures()` — single DB round-trip for all candidates |
+| `packages/core/src/pm/actions/promote.ts` | Emits `pm.skipped_circuit_breaker` when circuit breaker fires; uses batch query |
+| `packages/core/src/pm/actions/start-todo.ts` | Emits `pm.skipped_circuit_breaker` when circuit breaker fires; uses batch query |
+| `packages/core/src/pm/scheduler.ts` | Omits `getFailureCount` so promote/start-todo use the batch query path |
+| `packages/core/src/__tests__/bec-181-circuit-breaker-audit-gap.test.ts` | Updated tests to verify audit events and batch path |
+| `packages/core/src/__tests__/pm-circuit-breaker.test.ts` | Added `batchCountConsecutiveFailures` tests |
 | `packages/core/src/__tests__/audit-immutability.test.ts` | Added `start-todo.ts` to `logAuditEventUnchecked` allowlist |

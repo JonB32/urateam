@@ -99,117 +99,98 @@ describe("BEC-181 Part 1: countConsecutiveFailures (working correctly)", () => {
 // PART 2: Verify promoteReadyIssues skips the issue (circuit breaker fires)
 // ---------------------------------------------------------------------------
 
+/** Allow fire-and-forget audit DB writes to complete before asserting. */
+async function flushFireAndForget() {
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+}
+
+/**
+ * Shared helper: runs promoteReadyIssues with the circuit breaker enabled
+ * for a single pre-seeded issue and asserts both the skip and the audit event.
+ */
+async function assertPromoteBreakerSkip(opts: {
+  issueId: string;
+  issueTitle: string;
+  linearUuid: string;
+  failureCount: number;
+  threshold: number;
+}) {
+  const db = await makeDb() as any;
+  await seedConsecutiveFailures(db, opts.issueId, opts.failureCount);
+
+  const issues = [
+    {
+      id: opts.linearUuid,
+      identifier: opts.issueId,
+      title: opts.issueTitle,
+      description: "Some description",
+      priority: 2,
+      labels: vi.fn().mockResolvedValue({ nodes: [{ name: "auto-implement" }] }),
+      team: Promise.resolve({ id: "team-1" }),
+      url: `https://linear.app/beckerspace/issue/${opts.issueId}`,
+    },
+  ];
+  const client = {
+    issues: vi.fn().mockResolvedValue({ nodes: issues }),
+    updateIssue: vi.fn(),
+    createComment: vi.fn(),
+  };
+  const stateMap = new Map([["team-1:Todo", "state-todo"]]);
+  const conflictChecker = vi.fn();
+
+  // Omit getFailureCount to exercise the batchCountConsecutiveFailures path.
+  // The production scheduler also omits getFailureCount after BEC-181 so
+  // both promote and start-todo benefit from the batch optimization.
+  const results = await promoteReadyIssues({
+    linearClient: client as any,
+    teamIds: ["team-1"],
+    slotsAvailable: 1,
+    checkConflict: conflictChecker,
+    stateMap,
+    db,
+    maxConsecutiveFailures: opts.threshold,
+  });
+
+  // Circuit breaker fires and prevents promotion
+  expect(results).toHaveLength(1);
+  expect(results[0].promoted).toBe(false);
+  expect(results[0].reason).toMatch(/circuit.breaker/i);
+  expect(results[0].reason).toContain(`${opts.failureCount} consecutive failed runs`);
+  expect(client.updateIssue).not.toHaveBeenCalled();
+  // Breaker fires before conflict detection (saves tokens)
+  expect(conflictChecker).not.toHaveBeenCalled();
+
+  await flushFireAndForget();
+
+  // Audit event is now written when the breaker fires
+  const auditRows = await (db as any).select().from(auditEvents);
+  expect(auditRows).toHaveLength(1);
+  expect(auditRows[0].eventType).toBe("pm.skipped_circuit_breaker");
+  expect(auditRows[0].issueId).toBe(opts.issueId);
+  expect(JSON.parse(auditRows[0].payload).failureCount).toBe(opts.failureCount);
+  expect(JSON.parse(auditRows[0].payload).threshold).toBe(opts.threshold);
+  expect(JSON.parse(auditRows[0].payload).action).toBe("promote");
+}
+
 describe("BEC-181 Part 2: promoteReadyIssues circuit-breaker skip (working correctly)", () => {
-  it("skips promotion for issue with 4 consecutive failures and writes a pm.skipped_circuit_breaker audit event (fix verified)", async () => {
-    const db = await makeDb() as any;
-    await seedConsecutiveFailures(db, "BEC-147", 4);
+  it("skips promotion for issue with 4 consecutive failures and writes a pm.skipped_circuit_breaker audit event (fix verified)", () =>
+    assertPromoteBreakerSkip({
+      issueId: "BEC-147",
+      issueTitle: "Tech debt: changelog UNRELEASED section stale",
+      linearUuid: "uuid-bec147",
+      failureCount: 4,
+      threshold: 3,
+    }));
 
-    const issues = [
-      {
-        id: "uuid-bec147",
-        identifier: "BEC-147",
-        title: "Tech debt: changelog UNRELEASED section stale",
-        description: "Some description",
-        priority: 2,
-        labels: vi.fn().mockResolvedValue({ nodes: [{ name: "auto-implement" }] }),
-        team: Promise.resolve({ id: "team-1" }),
-        url: "https://linear.app/beckerspace/issue/BEC-147",
-      },
-    ];
-    const client = {
-      issues: vi.fn().mockResolvedValue({ nodes: issues }),
-      updateIssue: vi.fn(),
-      createComment: vi.fn(),
-    };
-    const stateMap = new Map([["team-1:Todo", "state-todo"]]);
-    const conflictChecker = vi.fn().mockResolvedValue({ overlapRisk: "none", likelyFiles: [], reasoning: "" });
-
-    const results = await promoteReadyIssues({
-      linearClient: client as any,
-      teamIds: ["team-1"],
-      slotsAvailable: 1,
-      checkConflict: conflictChecker,
-      stateMap,
-      db,
-      maxConsecutiveFailures: 3,
-      getFailureCount: (issueId) => countConsecutiveFailures(db, issueId),
-    });
-
-    // VERIFIED WORKING: circuit breaker fires and prevents promotion
-    expect(results).toHaveLength(1);
-    expect(results[0].promoted).toBe(false);
-    expect(results[0].reason).toMatch(/circuit.breaker/i);
-    expect(results[0].reason).toContain("4 consecutive failed runs");
-    expect(client.updateIssue).not.toHaveBeenCalled();
-    // Breaker fires before conflict detection (saves tokens)
-    expect(conflictChecker).not.toHaveBeenCalled();
-
-    // Give the void-logAuditEventUnchecked microtask a chance to flush
-    await new Promise((r) => setImmediate(r));
-
-    // VERIFIED FIX: audit event is now written when the breaker fires
-    const auditRows = await (db as any).select().from(auditEvents);
-    expect(auditRows).toHaveLength(1);
-    expect(auditRows[0].eventType).toBe("pm.skipped_circuit_breaker");
-    expect(auditRows[0].issueId).toBe("BEC-147");
-    expect(JSON.parse(auditRows[0].payload).failureCount).toBe(4);
-    expect(JSON.parse(auditRows[0].payload).threshold).toBe(3);
-    expect(JSON.parse(auditRows[0].payload).action).toBe("promote");
-  });
-
-  it("skips promotion for BEC-157 with exactly 3 consecutive failures (at threshold)", async () => {
-    const db = await makeDb() as any;
-    await seedConsecutiveFailures(db, "BEC-157", 3);
-
-    const issues = [
-      {
-        id: "uuid-bec157",
-        identifier: "BEC-157",
-        title: "Pipeline: filter agent scratchpad files",
-        description: "Some description",
-        priority: 2,
-        labels: vi.fn().mockResolvedValue({ nodes: [{ name: "auto-implement" }] }),
-        team: Promise.resolve({ id: "team-1" }),
-        url: "https://linear.app/beckerspace/issue/BEC-157",
-      },
-    ];
-    const client = {
-      issues: vi.fn().mockResolvedValue({ nodes: issues }),
-      updateIssue: vi.fn(),
-      createComment: vi.fn(),
-    };
-    const stateMap = new Map([["team-1:Todo", "state-todo"]]);
-    const conflictChecker = vi.fn();
-
-    const results = await promoteReadyIssues({
-      linearClient: client as any,
-      teamIds: ["team-1"],
-      slotsAvailable: 1,
-      checkConflict: conflictChecker,
-      stateMap,
-      db,
-      maxConsecutiveFailures: 3,
-      getFailureCount: (issueId) => countConsecutiveFailures(db, issueId),
-    });
-
-    expect(results[0].promoted).toBe(false);
-    expect(results[0].reason).toMatch(/circuit.breaker/i);
-    expect(results[0].reason).toContain("3 consecutive failed runs");
-    expect(client.updateIssue).not.toHaveBeenCalled();
-    expect(conflictChecker).not.toHaveBeenCalled();
-
-    // Give the void-logAuditEventUnchecked microtask a chance to flush
-    await new Promise((r) => setImmediate(r));
-
-    // VERIFIED FIX: audit event is now written when the breaker fires
-    const auditRows = await (db as any).select().from(auditEvents);
-    expect(auditRows).toHaveLength(1);
-    expect(auditRows[0].eventType).toBe("pm.skipped_circuit_breaker");
-    expect(auditRows[0].issueId).toBe("BEC-157");
-    expect(JSON.parse(auditRows[0].payload).failureCount).toBe(3);
-    expect(JSON.parse(auditRows[0].payload).threshold).toBe(3);
-    expect(JSON.parse(auditRows[0].payload).action).toBe("promote");
-  });
+  it("skips promotion for BEC-157 with exactly 3 consecutive failures (at threshold)", () =>
+    assertPromoteBreakerSkip({
+      issueId: "BEC-157",
+      issueTitle: "Pipeline: filter agent scratchpad files",
+      linearUuid: "uuid-bec157",
+      failureCount: 3,
+      threshold: 3,
+    }));
 });
 
 // ---------------------------------------------------------------------------
@@ -250,6 +231,9 @@ describe("BEC-181 Part 3: startTodoIssues circuit-breaker skip (working correctl
     // and all are "failed" (not "queued"/"running"), so getActiveAndRecentIssueIds
     // correctly returns empty sets, making BEC-147 appear as an orphaned Todo issue.
     const runner = { start: vi.fn() };
+    // Omit getFailureCount to exercise the batchCountConsecutiveFailures path
+    // (single DB round-trip). The production scheduler also omits getFailureCount
+    // after BEC-181 so it benefits from the batch optimization.
     const input: StartTodoInput = {
       linearClient: { issues: vi.fn().mockResolvedValue({ nodes: [issue] }) },
       db,
@@ -259,7 +243,6 @@ describe("BEC-181 Part 3: startTodoIssues circuit-breaker skip (working correctl
       repoConfigs,
       maxPerTick: 5,
       maxConsecutiveFailures: 3,
-      getFailureCount: (issueId) => countConsecutiveFailures(db, issueId),
     };
 
     const results = await startTodoIssues(input);
@@ -273,8 +256,8 @@ describe("BEC-181 Part 3: startTodoIssues circuit-breaker skip (working correctl
     // Breaker fires BEFORE Linear SDK calls (saves 3 round-trips per tick per doom-looping issue)
     expect(labelsSpy).not.toHaveBeenCalled();
 
-    // Give the void-logAuditEventUnchecked microtask a chance to flush
-    await new Promise((r) => setImmediate(r));
+    // Allow fire-and-forget audit DB writes to complete before asserting.
+    await flushFireAndForget();
 
     // VERIFIED FIX: audit event is now written when the circuit breaker fires in start-todo
     const auditRows = await (db as any).select().from(auditEvents);
