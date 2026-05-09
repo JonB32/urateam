@@ -77,6 +77,9 @@ Build command: ${repo.buildCommand}${repo.setupCommands ? `\nSetup commands: ${r
 </repo-context>`;
 }
 
+/** Maximum length of an error snippet included in a handoff block. Caps the snippet so prompt size stays predictable even when build/test errors are verbose. */
+const MAX_ERROR_SNIPPET_LENGTH = 500;
+
 /**
  * Wraps handoff artifact in a `<previous-stage-context>` block.
  * Returns empty string when handoff is undefined.
@@ -104,8 +107,8 @@ Constraints: ${handoff.context.constraints.map(sanitizeField).join("; ") || "non
     const tr = handoff.context.testResults;
     block += `\nTest results: ${tr.passed} passed, ${tr.failed} failed`;
     if (tr.firstFailure) {
-      const errorTrimmed = tr.firstFailure.error.length > 500
-        ? tr.firstFailure.error.slice(0, 500) + "… (trimmed)"
+      const errorTrimmed = tr.firstFailure.error.length > MAX_ERROR_SNIPPET_LENGTH
+        ? tr.firstFailure.error.slice(0, MAX_ERROR_SNIPPET_LENGTH) + "… (trimmed)"
         : tr.firstFailure.error;
       block += `\nFirst failure: ${sanitizeField(tr.firstFailure.test)} in ${sanitizeField(tr.firstFailure.file)} — ${sanitizeField(errorTrimmed)}`;
     }
@@ -113,10 +116,10 @@ Constraints: ${handoff.context.constraints.map(sanitizeField).join("; ") || "non
 
   const blockingFindings = handoff.context.reviewFindings?.filter(f => f.severity === "blocking") ?? [];
   if (blockingFindings.length > 0) {
-    block += `\nBlocking review findings (${blockingFindings.length}):`;
-    for (const f of blockingFindings) {
-      block += `\n  [${f.severity}] ${sanitizeField(f.file)}:${f.line} — ${sanitizeField(f.category)}: ${sanitizeField(f.description)} (fix: ${sanitizeField(f.fix)})`;
-    }
+    const findingLines = blockingFindings.map(
+      f => `  [${f.severity}] ${sanitizeField(f.file)}:${f.line} — ${sanitizeField(f.category)}: ${sanitizeField(f.description)} (fix: ${sanitizeField(f.fix)})`
+    );
+    block += `\nBlocking review findings (${blockingFindings.length}):\n${findingLines.join("\n")}`;
     const skipped = (handoff.context.reviewFindings?.length ?? 0) - blockingFindings.length;
     if (skipped > 0) {
       block += `\n  (${skipped} non-blocking findings omitted)`;
@@ -355,7 +358,7 @@ Instructions:
 - IMPORTANT: Cross-reference the implementation against the acceptance criteria listed in the issue data above. For each criterion, verify there is corresponding code in the diff. If any acceptance criterion is NOT addressed by the code changes, report it as a blocking finding with category "incomplete-implementation".
 - DEAD CODE CHECK: For every new export (function, class, constant) in the changed files, use Grep to check if it is imported and called from at least one file other than its own test file. Re-exports in index/barrel files do NOT count as callers — there must be an actual invocation. Exception: side-effect-only registrations that run at import time are acceptable. If a new export has no callers outside its definition and test files, report it as a BLOCKING finding with category "dead-code" — the implementation is not wired into the pipeline and will have no effect at runtime.
 - DOCUMENTATION CHECK: If the changes introduce new configuration options, CLI flags, environment variables, or change existing behavior, check whether CLAUDE.md, README.md, or deploy/README.md were updated. If documentation was not updated, report it as a warning finding with category "missing-documentation".
-- Report findings using the JSON format below.
+- FINAL OUTPUT: After completing your review, emit a single HandoffArtifact JSON block as your last output (format below). The \`summary\` field must be 1–2 sentences of prose describing what was reviewed and the overall verdict — NOT JSON. All fields are required even when there are no findings.
 
 ${REVIEW_OUTPUT_FORMAT}
 `.trim();
