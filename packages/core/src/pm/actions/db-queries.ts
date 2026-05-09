@@ -5,6 +5,21 @@ import { and, desc, eq, gte, inArray, or } from "drizzle-orm";
 /** Statuses considered "active" (pipeline currently running). */
 export const ACTIVE_STATUSES = ["queued", "running"] as const;
 
+/**
+ * Count leading 'failed' rows in a most-recent-first ordered list of pipeline
+ * run rows, stopping at the first non-failed row.  Shared by
+ * `countConsecutiveFailures` (single issue) and `batchCountConsecutiveFailures`
+ * (batch variant) to keep the counting logic in one place.
+ */
+function countLeadingFailures(rows: Array<{ status: string }>): number {
+  let count = 0;
+  for (const row of rows) {
+    if (row.status === "failed") count++;
+    else break;
+  }
+  return count;
+}
+
 /** Default window for considering a recently-completed run as still "fresh". */
 const RECENT_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
 
@@ -95,12 +110,7 @@ export async function countConsecutiveFailures(
     // string, so it gives us a stable ordering when `startedAt` collides.
     .orderBy(desc(pipelineRuns.startedAt), desc(pipelineRuns.id));
 
-  let count = 0;
-  for (const row of rows as Array<{ status: string }>) {
-    if (row.status === "failed") count++;
-    else break;
-  }
-  return count;
+  return countLeadingFailures(rows as Array<{ status: string }>);
 }
 
 /**
@@ -143,16 +153,11 @@ export async function batchCountConsecutiveFailures(
     }
   }
 
-  // Count leading "failed" rows for each issue (same logic as countConsecutiveFailures).
+  // Count leading "failed" rows for each issue (delegates to shared helper).
   const result = new Map<string, number>();
   for (const issueId of issueIds) {
     const issueRows = byIssue.get(issueId) ?? [];
-    let count = 0;
-    for (const row of issueRows) {
-      if (row.status === "failed") count++;
-      else break;
-    }
-    result.set(issueId, count);
+    result.set(issueId, countLeadingFailures(issueRows));
   }
   return result;
 }

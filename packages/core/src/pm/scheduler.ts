@@ -264,9 +264,11 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
             // BEC-184: read PM_AGENT_STUCK_RUN_AGE_MIN from env (default 60 min).
             // Controls how long a 'running' run must be active before it's treated
             // as a zombie and eligible for stuck-issue recovery.
-            const stuckRunAgeMinutes = process.env.PM_AGENT_STUCK_RUN_AGE_MIN
-              ? parseInt(process.env.PM_AGENT_STUCK_RUN_AGE_MIN, 10) || 60
-              : 60;
+            // PM_AGENT_STUCK_RUN_AGE_MIN: use isNaN guard so '0' doesn't silently
+            // fall back to 60 via || falsy check; clamp to ≥1 min to prevent
+            // overly-aggressive recovery on mis-configured deployments.
+            const _parsedAge = parseInt(process.env.PM_AGENT_STUCK_RUN_AGE_MIN ?? "", 10);
+            const stuckRunAgeMinutes = isNaN(_parsedAge) ? 60 : Math.max(1, _parsedAge);
             const stuckResult = actions?.recoverStuckInProgressIssues
               ? await actions.recoverStuckInProgressIssues({} as any)
               : await recoverStuckInProgressIssues({

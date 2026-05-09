@@ -153,12 +153,14 @@ export async function recoverStuckInProgressIssues(
       .from(pipelineRuns)
       .where(inArray(pipelineRuns.issueId, stuckIdentifiers));
 
+    // Pre-compute timestamps before sorting to avoid O(N log N) Date allocations
+    // inside the comparator (Date objects would be created on every comparison otherwise).
+    const runsWithTime = (runs as any[]).map((r) => ({
+      ...r,
+      _time: r.startedAt ? new Date(r.startedAt as any).getTime() : 0,
+    }));
     // Sort descending by startedAt to get the most recent run per issue
-    const sorted = [...(runs as any[])].sort((a, b) => {
-      const aTime = a.startedAt ? new Date(a.startedAt as any).getTime() : 0;
-      const bTime = b.startedAt ? new Date(b.startedAt as any).getTime() : 0;
-      return bTime - aTime;
-    });
+    const sorted = runsWithTime.sort((a, b) => b._time - a._time);
     for (const run of sorted) {
       if (!lastRunStatusMap.has(run.issueId)) {
         lastRunStatusMap.set(run.issueId, run.status);
