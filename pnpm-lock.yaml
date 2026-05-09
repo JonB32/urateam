@@ -160,6 +160,31 @@ importers:
         specifier: ^3.0.0
         version: 3.2.4(@types/node@22.19.17)(tsx@4.21.0)
 
+  packages/observers:
+    dependencies:
+      better-sqlite3:
+        specifier: ^11.8.0
+        version: 11.10.0
+      croner:
+        specifier: ^9.0.0
+        version: 9.1.0
+      pino:
+        specifier: ^10.3.1
+        version: 10.3.1
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.0
+        version: 7.6.13
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.17
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.4(@types/node@22.19.17)(tsx@4.21.0)
+
 packages:
 
   '@anthropic-ai/claude-agent-sdk@0.2.101':
