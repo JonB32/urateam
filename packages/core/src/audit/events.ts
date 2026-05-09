@@ -106,7 +106,7 @@ export function pmSkippedCircuitBreakerEvent(args: {
   issueId: string;
   failureCount: number;
   threshold: number;
-  action: "promote" | "start-todo";
+  source: "promote" | "start-todo";
 }): AuditEvent {
   return base({
     eventType: "pm.skipped_circuit_breaker",
@@ -116,7 +116,7 @@ export function pmSkippedCircuitBreakerEvent(args: {
     payload: {
       failureCount: args.failureCount,
       threshold: args.threshold,
-      action: args.action,
+      source: args.source,
     },
   });
 }
