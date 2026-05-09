@@ -138,6 +138,8 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
   let outputTokens = 0;
   let turns = 0;
   let lastTextContent = "";
+  let cacheCreationInputTokens = 0;
+  let cacheReadInputTokens = 0;
 
   try {
     // Pre-flight auth check — fail fast with a clear message rather than
@@ -214,6 +216,8 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
 
     inputTokens = result.inputTokens;
     outputTokens = result.outputTokens;
+    cacheCreationInputTokens = result.cacheCreationInputTokens;
+    cacheReadInputTokens = result.cacheReadInputTokens;
     turns = result.turns;
     lastTextContent = result.lastText;
 
@@ -239,6 +243,8 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
         completedAt: new Date(),
         inputTokens,
         outputTokens,
+        cacheCreationInputTokens,
+        cacheReadInputTokens,
         turns,
         handoffArtifact: JSON.stringify(handoffResult.artifact),
       })
@@ -273,6 +279,8 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
         completedAt: new Date(),
         inputTokens,
         outputTokens,
+        cacheCreationInputTokens,
+        cacheReadInputTokens,
         turns,
         errorMessage,
       })

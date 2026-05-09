@@ -80,4 +80,29 @@ describe("formatPRCostSummary", () => {
     // 1M * $3 + 1M * $15 = $18.00
     expect(out).toContain("**Total: ~$18.00**");
   });
+
+  it("renders cache hit ratio when cache fields are present", () => {
+    const stages: StageCostBreakdown[] = [
+      {
+        stage: "implement",
+        inputTokens: 200,
+        outputTokens: 750,
+        cacheCreationInputTokens: 5000,
+        cacheReadInputTokens: 10000,
+      },
+    ];
+    const out = formatPRCostSummary(stages, "auto-implement", ratesConfig);
+    // Hit ratio = read / (read + creation + uncached input) = 10000 / (10000 + 5000 + 200) ≈ 65.8% → rounds to 66%
+    expect(out).toMatch(/cache hit:\s*66%/);
+    expect(out).toContain("read 10.0K");
+    expect(out).toContain("created 5.0K");
+  });
+
+  it("does not render cache line when both cache fields are zero", () => {
+    const stages: StageCostBreakdown[] = [
+      { stage: "implement", inputTokens: 100, outputTokens: 200 },
+    ];
+    const out = formatPRCostSummary(stages, "auto-implement", ratesConfig);
+    expect(out).not.toContain("cache hit");
+  });
 });

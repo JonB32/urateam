@@ -2271,19 +2271,14 @@ export class PipelineRunner {
               });
               modelsByStage.set(mr.stageRunId, arr);
             }
-            const breakdown: StageCostBreakdown[] = stages.map(
-              (s: {
-                id: string;
-                stage: string;
-                inputTokens: number;
-                outputTokens: number;
-              }) => ({
-                stage: s.stage,
-                inputTokens: s.inputTokens,
-                outputTokens: s.outputTokens,
-                modelRuns: modelsByStage.get(s.id),
-              }),
-            );
+            const breakdown: StageCostBreakdown[] = stages.map((s: any) => ({
+              stage: s.stage,
+              inputTokens: s.inputTokens,
+              outputTokens: s.outputTokens,
+              cacheCreationInputTokens: s.cacheCreationInputTokens ?? 0,
+              cacheReadInputTokens: s.cacheReadInputTokens ?? 0,
+              modelRuns: modelsByStage.get(s.id),
+            }));
             const body = formatPRCostSummary(breakdown, run.pipelineKey, {
               pipelineConfigs: { [run.pipelineKey]: config },
             });
