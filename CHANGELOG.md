@@ -25,6 +25,15 @@ notes call out when a change affects only a single package.
 ### Fixed (OSS+)
 - **BEC-167** — Review-stage prompt now instructs the agent to emit a `HandoffArtifact` JSON envelope (with `reviewFindings` nested inside `context`) instead of a bare findings array. Previously the fast-path parser (`parseHandoffArtifact`) always fell through to the slow-path soup gate, producing the placeholder summary "Stage review completed — agent output was not parseable prose; see Changes for files modified" in PR descriptions for trivial no-finding reviews. The fix is a prompt change only — no schema or parser changes needed. Downstream consumers (`reviewFindings`-based review-fix loop, RALPH gate, deep-review fanout) are unaffected.
 
+## [0.1.41] — 2026-05-09
+
+Bumps:
+- `@urateam/core`: 0.1.26 → 0.1.27
+- `@urateam/cli`: 0.1.28 → 0.1.29
+- `@urateam/dashboard`: 0.1.26 → 0.1.27
+- `create-urateam`: 0.1.29 → 0.1.30
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
 ## [0.1.40] — 2026-05-09
 
 Bumps:
