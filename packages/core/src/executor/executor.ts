@@ -20,8 +20,24 @@ import { resolveTooling } from "./mcp-resolver.js";
 import type { TechStackProfile } from "../repo/tech-stack.js";
 import type { DevcontainerSession } from "../repo/devcontainer.js";
 import { createLogger } from "../logger.js";
-import { consumeAgentStream, type StreamMessage } from "./agent-stream.js";
+import { consumeAgentStream, StagePreStreamStalledError, type StreamMessage } from "./agent-stream.js";
 import { isClaudeAuthValid } from "./auth-check.js";
+
+/**
+ * BEC-183: wall-clock stage timeouts. Independent of the in-stream watchdog
+ * (StageStalledError / StagePreStreamStalledError inside consumeAgentStream),
+ * this is a second defensive layer that covers the case where the SDK's
+ * query() or iterator setup hangs before any message arrives and the
+ * firstMessageTimeoutMs timer inside consumeAgentStream somehow fails to fire.
+ * Default: 60 min for implement (longest legitimate stage), 30 min for others.
+ */
+const WALL_CLOCK_STAGE_TIMEOUT_MS: Partial<Record<string, number>> = {
+  implement: 60 * 60_000, // 60 min — longest legitimate stage
+};
+const DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS = 30 * 60_000; // 30 min for all others
+
+/** First-message timeout passed to consumeAgentStream (BEC-183). */
+const FIRST_MESSAGE_TIMEOUT_MS = 5 * 60_000; // 5 min
 
 /**
  * BEC-182: review-feedback runs are bounded — N comments, push, done.
@@ -194,21 +210,64 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       logBatch = [];
     }
 
-    const result = await consumeAgentStream(messages, {
-      onProgress: (stats) => {
-        log.info(stats, "stage still in progress");
+    // BEC-183: capture the iterator that consumeAgentStream will create so we
+    // can call .return() for cleanup if the wall-clock timeout fires before the
+    // inner firstMessageTimeoutMs guard does. consumeAgentStream calls
+    // messages[Symbol.asyncIterator]() exactly once — the wrapper intercepts
+    // that call and stores the reference.
+    let capturedMessagesIterator: AsyncIterator<unknown> | undefined;
+    const messagesWithCapture: AsyncIterable<unknown> = {
+      [Symbol.asyncIterator]() {
+        const iter = messages[Symbol.asyncIterator]();
+        capturedMessagesIterator = iter;
+        return iter;
       },
-      onToolMessage: (msg: StreamMessage) => {
-        logBatch.push({
-          id: nanoid(),
-          stageRunId: stageRunId,
-          type: msg.type!,
-          content: JSON.stringify(msg).slice(0, 2048),
-        });
-        if (logBatch.length >= BATCH_SIZE) {
-          flushLogBatch().catch((err) => log.warn({ err }, "mid-stream log batch flush failed"));
-        }
-      },
+    };
+
+    // BEC-183: wall-clock stage timeout — second defensive layer independent
+    // of the in-stream watchdog. Fires as StagePreStreamStalledError so the
+    // catch block below sets status=failed with a clear message.
+    const stageTimeoutMs = WALL_CLOCK_STAGE_TIMEOUT_MS[stage] ?? DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS;
+    let stageTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    const stageTimeoutPromise = new Promise<never>((_, reject) => {
+      stageTimeoutTimer = setTimeout(() => {
+        reject(new StagePreStreamStalledError(stageTimeoutMs));
+      }, stageTimeoutMs);
+    });
+
+    const result = await Promise.race([
+      consumeAgentStream(messagesWithCapture, {
+        onProgress: (stats) => {
+          log.info(stats, "stage still in progress");
+        },
+        onToolMessage: (msg: StreamMessage) => {
+          logBatch.push({
+            id: nanoid(),
+            stageRunId: stageRunId,
+            type: msg.type!,
+            content: JSON.stringify(msg).slice(0, 2048),
+          });
+          if (logBatch.length >= BATCH_SIZE) {
+            flushLogBatch().catch((err) => log.warn({ err }, "mid-stream log batch flush failed"));
+          }
+        },
+        firstMessageTimeoutMs: FIRST_MESSAGE_TIMEOUT_MS,
+      }),
+      stageTimeoutPromise,
+    ]).catch((err: unknown) => {
+      // When the wall-clock timeout fires before consumeAgentStream's own
+      // firstMessageTimeoutMs guard, the internal iterator is still pending.
+      // Signal it to release any SDK network connections or event listeners.
+      // Best-effort: if the generator is truly blocked on a never-resolving
+      // Promise, .return() won't unblock it, but the GC will eventually
+      // collect it once this run's references are dropped.
+      capturedMessagesIterator?.return?.()?.catch(() => {});
+      throw err;
+    }).finally(() => {
+      // Always clear the wall-clock timer whether the stream succeeds, stalls,
+      // or throws any other error — prevents the timer from dangling after the
+      // stage exits the happy path.
+      if (stageTimeoutTimer) clearTimeout(stageTimeoutTimer);
     });
 
     // Flush remaining log entries

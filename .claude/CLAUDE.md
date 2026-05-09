@@ -28,6 +28,7 @@ pnpm monorepo with 4 packages:
 - Structured logging: pino via `createLogger()` — never use `console.log/error`
 - Shared helpers: `consumeAgentStream`, `parseJsonBlock`, `gitExecSafe`, `failPipeline`
 - Agent SDK stream messages: `type="assistant"` with text in `message.message` (no-tool sessions) or `message.content` (tool sessions) — `consumeAgentStream` handles both
+- **Pre-stream stall (BEC-183):** `consumeAgentStream` throws `StagePreStreamStalledError` if no message arrives within `firstMessageTimeoutMs` (default 5 min). `executor.ts` adds a second wall-clock cap via `Promise.race` (`WALL_CLOCK_STAGE_TIMEOUT_MS`: 60 min for implement, 30 min for others). Both paths result in `stage_runs.status = 'failed'`.
 - **Linear SDK lazy relations:** All relation fields (`.team`, `.state`, `.project`) are Promise-like — always `await` them. `.labels` is a **method** — call `await issue.labels()`. Sync access returns `undefined` silently.
 - **PR body generation**: `generatePRDescription()` in `pipeline/pr-description.ts` builds markdown body for all auto-generated PRs
 

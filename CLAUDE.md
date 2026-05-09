@@ -102,6 +102,12 @@ It is a pnpm monorepo with 4 packages:
   - `message.content` — tool-using sessions (executor stages)
   - `message.message` — no-tool sessions (PM Agent Haiku calls with `allowedTools: []`)
 - Always use `consumeAgentStream` — never hand-roll stream iteration
+- **Pre-stream stall protection (BEC-183):** Two-layer defence against hung stages:
+  1. `firstMessageTimeoutMs` (default 5 min) in `consumeAgentStream` — throws `StagePreStreamStalledError` if no message arrives before the deadline. Covers SDK hangs before the first message (auth-retry loop, MCP init failure, never-resolving iterator).
+  2. `WALL_CLOCK_STAGE_TIMEOUT_MS` in `executor.ts` — per-stage hard cap (`implement`: 60 min, others: 30 min) via `Promise.race`. Second layer in case the first-message timer somehow fails to fire.
+  Both paths throw `StagePreStreamStalledError` → caught in `executeStage` catch block → `stage_runs.status = 'failed'`, run completes normally.
+- **`StageStalledError`** — mid-stream silence (after ≥1 message, no output tokens or turns) for `progressTimeoutMs` (default 30 min). See urateam#122.
+- **`StagePreStreamStalledError`** — pre-stream hang (no first message) within `firstMessageTimeoutMs` (default 5 min). See BEC-183. Exported from `executor/index.ts`.
 
 ### Notifiers
 - Linear: issue comments + state transitions (In Progress → In Review → Done)
