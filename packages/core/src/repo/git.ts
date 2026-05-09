@@ -877,6 +877,43 @@ export function branchName(issueId: string, slug: string): string {
 }
 
 /**
+ * BEC-180: run `git worktree prune` only on entries under `baseDir` that have
+ * a `.git` entry (file or directory). Sibling dirs that aren't git repos —
+ * notably the BEC-174 `.agent-sweep/` parent — are silently skipped instead of
+ * producing noisy `level: 50` ERROR logs from `git worktree`'s "not a git
+ * repository" complaint.
+ *
+ * Returns the names that were pruned vs skipped (both relative to baseDir),
+ * which makes the function trivially testable.
+ */
+export async function pruneWorktreesInRepoDirs(
+  baseDir: string,
+): Promise<{ pruned: string[]; skipped: string[] }> {
+  let entries: string[];
+  try {
+    entries = await readdir(baseDir);
+  } catch {
+    return { pruned: [], skipped: [] };
+  }
+
+  const pruned: string[] = [];
+  const skipped: string[] = [];
+  for (const entry of entries) {
+    const dir = join(baseDir, entry);
+    try {
+      // .git can be a directory (regular clone) OR a file (worktree /
+      // submodule pointer). `access` succeeds for either.
+      await access(join(dir, ".git"));
+      await gitExecSafe(["worktree", "prune"], dir);
+      pruned.push(entry);
+    } catch {
+      skipped.push(entry);
+    }
+  }
+  return { pruned, skipped };
+}
+
+/**
  * Scan baseDir for run directories (each containing a "worktree" sub-dir) that
  * are older than ttlHours and remove them.  Returns the list of paths removed.
  *
