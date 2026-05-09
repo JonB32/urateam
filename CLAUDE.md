@@ -84,6 +84,7 @@ It is a pnpm monorepo with 3 packages:
 - Shared helpers: `call-claude.ts` (Haiku factory), `slack-helpers.ts` (postSlackMessage), `linear-helpers.ts` (resolveWorkflowStates), `approval-helpers.ts`
 - `parseJsonObject()` in `agent-stream.ts` for bare JSON extraction from Claude responses
 - **Key design:** PM Agent's promote action moves issues in Linear (triggering webhooks). The `startTodoIssues` action directly calls `runner.start()` as a fallback for missed webhooks.
+- **Circuit breaker (BEC-161):** `promoteReadyIssues` and `startTodoIssues` pre-fetch failure counts for all candidates in a single DB round-trip via `batchCountConsecutiveFailures(db, issueIds)` (BEC-181 batch optimization; avoids N+1 per candidate). If the count ≥ `maxConsecutiveFailures` (default 3), the issue is skipped and a `pm.skipped_circuit_breaker` audit event is written. This prevents the recover-stuck → promote → start-todo → fail doom loop. To verify the breaker is active, query `audit_events WHERE event_type = 'pm.skipped_circuit_breaker'`. To disable, set `maxConsecutiveFailures: 0` in the PM config. See also: `docs/superpowers/runbooks/2026-05-08-bec-181-circuit-breaker-verification.md`.
 
 ### Linear SDK Lazy Relations
 - **All relation fields** on Linear SDK objects (`.team`, `.state`, `.project`, `.assignee`, etc.) are **lazy Promise-like** — sync access like `issue.team?.id` returns `undefined`

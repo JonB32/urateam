@@ -4,7 +4,8 @@ import { resolveWorkflowStates } from "../linear-helpers.js";
 import { resolvePipeline } from "../../pipeline/router.js";
 import { createLogger } from "../../logger.js";
 import type { AnyDb } from "../../db/client.js";
-import { logAuditEventUnchecked, pmPromotedEvent } from "../../audit/index.js";
+import { logAuditEventUnchecked, pmPromotedEvent, pmSkippedCircuitBreakerEvent } from "../../audit/index.js";
+import { batchCountConsecutiveFailures } from "./db-queries.js";
 
 const log = createLogger({ component: "PmAgent:promote" });
 
@@ -36,10 +37,11 @@ export interface PromoteInput {
    */
   maxConsecutiveFailures?: number;
   /**
-   * BEC-161: returns the number of consecutive failed runs for an issue.
-   * Production wires this to `countConsecutiveFailures(db, issueId)` from
-   * `db-queries.ts`; tests inject a stub. Required when
-   * `maxConsecutiveFailures` is set.
+   * BEC-161/BEC-181: returns the number of consecutive failed runs for an
+   * issue. Tests inject a stub here (avoids real DB rows). Production omits
+   * this so `batchCountConsecutiveFailures` is used instead (single DB
+   * round-trip for all candidates). Either `getFailureCount` or `db` must be
+   * set when `maxConsecutiveFailures` is configured.
    */
   getFailureCount?: (issueId: string) => Promise<number>;
 }
@@ -56,9 +58,9 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
     );
   }
 
-  if (input.maxConsecutiveFailures !== undefined && !input.getFailureCount) {
+  if (input.maxConsecutiveFailures !== undefined && !input.getFailureCount && !input.db) {
     throw new Error(
-      "promoteReadyIssues: maxConsecutiveFailures requires getFailureCount to be set",
+      "promoteReadyIssues: maxConsecutiveFailures requires either getFailureCount or db to be set",
     );
   }
 
@@ -83,6 +85,16 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
     if (key.endsWith(":Todo")) {
       todoStates.set(key.split(":")[0], id);
     }
+  }
+
+  // BEC-181: pre-fetch failure counts for all candidates in a single DB
+  // round-trip to avoid an N+1 query pattern in the per-candidate loop.
+  // Uses getFailureCount (test-injectable stub) when provided; otherwise
+  // falls back to batchCountConsecutiveFailures for a single DB round-trip.
+  let prefetchedFailureCounts: Map<string, number> | null = null;
+  if (input.maxConsecutiveFailures !== undefined && !input.getFailureCount && input.db) {
+    const candidateIds = candidates.map((c: any) => c.identifier as string);
+    prefetchedFailureCounts = await batchCountConsecutiveFailures(input.db, candidateIds);
   }
 
   let promotedCount = 0;
@@ -116,12 +128,25 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
     }
 
     if (input.maxConsecutiveFailures !== undefined) {
-      const failureCount = await input.getFailureCount!(candidate.identifier);
+      const failureCount = input.getFailureCount
+        ? await input.getFailureCount(candidate.identifier)
+        : (prefetchedFailureCounts!.get(candidate.identifier) ?? 0);
       if (failureCount >= input.maxConsecutiveFailures) {
         log.warn(
           { issueId: candidate.identifier, failureCount, threshold: input.maxConsecutiveFailures },
           "skipped promote: circuit-breaker engaged (too many consecutive failures)",
         );
+        if (input.db) {
+          void logAuditEventUnchecked(
+            input.db,
+            pmSkippedCircuitBreakerEvent({
+              issueId: candidate.identifier,
+              failureCount,
+              threshold: input.maxConsecutiveFailures,
+              action: "promote",
+            }),
+          );
+        }
         results.push({
           issueId: candidate.identifier,
           issueTitle: candidate.title,

@@ -5,15 +5,32 @@
  * runs for the issue since the last successfully-completed run (or since first
  * run if none completed). Promote/start-todo use this to short-circuit
  * candidates that have failed N+ times in a row.
+ *
+ * batchCountConsecutiveFailures(db, issueIds) is the batch variant introduced
+ * in BEC-181 to avoid the N+1 query pattern when checking multiple candidates
+ * in the same scheduler tick.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { randomBytes } from "node:crypto";
 import { unlinkSync } from "node:fs";
 import { createDb, pipelineRuns } from "../db/index.js";
-import { countConsecutiveFailures } from "../pm/actions/db-queries.js";
+import { countConsecutiveFailures, batchCountConsecutiveFailures } from "../pm/actions/db-queries.js";
 
-function tmpDbPath(): string {
-  return `/tmp/laf-cb-test-${randomBytes(8).toString("hex")}.sqlite`;
+function tmpDbPath(prefix = "laf-cb-test"): string {
+  return `/tmp/${prefix}-${randomBytes(8).toString("hex")}.sqlite`;
+}
+
+function makeRun(id: string, issueId: string, status: string, startedAt: Date, completedAt?: Date) {
+  return {
+    id,
+    issueId,
+    issueTitle: `Issue ${issueId}`,
+    pipelineKey: "default",
+    repoUrl: "https://github.com/org/repo",
+    status,
+    startedAt,
+    completedAt,
+  };
 }
 
 describe("countConsecutiveFailures", () => {
@@ -33,19 +50,6 @@ describe("countConsecutiveFailures", () => {
     }
     paths.length = 0;
   });
-
-  function makeRun(id: string, issueId: string, status: string, startedAt: Date, completedAt?: Date) {
-    return {
-      id,
-      issueId,
-      issueTitle: `Issue ${issueId}`,
-      pipelineKey: "default",
-      repoUrl: "https://github.com/org/repo",
-      status,
-      startedAt,
-      completedAt,
-    };
-  }
 
   it("returns 0 when issue has no runs", async () => {
     const db = await makeDb() as any;
@@ -107,5 +111,80 @@ describe("countConsecutiveFailures", () => {
       makeRun("r3", "ISSUE-F", "running", new Date(t0.getTime() + 10_000)),
     ]);
     expect(await countConsecutiveFailures(db, "ISSUE-F")).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// batchCountConsecutiveFailures — BEC-181 batch variant
+// ---------------------------------------------------------------------------
+
+describe("batchCountConsecutiveFailures", () => {
+  const paths: string[] = [];
+
+  async function makeDb() {
+    const path = tmpDbPath("laf-cb-batch-test");
+    paths.push(path);
+    return createDb({ driver: "sqlite", connectionString: path });
+  }
+
+  afterEach(() => {
+    for (const p of paths) {
+      for (const suffix of ["", "-wal", "-shm"]) {
+        try { unlinkSync(p + suffix); } catch { /* ignore */ }
+      }
+    }
+    paths.length = 0;
+  });
+
+  it("returns empty map for empty input", async () => {
+    const db = await makeDb() as any;
+    const result = await batchCountConsecutiveFailures(db, []);
+    expect(result.size).toBe(0);
+  });
+
+  it("returns 0 for issues with no runs", async () => {
+    const db = await makeDb() as any;
+    const result = await batchCountConsecutiveFailures(db, ["ISSUE-NEW"]);
+    expect(result.get("ISSUE-NEW")).toBe(0);
+  });
+
+  it("returns correct counts for multiple issues in one query", async () => {
+    const db = await makeDb() as any;
+    const t0 = new Date(Date.now() - 30 * 60_000);
+    await db.insert(pipelineRuns).values([
+      // ISSUE-X: 3 consecutive failures
+      makeRun("r1", "ISSUE-X", "failed",    new Date(t0.getTime() + 0),       new Date(t0.getTime() + 1_000)),
+      makeRun("r2", "ISSUE-X", "failed",    new Date(t0.getTime() + 5_000),   new Date(t0.getTime() + 6_000)),
+      makeRun("r3", "ISSUE-X", "failed",    new Date(t0.getTime() + 10_000),  new Date(t0.getTime() + 11_000)),
+      // ISSUE-Y: 1 failure after a completion
+      makeRun("r4", "ISSUE-Y", "failed",    new Date(t0.getTime() + 0),       new Date(t0.getTime() + 1_000)),
+      makeRun("r5", "ISSUE-Y", "completed", new Date(t0.getTime() + 5_000),   new Date(t0.getTime() + 6_000)),
+      makeRun("r6", "ISSUE-Y", "failed",    new Date(t0.getTime() + 10_000),  new Date(t0.getTime() + 11_000)),
+      // ISSUE-Z: most recent run is completed
+      makeRun("r7", "ISSUE-Z", "failed",    new Date(t0.getTime() + 0),       new Date(t0.getTime() + 1_000)),
+      makeRun("r8", "ISSUE-Z", "completed", new Date(t0.getTime() + 5_000),   new Date(t0.getTime() + 6_000)),
+    ]);
+
+    const result = await batchCountConsecutiveFailures(db, ["ISSUE-X", "ISSUE-Y", "ISSUE-Z"]);
+    expect(result.get("ISSUE-X")).toBe(3);
+    expect(result.get("ISSUE-Y")).toBe(1);
+    expect(result.get("ISSUE-Z")).toBe(0);
+  });
+
+  it("matches countConsecutiveFailures for each issue individually", async () => {
+    const db = await makeDb() as any;
+    const t0 = new Date(Date.now() - 30 * 60_000);
+    await db.insert(pipelineRuns).values([
+      makeRun("r1", "ISSUE-A", "failed",    new Date(t0.getTime() + 0),       new Date(t0.getTime() + 1_000)),
+      makeRun("r2", "ISSUE-A", "failed",    new Date(t0.getTime() + 5_000),   new Date(t0.getTime() + 6_000)),
+      makeRun("r3", "ISSUE-B", "completed", new Date(t0.getTime() + 0),       new Date(t0.getTime() + 1_000)),
+    ]);
+
+    const batch = await batchCountConsecutiveFailures(db, ["ISSUE-A", "ISSUE-B"]);
+    const singleA = await countConsecutiveFailures(db, "ISSUE-A");
+    const singleB = await countConsecutiveFailures(db, "ISSUE-B");
+
+    expect(batch.get("ISSUE-A")).toBe(singleA);
+    expect(batch.get("ISSUE-B")).toBe(singleB);
   });
 });

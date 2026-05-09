@@ -77,3 +77,57 @@ export async function countConsecutiveFailures(
   }
   return count;
 }
+
+/**
+ * BEC-181: batch variant of `countConsecutiveFailures` — fetches terminal
+ * pipeline runs for all specified issue IDs in a single DB round-trip, then
+ * computes consecutive-failure counts in memory.
+ *
+ * Use this in promote / start-todo to avoid an N+1 query pattern when
+ * checking multiple candidates in the same tick.  The returned Map contains
+ * an entry for every issueId in the input list (defaulting to 0 for issues
+ * with no terminal runs).
+ */
+export async function batchCountConsecutiveFailures(
+  db: AnyDb,
+  issueIds: string[],
+): Promise<Map<string, number>> {
+  if (issueIds.length === 0) return new Map();
+
+  const rows = await db
+    .select({ issueId: pipelineRuns.issueId, status: pipelineRuns.status })
+    .from(pipelineRuns)
+    .where(
+      and(
+        inArray(pipelineRuns.issueId, issueIds),
+        inArray(pipelineRuns.status, ["completed", "failed"]),
+      ),
+    )
+    // Same ordering as countConsecutiveFailures: most-recent first, with id
+    // as a stable tie-breaker for runs sharing the same startedAt timestamp.
+    .orderBy(desc(pipelineRuns.startedAt), desc(pipelineRuns.id));
+
+  // Group rows by issueId preserving the DESC order from the DB query.
+  const byIssue = new Map<string, Array<{ status: string }>>();
+  for (const row of rows as Array<{ issueId: string; status: string }>) {
+    const bucket = byIssue.get(row.issueId);
+    if (bucket) {
+      bucket.push({ status: row.status });
+    } else {
+      byIssue.set(row.issueId, [{ status: row.status }]);
+    }
+  }
+
+  // Count leading "failed" rows for each issue (same logic as countConsecutiveFailures).
+  const result = new Map<string, number>();
+  for (const issueId of issueIds) {
+    const issueRows = byIssue.get(issueId) ?? [];
+    let count = 0;
+    for (const row of issueRows) {
+      if (row.status === "failed") count++;
+      else break;
+    }
+    result.set(issueId, count);
+  }
+  return result;
+}

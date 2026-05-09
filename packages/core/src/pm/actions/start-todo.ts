@@ -1,11 +1,12 @@
 import type { AnyDb } from "../../db/client.js";
-import { getActiveAndRecentIssueIds } from "./db-queries.js";
+import { getActiveAndRecentIssueIds, batchCountConsecutiveFailures } from "./db-queries.js";
 import { resolvePipeline } from "../../pipeline/router.js";
 import { mapIssueToSchema } from "../../executor/prompt/schema-mapper.js";
 import type { PipelineConfig, RepoConfig } from "../../types.js";
 import type { PipelineRunner, LinearIssue } from "../../pipeline/runner.js";
 import type { BudgetEvaluation } from "../types.js";
 import { createLogger } from "../../logger.js";
+import { logAuditEventUnchecked, pmSkippedCircuitBreakerEvent } from "../../audit/index.js";
 
 const log = createLogger({ component: "PmAgent:startTodo" });
 
@@ -27,9 +28,10 @@ export interface StartTodoInput {
    */
   maxConsecutiveFailures?: number;
   /**
-   * BEC-161: returns the number of consecutive failed runs for an issue.
-   * Production wires this to `countConsecutiveFailures(db, issueId)`.
-   * Required when `maxConsecutiveFailures` is set.
+   * BEC-161/BEC-181: returns the number of consecutive failed runs for an
+   * issue. Tests inject a stub here (avoids real DB rows). Production omits
+   * this so `batchCountConsecutiveFailures` is used instead (single DB
+   * round-trip for all candidates via the required `db` field).
    */
   getFailureCount?: (issueId: string) => Promise<number>;
 }
@@ -60,6 +62,9 @@ export async function startTodoIssues(
     );
     return [];
   }
+
+  // BEC-161/BEC-181: no additional validation needed — batchCountConsecutiveFailures
+  // uses the required `db` field directly, so getFailureCount is not required.
 
   // 1. Query Linear for all "Todo" issues across configured teams
   const issuesResponse = await linearClient.issues({
@@ -114,30 +119,47 @@ export async function startTodoIssues(
   const toProcess = filteredOrphaned.slice(0, maxPerTick);
   const results: StartTodoResult[] = [];
 
+  // BEC-181: pre-fetch failure counts for all candidates in one DB round-trip
+  // to avoid an N+1 query pattern (one query per candidate in the loop below).
+  // Uses getFailureCount when provided (test-injectable stub); otherwise falls
+  // back to batchCountConsecutiveFailures for a single DB round-trip.
+  let prefetchedFailureCounts: Map<string, number> | null = null;
+  if (input.maxConsecutiveFailures !== undefined && !input.getFailureCount) {
+    const candidateIds = toProcess.map((i: any) => i.identifier as string);
+    prefetchedFailureCounts = await batchCountConsecutiveFailures(db, candidateIds);
+  }
+
   for (const issue of toProcess) {
     // BEC-161: circuit breaker — fire FIRST, before any Linear SDK round-trips
     // (issue.team / issue.project / issue.labels each cost an API call). For a
     // ticket that's been doom-looping, this saves three SDK calls per tick per
     // candidate. issue.identifier is already on the result of the initial
     // Todo-issues query, so no extra round-trip is needed for the count.
+    // getFailureCount presence is validated eagerly above, before this loop.
     if (input.maxConsecutiveFailures !== undefined) {
-      if (!input.getFailureCount) {
-        throw new Error(
-          "startTodoIssues: maxConsecutiveFailures requires getFailureCount to be set",
-        );
-      }
-      const failureCount = await input.getFailureCount(issue.identifier);
+      const failureCount = input.getFailureCount
+        ? await input.getFailureCount(issue.identifier)
+        : (prefetchedFailureCounts!.get(issue.identifier) ?? 0);
       if (failureCount >= input.maxConsecutiveFailures) {
+        log.warn(
+          { identifier: issue.identifier, failureCount, threshold: input.maxConsecutiveFailures },
+          "circuit-breaker engaged — skipping start",
+        );
+        void logAuditEventUnchecked(
+          db,
+          pmSkippedCircuitBreakerEvent({
+            issueId: issue.identifier,
+            failureCount,
+            threshold: input.maxConsecutiveFailures,
+            action: "start-todo",
+          }),
+        );
         results.push({
           identifier: issue.identifier,
           title: issue.title,
           started: false,
           reason: `circuit-breaker: ${failureCount} consecutive failed runs (threshold ${input.maxConsecutiveFailures})`,
         });
-        log.warn(
-          { identifier: issue.identifier, failureCount, threshold: input.maxConsecutiveFailures },
-          "circuit-breaker engaged — skipping start",
-        );
         continue;
       }
     }
@@ -219,8 +241,11 @@ export async function startTodoIssues(
     }
   }
 
-  const started = results.filter((r) => r.started).length;
-  const skipped = results.filter((r) => !r.started);
+  let started = 0;
+  const skipped: StartTodoResult[] = [];
+  for (const r of results) {
+    r.started ? started++ : skipped.push(r);
+  }
   if (skipped.length > 0) {
     log.info(
       { started, skipped: skipped.map((s) => ({ id: s.identifier, reason: s.reason })) },
