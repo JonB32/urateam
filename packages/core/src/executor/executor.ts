@@ -8,6 +8,7 @@ import type {
   StageResult,
   ReviewFeedbackContext,
   MergeConflictContext,
+  AgentProfile,
 } from "../types.js";
 import type { Db, AnyDb } from "../db/client.js";
 import { stageRuns, agentLogs } from "../db/schema.js";
@@ -21,6 +22,24 @@ import type { DevcontainerSession } from "../repo/devcontainer.js";
 import { createLogger } from "../logger.js";
 import { consumeAgentStream, type StreamMessage } from "./agent-stream.js";
 import { isClaudeAuthValid } from "./auth-check.js";
+
+/**
+ * BEC-182: review-feedback runs are bounded — N comments, push, done.
+ * Override the implement profile's maxTurns / maxInputTokens to prevent
+ * spelunking. Keep tools and model from the base profile.
+ *
+ * Exported as a pure function so it can be tested without mocking the Agent SDK.
+ */
+export function applyReviewFeedbackProfileOverride(
+  profile: AgentProfile,
+  stage: StageType,
+  hasReviewFeedback: boolean,
+): AgentProfile {
+  if (hasReviewFeedback && stage === "implement") {
+    return { ...profile, maxTurns: 30, maxInputTokens: 60_000 };
+  }
+  return profile;
+}
 
 export interface ExecuteStageContext {
   runId: string;
@@ -71,6 +90,12 @@ export async function executeStage(
   if (!profile) {
     throw new Error(`No agent profile for stage: ${stage}`);
   }
+
+  const effectiveProfile = applyReviewFeedbackProfileOverride(
+    profile,
+    stage,
+    !!context.reviewFeedback,
+  );
 
   // Bind runId, issueId and stage to every log line in this execution
   const log = createLogger({ component: "Executor", runId, issueId, stage });
@@ -144,12 +169,12 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
     const messages = query({
       prompt,
       options: {
-        allowedTools: profile.tools,
-        maxTurns: profile.maxTurns,
+        allowedTools: effectiveProfile.tools,
+        maxTurns: effectiveProfile.maxTurns,
         cwd: workdir,
         ...buildStagePermissionOptions(stage),
-        ...(context.stageModels?.[stage] ?? profile.model
-          ? { model: context.stageModels?.[stage] ?? profile.model! }
+        ...(context.stageModels?.[stage] ?? effectiveProfile.model
+          ? { model: context.stageModels?.[stage] ?? effectiveProfile.model! }
           : {}),
         ...(mcpServerNames.length > 0 ? { mcpServers: tooling.mcpServers } : {}),
         ...(tooling.plugins.length > 0 ? { plugins: tooling.plugins } : {}),

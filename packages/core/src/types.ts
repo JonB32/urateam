@@ -366,6 +366,12 @@ export interface PipelineRun {
    * DB) carry the count forward.
    */
   stageRetries?: Record<string, number>;
+  /**
+   * The type of run: "standard" for normal issue pipelines, "review-feedback"
+   * for runs triggered by PR review comments. Mirrors the DB `run_type` column.
+   * Used to skip RALPH for review-feedback runs (BEC-182).
+   */
+  runType?: string | null;
 }
 
 // --- Pipeline Result / Error ---
