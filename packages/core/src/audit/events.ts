@@ -516,3 +516,22 @@ export function reviewFanoutFallbackUsedEvent(args: {
     },
   });
 }
+
+export function reviewModelLowOutputRatioEvent(args: {
+  modelId: string;
+  outputRatio: number;
+  runs: number;
+  threshold: number;
+}): AuditEvent {
+  return base({
+    eventType: "review.model_low_output_ratio",
+    actor: "system",
+    actorType: "system",
+    payload: {
+      modelId: args.modelId,
+      outputRatio: args.outputRatio,
+      runs: args.runs,
+      threshold: args.threshold,
+    },
+  });
+}
