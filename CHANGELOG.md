@@ -17,14 +17,26 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+## [0.1.41] — 2026-05-09
+
+Bumps:
+- `@urateam/core`: 0.1.26 → 0.1.27
+- `@urateam/cli`: 0.1.28 → 0.1.29
+- `@urateam/dashboard`: 0.1.26 → 0.1.27
+- `create-urateam`: 0.1.29 → 0.1.30
+
 ### Added (OSS+)
-- **BEC-168** — OpenRouter fanout per-model PR comments are now suppressed when a model returns empty findings and no raw output (i.e. the model legitimately found nothing to flag). Previously, trivial PRs received one "🔎 Review by … — No findings." comment per fanout model, adding noise with zero signal. Comments are still posted when: findings are present, the model emitted unparseable prose (BEC-158 rawOutput fallback), or the model call failed. `PostFanoutResult` gains a `suppressedEmptyCount` field so callers can log how many comments were suppressed per PR. Audit events (`review.fanout_model_completed`) continue to fire for all models regardless of suppression.
-- **BEC-170** — PM Agent env-var pause mechanism for no-Slack incident response. Setting `PM_AGENT_PAUSED=true` causes `isPmPaused()` to return `true` on every PM scheduler tick, preventing `promote`, `start-todo`, and `recover-stuck` from running — without stopping the container (dashboard and RM scheduler continue). OR'd with the existing Slack `/pm pause` path; either source can pause the agent independently. A container restart is required to toggle the env-var path (env vars are read at each tick invocation). Boot log emits `PM_AGENT_PAUSED=true` at container startup so operators have an observable signal in `docker logs`. Intended for incident-response use cases where Slack is unavailable or the wrong channel.
-- **BEC-171** — `validateReviewModels()` validates every model ID in `REVIEW_MODELS` against the public OpenRouter catalog at startup (`ura start` / `ura dev`). Unknown IDs emit a `log.warn` with up to 3 closest-name suggestions so operators catch typos before they burn API budget on silent 404s. If the catalog endpoint is unreachable a debug log is emitted and startup continues normally — the check is never a blocking dependency. Surfaced from BEC-138 dogfood (PR #157 + PR #172 fanout 404s on `anthropic/claude-3.5-sonnet`).
+- **BEC-168** ([#196](https://github.com/JonB32/urateam/pull/196)) — OpenRouter fanout per-model PR comments are now suppressed when a model returns empty findings and no raw output (i.e. the model legitimately found nothing to flag). Previously, trivial PRs received one "🔎 Review by … — No findings." comment per fanout model. Comments are still posted when: findings are present, the model emitted unparseable prose (BEC-158 rawOutput fallback), or the model call failed. `PostFanoutResult` gains a `suppressedEmptyCount` field. Audit events (`review.fanout_model_completed`) continue to fire for all models regardless of suppression.
+- **BEC-169** ([#195](https://github.com/JonB32/urateam/pull/195)) — `findLoopingDeepReviews` and the package's main entry point `observeRunPatterns` in `@urateam/observers`. The looping-deep-review pattern now excludes runs that completed AND produced a PR. Driven by BEC-152's run `AUEHrV8TPvNF1PHB96mVt` hitting 77 turns legitimately via deep-review fanout and being misflagged.
+- **BEC-170** ([#194](https://github.com/JonB32/urateam/pull/194)) — PM Agent env-var pause mechanism for no-Slack incident response. `PM_AGENT_PAUSED=true` causes `isPmPaused()` to return true on every PM tick, preventing promote / start-todo / recover-stuck — without stopping the container. OR'd with the existing Slack `/pm pause` path. Boot log emits the value so operators have an observable signal in `docker logs`.
+- **BEC-171** ([#192](https://github.com/JonB32/urateam/pull/192)) — `validateReviewModels()` validates every model ID in `REVIEW_MODELS` against the public OpenRouter catalog at `ura start` / `ura dev` startup. Unknown IDs emit a `log.warn` with up to 3 Levenshtein-closest suggestions. Catalog unreachable → debug log only, never blocks startup. Surfaced from BEC-138 dogfood (PR #157 / #172 fanout 404s on `anthropic/claude-3.5-sonnet`).
+- **BEC-172** ([#190](https://github.com/JonB32/urateam/pull/190)) — New `@urateam/observers` workspace package: SQLite-backed dedup store + first-tick seeding so a fresh deploy doesn't batch-flood GitHub Issues with every historical pattern from the 24h lookback. `QUALITY_OBSERVER_FIRST_TICK_FILE=true` bypasses for CI / deliberate-reset.
 
 ### Fixed (OSS+)
-- **BEC-167** — Review-stage prompt now instructs the agent to emit a `HandoffArtifact` JSON envelope (with `reviewFindings` nested inside `context`) instead of a bare findings array. Previously the fast-path parser (`parseHandoffArtifact`) always fell through to the slow-path soup gate, producing the placeholder summary "Stage review completed — agent output was not parseable prose; see Changes for files modified" in PR descriptions for trivial no-finding reviews. The fix is a prompt change only — no schema or parser changes needed. Downstream consumers (`reviewFindings`-based review-fix loop, RALPH gate, deep-review fanout) are unaffected.
+- **BEC-167** ([#197](https://github.com/JonB32/urateam/pull/197)) — Review-stage prompt now emits a `HandoffArtifact` JSON envelope with `reviewFindings` nested inside `context`. Eliminates the "Stage review completed — agent output was not parseable prose" placeholder summary on trivial no-finding PRs. Prompt change only; downstream consumers unchanged.
 
+### Deploy
+- **BEC-137** ([#233](https://github.com/JonB32/urateam/pull/233)) — `quality-observer` sidecar service definition added to `docker-compose.dogfood.yml`. Build context defaults to `../urateam-quality-observer` (sibling clone); shares dogfood's sqlite + Claude OAuth volumes read-only. Operator-specific bits (Caddyfile, gh-app.pem, port mappings) remain on the host.
 ## [0.1.40] — 2026-05-09
 
 Bumps:
