@@ -170,7 +170,7 @@ async function assertPromoteBreakerSkip(opts: {
   expect(auditRows[0].issueId).toBe(opts.issueId);
   expect(JSON.parse(auditRows[0].payload).failureCount).toBe(opts.failureCount);
   expect(JSON.parse(auditRows[0].payload).threshold).toBe(opts.threshold);
-  expect(JSON.parse(auditRows[0].payload).action).toBe("promote");
+  expect(JSON.parse(auditRows[0].payload).source).toBe("promote");
 }
 
 describe("BEC-181 Part 2: promoteReadyIssues circuit-breaker skip (working correctly)", () => {
@@ -266,7 +266,7 @@ describe("BEC-181 Part 3: startTodoIssues circuit-breaker skip (working correctl
     expect(auditRows[0].issueId).toBe("BEC-147");
     expect(JSON.parse(auditRows[0].payload).failureCount).toBe(4);
     expect(JSON.parse(auditRows[0].payload).threshold).toBe(3);
-    expect(JSON.parse(auditRows[0].payload).action).toBe("start-todo");
+    expect(JSON.parse(auditRows[0].payload).source).toBe("start-todo");
   });
 });
 

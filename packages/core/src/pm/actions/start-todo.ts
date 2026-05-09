@@ -151,7 +151,7 @@ export async function startTodoIssues(
             issueId: issue.identifier,
             failureCount,
             threshold: input.maxConsecutiveFailures,
-            action: "start-todo",
+            source: "start-todo",
           }),
         );
         results.push({

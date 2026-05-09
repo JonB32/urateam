@@ -143,7 +143,7 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
               issueId: candidate.identifier,
               failureCount,
               threshold: input.maxConsecutiveFailures,
-              action: "promote",
+              source: "promote",
             }),
           );
         }
