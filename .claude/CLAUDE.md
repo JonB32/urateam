@@ -50,6 +50,12 @@ Autonomous backlog manager in `packages/core/src/pm/`:
   - Regular PR comments (`issue_comment` on PRs) → review-feedback pipeline (supports `@ateam` trigger keyword)
   - CI/status events (`check_suite`, `status`, `pull_request` labeled/synchronize/opened) → automerge evaluation
 
+## Review-feedback runs (BEC-182)
+- Triggered by PR review comments via GitHub webhook → `startFeedback()` → `run.runType = "review-feedback"`
+- **Bounded profile**: `REVIEW_FEEDBACK_IMPLEMENT_OVERRIDES` in `executor/profiles.ts` caps the implement stage to `maxTurns: 30` / `maxInputTokens: 60_000` (vs standard 100/100k). Applied by `applyReviewFeedbackProfileOverride()` in `executor/executor.ts`.
+- **Tighter prompt**: `implementTemplate` in `executor/prompt/templates.ts` routes to a focused "address only listed comments" path — includes reading the diff first (`git diff origin/<branch>...HEAD`), explicit "do NOT refactor adjacent code" scope, conditional build/test (skip for text-only changes), and "stop and report" on failure.
+- **RALPH skipped**: `computeEffectiveRalphIterations` in `pipeline/runner-ralph-helpers.ts` returns 0 when `run.runType === "review-feedback"` — RALPH re-evaluates against original ACs which is wrong for comment-bounded work.
+
 ## Auto-merge
 - Configurable per pipeline: `autoMerge`, `autoMergeMaxLines` (default 200), `autoMergeExcludePatterns` (globs)
 - Safety gates: no draft PRs, no blocking findings, diff size limit, file exclusion patterns

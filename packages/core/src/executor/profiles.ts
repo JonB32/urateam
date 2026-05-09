@@ -74,6 +74,19 @@ export const DEFAULT_AGENT_PROFILES: Record<string, AgentProfile> = deepFreeze({
 });
 
 /**
+ * BEC-182: Review-feedback runs (triggered by PR review comments) are bounded
+ * in scope — N specific comments, push to existing branch, done. The standard
+ * implement profile (maxTurns: 100, maxInputTokens: 100k) is over-sized for
+ * this work and invites spelunking. This constant defines tighter caps that
+ * are merged on top of the implement profile at execution time by
+ * `applyReviewFeedbackProfileOverride` in executor.ts.
+ */
+export const REVIEW_FEEDBACK_IMPLEMENT_OVERRIDES = deepFreeze({
+  maxTurns: 30,
+  maxInputTokens: 60_000,
+});
+
+/**
  * Backward-compat re-export. Prefer `getAgentProfiles()` so per-process
  * env-var overrides are honored.
  *

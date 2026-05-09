@@ -1,4 +1,4 @@
-export { agentProfiles, getAgentProfiles, DEFAULT_AGENT_PROFILES } from "./profiles.js";
+export { agentProfiles, getAgentProfiles, DEFAULT_AGENT_PROFILES, REVIEW_FEEDBACK_IMPLEMENT_OVERRIDES } from "./profiles.js";
 export {
   checkTestQuality,
   analyzeTestFile,

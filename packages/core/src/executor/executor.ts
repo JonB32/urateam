@@ -12,7 +12,7 @@ import type {
 } from "../types.js";
 import type { Db, AnyDb } from "../db/client.js";
 import { stageRuns, agentLogs } from "../db/schema.js";
-import { getAgentProfiles } from "./profiles.js";
+import { getAgentProfiles, REVIEW_FEEDBACK_IMPLEMENT_OVERRIDES } from "./profiles.js";
 import { assemblePrompt } from "./prompt/assembler.js";
 import { extractHandoff } from "./extract-handoff.js";
 import { buildStagePermissionOptions } from "./permissions.js";
@@ -36,7 +36,7 @@ export function applyReviewFeedbackProfileOverride(
   hasReviewFeedback: boolean,
 ): AgentProfile {
   if (hasReviewFeedback && stage === "implement") {
-    return { ...profile, maxTurns: 30, maxInputTokens: 60_000 };
+    return { ...profile, ...REVIEW_FEEDBACK_IMPLEMENT_OVERRIDES };
   }
   return profile;
 }
