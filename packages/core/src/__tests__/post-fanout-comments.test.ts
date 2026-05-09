@@ -152,4 +152,69 @@ describe("postFanoutCommentsToPR", () => {
     ]);
     expect(result.fallbackCount).toBe(1);
   });
+
+  // BEC-168: suppress per-model PR comments when findings are empty AND no rawOutput
+  it("suppresses empty-findings comments when findings=[] and no rawOutput; posts others", async () => {
+    addPRComment.mockResolvedValue(undefined);
+    const { postFanoutCommentsToPR } = await import(
+      "../executor/review/post-fanout-comments.js"
+    );
+
+    // Run 1: has findings → should post
+    const runWithFindings: ReviewModelRun = {
+      ...completedRun,
+      modelId: "anthropic/claude-3.5-sonnet",
+    };
+    // Run 2: empty findings + rawOutput (BEC-158 fallback) → should post
+    const runWithRawOutput: ReviewModelRun = {
+      ...rawOutputRun,
+      modelId: "google/gemini-2.5-pro",
+    };
+    // Run 3: empty findings, no rawOutput, completed → should be suppressed
+    const emptyRun: ReviewModelRun = {
+      modelId: "tencent/hy3-preview:free",
+      providerId: "openrouter",
+      status: "completed",
+      findings: [],
+      inputTokens: 2296,
+      outputTokens: 1252,
+      durationMs: 20500,
+    };
+
+    const result = await postFanoutCommentsToPR({} as never, "o", "r", 99, [
+      runWithFindings,
+      runWithRawOutput,
+      emptyRun,
+    ]);
+
+    // Only 2 comments posted (findings run + rawOutput run); empty run suppressed
+    expect(addPRComment).toHaveBeenCalledTimes(2);
+    expect(result.suppressedEmptyCount).toBe(1);
+    expect(result.fallbackCount).toBe(1);
+
+    // Verify the two posted comments are for the right models
+    const postedBodies = addPRComment.mock.calls.map((c) => c[4] as string);
+    expect(postedBodies.some((b) => b.includes("anthropic/claude-3.5-sonnet"))).toBe(true);
+    expect(postedBodies.some((b) => b.includes("google/gemini-2.5-pro"))).toBe(true);
+    expect(postedBodies.some((b) => b.includes("tencent/hy3-preview:free"))).toBe(false);
+  });
+
+  it("does NOT suppress a failed run even when findings are empty", async () => {
+    addPRComment.mockResolvedValue(undefined);
+    const { postFanoutCommentsToPR } = await import(
+      "../executor/review/post-fanout-comments.js"
+    );
+    const result = await postFanoutCommentsToPR({} as never, "o", "r", 1, [failedRun]);
+    expect(addPRComment).toHaveBeenCalledTimes(1);
+    expect(result.suppressedEmptyCount).toBe(0);
+  });
+
+  it("returns suppressedEmptyCount=0 when all runs have findings or rawOutput", async () => {
+    addPRComment.mockResolvedValue(undefined);
+    const { postFanoutCommentsToPR } = await import(
+      "../executor/review/post-fanout-comments.js"
+    );
+    const result = await postFanoutCommentsToPR({} as never, "o", "r", 1, [completedRun, rawOutputRun]);
+    expect(result.suppressedEmptyCount).toBe(0);
+  });
 });
