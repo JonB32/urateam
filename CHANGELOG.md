@@ -23,7 +23,15 @@ Bumps:
 - `@urateam/dashboard`: 0.1.25 → 0.1.26
 - `create-urateam`: 0.1.28 → 0.1.29
 
-<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+### Added
+- **BEC-178 follow-up — cache telemetry on `stage_runs`** ([#206](https://github.com/JonB32/urateam/pull/206)) — captures `cache_creation_input_tokens` and `cache_read_input_tokens` from each Anthropic Agent SDK turn, persists to `stage_runs`, renders a per-stage `cache hit: X% — read X.XK / created X.XK` line in the BEC-175 PR cost summary. Prerequisite for any further caching tuning since the SDK already caches but the rate was previously invisible.
+- **Low-yield review-model health check** ([#207](https://github.com/JonB32/urateam/pull/207)) — pre-fanout probe queries `review_model_runs` for rolling output ratio per model; emits a WARN log + `review.model_low_output_ratio` audit event for models below threshold. Advisory only — operator manually drops flagged models from `REVIEW_MODELS`. Configurable via `REVIEW_MODELS_MIN_OUTPUT_RATIO` (default `0.05`), `REVIEW_MODELS_HEALTH_LOOKBACK_HOURS` (default `168`), `REVIEW_MODELS_MIN_RUNS` (default `5`).
+- **BEC-181 — `pm.skipped_circuit_breaker` audit event** ([#209](https://github.com/JonB32/urateam/pull/209)) — emitted from `promote.ts` and `start-todo.ts` whenever the BEC-161 consecutive-failure breaker engages. Closes the visibility gap where the breaker was working but invisible (only WARN log, no audit trail).
+
+### Fixed
+- **BEC-180 — worktree-prune skips non-git sibling dirs** ([#202](https://github.com/JonB32/urateam/pull/202)) — runner's pre-tick `git worktree prune` no longer iterates `.agent-sweep/` (BEC-174 sweep parent dir). Eliminates noisy `level: 50` ERROR logs every restart and every cleanup tick. Whitelists by `.git/` presence (file or directory).
+- **BEC-182 — review-feedback runs no longer spelunk to max turns** ([#208](https://github.com/JonB32/urateam/pull/208)) — three coordinated fixes: (1) profile override caps `maxTurns: 30`, `maxInputTokens: 60_000` for the implement stage when `context.reviewFeedback` is set; (2) tighter prompt template (read diff first, address ONLY listed comments, conditional build/test, stop-and-report on failure instead of spelunking); (3) skip RALPH iterations entirely for `runType === "review-feedback"` runs (RALPH evaluates against issue ACs but feedback work is bounded to the comments). Driven by BEC-172 / BEC-181 stalls hitting the 100-turn cap.
+
 ## [0.1.39] — 2026-05-08
 
 Bumps:
