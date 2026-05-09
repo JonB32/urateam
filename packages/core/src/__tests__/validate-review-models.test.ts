@@ -1,15 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-// ---------------------------------------------------------------------------
-// Mock the logger BEFORE importing the module under test so the module-level
-// `const log = createLogger(...)` in review-provider.ts captures our spies.
-//
-// Variable names must start with "mock" so Vitest's static hoisting transform
-// can safely reference them inside the vi.mock factory (hoisted variable rule).
-// ---------------------------------------------------------------------------
-
-const mockWarn = vi.fn();
-const mockDebug = vi.fn();
+// Use vi.hoisted so the mock spies exist before the vi.mock factory runs
+// (vi.mock is hoisted above top-level `const` declarations).
+const { mockWarn, mockDebug } = vi.hoisted(() => ({
+  mockWarn: vi.fn(),
+  mockDebug: vi.fn(),
+}));
 
 vi.mock("../logger.js", () => ({
   createLogger: () => ({
