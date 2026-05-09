@@ -19,8 +19,63 @@ services:
       # localhost-only — remote access via SSH tunnel during soak
       - "127.0.0.1:3001:3001"
 
+  # BEC-137 — Quality Observer sidecar (urateam-quality-observer).
+  # Scans urateam-dogfood for anti-patterns and files GH Issues on
+  # JonB32/urateam (label: urateam-quality-observer). Internal-only;
+  # opt-in via QUALITY_OBSERVER_OBSERVERS env (default omits
+  # log-scanner). The observer source lives in a SEPARATE private repo
+  # at JonB32/urateam-quality-observer; clone it next to this repo
+  # (e.g. /home/deploy/urateam-quality-observer) before `docker compose
+  # build`. See docs/superpowers/runbooks/dogfood-observer-deploy.md.
+  #
+  # Claude auth: shares the dogfood's urateam-dogfood-claude OAuth volume
+  # read-only. ANTHROPIC_API_KEY is OPTIONAL (set in .env.observer to opt
+  # into the API key fallback for CI / hosted setups without OAuth).
+  quality-observer:
+    build:
+      # The observer repo is checked out next to this one on the deploy host.
+      # Override via OBSERVER_CONTEXT env when running `docker compose build`
+      # if your layout differs.
+      context: ${OBSERVER_CONTEXT:-../urateam-quality-observer}
+      dockerfile: deploy/Dockerfile
+    container_name: urateam-quality-observer
+    restart: unless-stopped
+    env_file: .env.observer
+    environment:
+      - QUALITY_OBSERVER_ENABLED=true
+      - QUALITY_OBSERVER_GITHUB_REPO=JonB32/urateam
+      - QUALITY_OBSERVER_CRON_INTERVAL_MS=3600000
+      - QUALITY_OBSERVER_DAILY_TOKEN_BUDGET=1000000
+      # log-scanner reads /host-docker-logs (mounted below) for json-file
+      # logs of the dogfood container. To disable, drop "log-scanner" from
+      # this list.
+      - QUALITY_OBSERVER_OBSERVERS=run-patterns,codebase,log-scanner
+      - QUALITY_OBSERVER_RUN_PATTERNS_LOOKBACK_HOURS=24
+      - QUALITY_OBSERVER_MAX_FINDINGS_PER_TICK=5
+      - URATEAM_DB_DRIVER=sqlite
+      - URATEAM_DB_CONNECTION_STRING=/observer-data/dogfood.db
+      - QUALITY_OBSERVER_CODEBASE_TARGET_DIR=/codebase
+      - QUALITY_OBSERVER_STORE_PATH=/observer-state/observer.db
+      - QUALITY_OBSERVER_AUDIT_LOG_PATH=/observer-state/audit.jsonl
+    volumes:
+      - urateam-dogfood-data:/observer-data:ro       # urateam's sqlite, read-only
+      - urateam-dogfood-claude:/root/.claude:ro      # Claude OAuth, shared read-only
+      # Codebase observer reads the urateam source. Override path via the
+      # OBSERVER_CODEBASE env if your layout differs.
+      - ${OBSERVER_CODEBASE:-./}:/codebase:ro
+      - urateam-observer-state:/observer-state       # observer's own state
+      # log-scanner reads Docker's json-file logs directly to scan the
+      # dogfood container's stdout. Mount is read-only and exposes ALL
+      # container logs+metadata on the host (acceptable on single-tenant
+      # dogfood boxes). Required for the log-scanner observer; safe to
+      # remove if log-scanner is dropped from QUALITY_OBSERVER_OBSERVERS.
+      - /var/lib/docker/containers:/host-docker-logs:ro
+    depends_on:
+      - urateam-dogfood
+
 volumes:
   urateam-dogfood-data:
   urateam-dogfood-work:
   urateam-dogfood-claude:
   urateam-dogfood-config:
+  urateam-observer-state:
