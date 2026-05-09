@@ -19,9 +19,11 @@ All notable changes to this package will be documented in this file.
   On the second tick the same findings are deduped (0 issues filed). Only genuinely new patterns discovered on the third tick or later are filed.
 
   **New exports from `engine.ts`:**
-  - `isFirstTick(store)` — returns `true` when `observer_findings` is empty or `meta.firstTickAt` is absent
+  - `isFirstTick(store)` — returns `true` when `meta.firstTickAt` is absent (i.e. no tick has yet completed); insensitive to whether `observer_findings` is empty
   - `seedDedupOnFirstTick(store, computeFindings)` — registers fingerprints without filing, sets `firstTickAt`
   - `processFindings(store, computeFindings, fileIssue)` — normal dedup-and-file flow
+
+  **Known limitation:** `processFindings` is not atomic across `fileIssue` and `registerFingerprint`. If `fileIssue` succeeds (issue created on GitHub) but the subsequent `registerFingerprint` write fails (process crash, disk full), the next tick will re-file the issue. SQLite writes are synchronous and rarely fail in isolation, so in practice this only affects crash scenarios. If duplicate filings become a real problem, switch the ordering to register-first / de-register-on-failure.
 
   **New export from `scheduler.ts`:**
   - `createObserverScheduler(deps)` — factory that wires `tick()`, `start()`, `stop()`

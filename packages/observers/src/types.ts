@@ -32,8 +32,9 @@ export interface TickResult {
  */
 export interface ObserverStore {
   /**
-   * Returns true when the observer has never successfully completed a tick.
-   * True when observer_findings is empty OR meta.firstTickAt row is absent.
+   * Returns true when the observer has never recorded a first-tick completion
+   * (i.e. meta.firstTickAt is absent). After setFirstTickAt() the observer
+   * advances out of the first-tick branch even if computeFindings returned 0.
    */
   isFirstTick(): boolean;
   /** Returns true if a finding with this fingerprint has already been registered */

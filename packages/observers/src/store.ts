@@ -43,8 +43,7 @@ export function createObserverStore(dbPath: string): ObserverStore {
           "SELECT value FROM observer_meta WHERE key = ?"
         )
         .get(FIRST_TICK_META_KEY);
-      // True when findings table is empty OR firstTickAt row is absent
-      return _countFindings() === 0 || !meta;
+      return !meta;
     },
 
     hasFingerprint(fingerprint: string): boolean {
