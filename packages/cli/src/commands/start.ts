@@ -12,7 +12,7 @@ export const startCommand = new Command("start")
   .option("--dashboard-port <port>", "Dashboard port", "3001")
   .action(async (options) => {
     try {
-    const { createApp, defaultConfigs, applyDeepReviewPassesOverride, applyAutoMergeOverride, cleanupWorktrees, runAgentBranchSweep, addLogStream, initSlackAlertManager, createSlackAlertStream } = await import("@urateam/core");
+    const { createApp, defaultConfigs, applyDeepReviewPassesOverride, applyAutoMergeOverride, cleanupWorktrees, runAgentBranchSweep, addLogStream, initSlackAlertManager, createSlackAlertStream, validateReviewModels } = await import("@urateam/core");
 
     // --- Slack error alerts (opt-in) ---
     if (
@@ -218,11 +218,16 @@ export const startCommand = new Command("start")
     // --- Resolve and validate workspace directories ---
     const agentRunDir = process.env.AGENT_RUN_DIR ?? join(homedir(), "data", "runs");
     const repoCloneDir = process.env.REPO_CLONE_DIR ?? join(homedir(), "work", "repos");
-    await preflightDirs({ agentRunDir, repoCloneDir, command: "ura start" });
 
-    // OSS-tier auth pre-flight (urateam#40). Run before opening the DB so a
-    // bad auth state doesn't leave any resources to clean up.
-    await preflightClaudeAuth({ command: "ura start", containerized: true });
+    // Run three independent I/O checks in parallel so startup is faster:
+    //   • validateReviewModels (BEC-171) — checks REVIEW_MODELS against OpenRouter catalog
+    //   • preflightDirs  — verifies/creates agent-run and repo-clone directories
+    //   • preflightClaudeAuth — verifies Claude API auth before opening DB (urateam#40)
+    await Promise.all([
+      validateReviewModels(process.env),
+      preflightDirs({ agentRunDir, repoCloneDir, command: "ura start" }),
+      preflightClaudeAuth({ command: "ura start", containerized: true }),
+    ]);
 
     const config = {
       webhookSecret: process.env.LINEAR_WEBHOOK_SECRET,

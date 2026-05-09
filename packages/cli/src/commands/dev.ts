@@ -11,7 +11,7 @@ export const devCommand = new Command("dev")
   .option("--port <port>", "Webhook server port", "3000")
   .option("--dashboard-port <port>", "Dashboard port", "3001")
   .action(async (options) => {
-    const { createApp, defaultConfigs } = await import("@urateam/core");
+    const { createApp, defaultConfigs, validateReviewModels } = await import("@urateam/core");
     const { createDashboard } = await import("@urateam/dashboard");
 
     const dashboardUser = process.env.DASHBOARD_USER;
@@ -35,11 +35,16 @@ export const devCommand = new Command("dev")
     // --- Resolve and validate workspace directories ---
     const agentRunDir = process.env.AGENT_RUN_DIR ?? join(homedir(), "data", "runs");
     const repoCloneDir = process.env.REPO_CLONE_DIR ?? join(homedir(), "work", "repos");
-    await preflightDirs({ agentRunDir, repoCloneDir, command: "ura dev" });
 
-    // OSS-tier auth pre-flight (urateam#40). Run before opening the DB so a
-    // bad auth state doesn't leave any resources to clean up.
-    await preflightClaudeAuth({ command: "ura dev" });
+    // Run three independent I/O checks in parallel so startup is faster:
+    //   • preflightDirs  — verifies/creates agent-run and repo-clone directories
+    //   • preflightClaudeAuth — verifies Claude API auth before opening DB (urateam#40)
+    //   • validateReviewModels (BEC-171) — checks REVIEW_MODELS against OpenRouter catalog
+    await Promise.all([
+      preflightDirs({ agentRunDir, repoCloneDir, command: "ura dev" }),
+      preflightClaudeAuth({ command: "ura dev" }),
+      validateReviewModels(process.env),
+    ]);
 
     const config = {
       webhookSecret: process.env.LINEAR_WEBHOOK_SECRET ?? "dev-secret",

@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions below refer to the workspace version published to npm. Per-package
 notes call out when a change affects only a single package.
 
+## [Unreleased]
+
+### Added (OSS+)
+- **BEC-171** — `validateReviewModels()` validates every model ID in `REVIEW_MODELS` against the public OpenRouter catalog at startup (`ura start` / `ura dev`). Unknown IDs emit a `log.warn` with up to 3 closest-name suggestions so operators catch typos before they burn API budget on silent 404s. If the catalog endpoint is unreachable a debug log is emitted and startup continues normally — the check is never a blocking dependency. Surfaced from BEC-138 dogfood (PR #157 + PR #172 fanout 404s on `anthropic/claude-3.5-sonnet`).
+
 ## [0.1.40] — 2026-05-09
 
 Bumps:
