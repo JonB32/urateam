@@ -235,6 +235,146 @@ describe("startTodoIssues", () => {
     expect(results[1].started).toBe(true);
   });
 
+  describe("BEC-177: label-based repo routing", () => {
+    it("routes ticket with observer-fix label to observer repo via labelPattern", async () => {
+      // Two pipelines: auto-implement (urateam) and observer-fix (observer repo)
+      const multiPipelineConfigs: Record<string, any> = {
+        "auto-implement": {
+          stages: ["implement", "review"],
+          retryStrategy: "linear",
+        },
+        "observer-fix": {
+          stages: ["implement", "review"],
+          retryStrategy: "linear",
+        },
+      };
+      const multiRepoConfigs: Record<string, any> = {
+        "urateam-main": {
+          url: "https://github.com/JonB32/urateam",
+          defaultBranch: "main",
+          labelPattern: "auto-implement",
+        },
+        "observer-repo": {
+          url: "https://github.com/JonB32/urateam-quality-observer",
+          defaultBranch: "main",
+          labelPattern: "observer-fix",
+        },
+      };
+
+      const issue = makeIssue({ labels: [{ name: "observer-fix" }] });
+      const runner = { start: vi.fn().mockResolvedValue(undefined) };
+      const input: StartTodoInput = {
+        linearClient: mockLinearClient([issue]),
+        db: mockDb([]),
+        teamIds: ["team-1"],
+        runner: runner as any,
+        pipelineConfigs: multiPipelineConfigs,
+        repoConfigs: multiRepoConfigs,
+        maxPerTick: 5,
+      };
+
+      const results = await startTodoIssues(input);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].started).toBe(true);
+      expect(results[0].reason).toContain("observer-fix");
+      expect(runner.start).toHaveBeenCalledOnce();
+
+      // Verify the observer repo config was passed (4th arg to runner.start)
+      const callArgs = runner.start.mock.calls[0];
+      expect(callArgs[3].url).toBe("https://github.com/JonB32/urateam-quality-observer");
+    });
+
+    it("existing auto-implement tickets still route to urateam via labelPattern (no migration required)", async () => {
+      const multiPipelineConfigs: Record<string, any> = {
+        "auto-implement": {
+          stages: ["implement", "review"],
+          retryStrategy: "linear",
+        },
+      };
+      const multiRepoConfigs: Record<string, any> = {
+        "urateam-main": {
+          url: "https://github.com/JonB32/urateam",
+          defaultBranch: "main",
+          labelPattern: "auto-implement",
+        },
+        "observer-repo": {
+          url: "https://github.com/JonB32/urateam-quality-observer",
+          defaultBranch: "main",
+          labelPattern: "observer-fix",
+        },
+      };
+
+      const issue = makeIssue({ labels: [{ name: "auto-implement" }] });
+      const runner = { start: vi.fn().mockResolvedValue(undefined) };
+      const input: StartTodoInput = {
+        linearClient: mockLinearClient([issue]),
+        db: mockDb([]),
+        teamIds: ["team-1"],
+        runner: runner as any,
+        pipelineConfigs: multiPipelineConfigs,
+        repoConfigs: multiRepoConfigs,
+        maxPerTick: 5,
+      };
+
+      const results = await startTodoIssues(input);
+
+      expect(results[0].started).toBe(true);
+      const callArgs = runner.start.mock.calls[0];
+      expect(callArgs[3].url).toBe("https://github.com/JonB32/urateam");
+    });
+
+    it("falls back to teamId key lookup when no labelPattern matches (backwards compatibility)", async () => {
+      // Legacy config: key = teamId, no labelPattern
+      const issue = makeIssue({ labels: [{ name: "auto-implement" }] });
+      const runner = { start: vi.fn().mockResolvedValue(undefined) };
+      const input: StartTodoInput = {
+        linearClient: mockLinearClient([issue]),
+        db: mockDb([]),
+        teamIds: ["team-1"],
+        runner: runner as any,
+        pipelineConfigs,
+        repoConfigs, // uses "team-1" as key, no labelPattern
+        maxPerTick: 5,
+      };
+
+      const results = await startTodoIssues(input);
+
+      expect(results[0].started).toBe(true);
+      const callArgs = runner.start.mock.calls[0];
+      expect(callArgs[3].url).toBe("https://github.com/test/repo");
+    });
+
+    it("skips issue when no repo config matches by label or teamId", async () => {
+      const multiRepoConfigs: Record<string, any> = {
+        "observer-repo": {
+          url: "https://github.com/JonB32/urateam-quality-observer",
+          defaultBranch: "main",
+          labelPattern: "observer-fix",
+        },
+      };
+
+      // Issue labelled "auto-implement" but no repoConfig for it (no labelPattern, no teamId key)
+      const issue = makeIssue({ teamId: "unknown-team", labels: [{ name: "auto-implement" }] });
+      const runner = { start: vi.fn() };
+      const input: StartTodoInput = {
+        linearClient: mockLinearClient([issue]),
+        db: mockDb([]),
+        teamIds: ["team-1"],
+        runner: runner as any,
+        pipelineConfigs,
+        repoConfigs: multiRepoConfigs,
+        maxPerTick: 5,
+      };
+
+      const results = await startTodoIssues(input);
+
+      expect(results[0].started).toBe(false);
+      expect(results[0].reason).toContain("no repo");
+      expect(runner.start).not.toHaveBeenCalled();
+    });
+  });
+
   describe("circuit breaker (BEC-161)", () => {
     it("skips Todo issue with N+ consecutive failed runs WITHOUT touching Linear SDK (saves 3 round-trips)", async () => {
       // Spy on the Linear-SDK awaits so we can assert the breaker fires

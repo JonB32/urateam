@@ -13,6 +13,7 @@ import { webhookDedup } from "../db/schema.js";
 import type { AnyDb } from "../db/client.js";
 import type { PmAgentConfig } from "../pm/types.js";
 import { evaluateBudget } from "../pm/budget.js";
+import { selectRepoConfig } from "../pm/actions/select-repo-config.js";
 
 const log = createLogger({ component: "WebhookHandler" });
 
@@ -176,8 +177,14 @@ export function createWebhookHandler(config: WebhookHandlerConfig): Hono {
           return c.json({ ok: true, message: "No pipeline config for labels" });
         }
 
-        // Reuse repo config resolved earlier for trigger map lookup
-        const repoConfig = teamRepoConfig;
+        // Resolve repo config: label-pattern lookup first (BEC-177 multi-repo routing),
+        // then teamId / projectId key lookup (backwards compatible with teamRepoConfig).
+        const repoConfig = selectRepoConfig(
+          resolved.key,
+          stateChange.issue.teamId,
+          stateChange.issue.projectId,
+          config.repoConfigs,
+        );
         if (!repoConfig) {
           log.error(
             { teamId: stateChange.issue.teamId, projectId: stateChange.issue.projectId ?? "none", issueId: stateChange.issue.identifier },
