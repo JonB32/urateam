@@ -261,6 +261,12 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
         // --- Stuck In Progress issue recovery sweep ---
         if (config.stuckIssueRecovery !== false && !isPmPaused()) {
           try {
+            // BEC-184: read PM_AGENT_STUCK_RUN_AGE_MIN from env (default 60 min).
+            // Controls how long a 'running' run must be active before it's treated
+            // as a zombie and eligible for stuck-issue recovery.
+            const stuckRunAgeMinutes = process.env.PM_AGENT_STUCK_RUN_AGE_MIN
+              ? parseInt(process.env.PM_AGENT_STUCK_RUN_AGE_MIN, 10) || 60
+              : 60;
             const stuckResult = actions?.recoverStuckInProgressIssues
               ? await actions.recoverStuckInProgressIssues({} as any)
               : await recoverStuckInProgressIssues({
@@ -269,6 +275,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                   teamIds: config.teamIds,
                   targetState: config.stuckIssueTargetState ?? "Backlog",
                   maxPerTick: config.stuckIssueMaxPerTick ?? 5,
+                  stuckRunAgeMinutes,
                   stateMap,
                   postSlackNotification: (issues) =>
                     getSlackNotifier().postStuckIssueRecovered(issues),

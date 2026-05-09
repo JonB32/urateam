@@ -1,9 +1,10 @@
 import type { AnyDb } from "../../db/client.js";
 import { pipelineRuns } from "../../db/schema.js";
-import { inArray } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { getActiveAndRecentIssueIds } from "./db-queries.js";
 import { resolveWorkflowStates } from "../linear-helpers.js";
 import { createLogger } from "../../logger.js";
+import { logAuditEventUnchecked, pmRecoveredLongRunningEvent } from "../../audit/index.js";
 
 const log = createLogger({ component: "PmAgent:recoverStuck" });
 
@@ -15,6 +16,12 @@ export interface RecoverStuckInput {
   targetState: "Backlog" | "Todo";
   /** Maximum number of stuck issues to process per PM Agent tick (rate limiter). */
   maxPerTick: number;
+  /**
+   * BEC-184: Age threshold (in minutes) after which a 'running' pipeline run is
+   * considered zombie/stuck and eligible for recovery. Defaults to 60 minutes.
+   * Set via PM_AGENT_STUCK_RUN_AGE_MIN env var.
+   */
+  stuckRunAgeMinutes?: number;
   /** Pre-fetched workflow state map (`${teamId}:${stateName}` → stateId). */
   stateMap?: Map<string, string>;
   /** Called with all successfully recovered issues for Slack notification. */
@@ -35,6 +42,11 @@ export interface StuckIssueResult {
    * exists). Otherwise the caller's input targetState ("Backlog" | "Todo").
    */
   targetState: "Backlog" | "Todo" | "In Review";
+  /**
+   * BEC-184: set to true when this issue was recovered due to a long-running
+   * (zombie) run, as opposed to a failed/completed stuck run.
+   */
+  recoveredLongRunning?: boolean;
 }
 
 /**
@@ -44,6 +56,11 @@ export interface StuckIssueResult {
  * An issue is considered "stuck" when:
  *  - Its Linear state is "In Progress"
  *  - There is no pipeline_runs row with status "running" or "queued" for that issue
+ *
+ * BEC-184: Additionally, issues whose most recent run has status "running" but
+ * started more than `stuckRunAgeMinutes` minutes ago are treated as zombie runs.
+ * The `pipeline_runs` row is marked status='failed' and the Linear issue is moved
+ * to the target state. An audit event `pm.recovered_long_running` is emitted.
  *
  * Rate-limited to `maxPerTick` issues per tick to prevent flooding.
  *
@@ -57,6 +74,8 @@ export async function recoverStuckInProgressIssues(
   input: RecoverStuckInput,
 ): Promise<StuckIssueResult[]> {
   const { linearClient, db, teamIds, targetState, maxPerTick, postSlackNotification } = input;
+  const stuckRunAgeMinutes = input.stuckRunAgeMinutes ?? 60;
+  const stuckRunAgeMs = stuckRunAgeMinutes * 60 * 1000;
 
   // 1. Query Linear for all "In Progress" issues across all configured teams
   const issuesResponse = await linearClient.issues({
@@ -81,8 +100,13 @@ export async function recoverStuckInProgressIssues(
     return [];
   }
 
-  // 2. Fetch active and recently-processed issue IDs in one shared helper
-  const { activeIssueIds, recentlyProcessed } = await getActiveAndRecentIssueIds(db);
+  // 2. Fetch active and recently-processed issue IDs in one shared helper.
+  //    BEC-184: pass stuckRunAgeMs so zombie running runs are excluded from activeIssueIds.
+  const { activeIssueIds, recentlyProcessed } = await getActiveAndRecentIssueIds(
+    db,
+    undefined,
+    stuckRunAgeMs,
+  );
 
   // 3. Identify stuck issues: In Progress in Linear but no active DB run
   // NOTE: DB stores issue.identifier (e.g. "BEC-120"), not issue.id (Linear UUID)
@@ -110,13 +134,17 @@ export async function recoverStuckInProgressIssues(
   const toProcess = stuckIssues.slice(0, maxPerTick);
   const stuckIdentifiers = toProcess.map((i: any) => i.identifier);
 
-  // 5. Batch-fetch most recent pipeline run status + prUrl for each stuck issue.
+  // 5. Batch-fetch most recent pipeline run status + prUrl + id for each stuck issue.
   //    BEC-165: prUrl is needed for the open-PR override below.
+  //    BEC-184: id is needed to update the run row for long-running zombie runs.
   const lastRunStatusMap = new Map<string, string>();
   const lastRunPrUrlMap = new Map<string, string | null>();
+  const lastRunIdMap = new Map<string, string | null>();
+  const lastRunStartedAtMap = new Map<string, Date | null>();
   if (stuckIdentifiers.length > 0) {
     const runs = await db
       .select({
+        id: pipelineRuns.id,
         issueId: pipelineRuns.issueId,
         status: pipelineRuns.status,
         startedAt: pipelineRuns.startedAt,
@@ -135,6 +163,11 @@ export async function recoverStuckInProgressIssues(
       if (!lastRunStatusMap.has(run.issueId)) {
         lastRunStatusMap.set(run.issueId, run.status);
         lastRunPrUrlMap.set(run.issueId, run.prUrl ?? null);
+        lastRunIdMap.set(run.issueId, run.id ?? null);
+        lastRunStartedAtMap.set(
+          run.issueId,
+          run.startedAt ? new Date(run.startedAt as any) : null,
+        );
       }
     }
   }
@@ -151,6 +184,14 @@ export async function recoverStuckInProgressIssues(
     const teamId = team?.id;
     const lastRunStatus = lastRunStatusMap.get(issue.identifier) ?? null;
     const lastRunPrUrl = lastRunPrUrlMap.get(issue.identifier) ?? null;
+    const lastRunId = lastRunIdMap.get(issue.identifier) ?? null;
+    const lastRunStartedAt = lastRunStartedAtMap.get(issue.identifier) ?? null;
+
+    // BEC-184: Detect zombie (long-running) runs. When the most recent run has
+    // status='running' but is NOT in activeIssueIds, it means getActiveAndRecentIssueIds
+    // excluded it because it started more than stuckRunAgeMs ago.
+    const isLongRunningRun =
+      lastRunStatus === "running" && lastRunId !== null;
 
     // BEC-165: open-PR override — if the most recent run completed AND
     // produced a PR, the runner forgot to move Linear → "In Review" (the
@@ -180,20 +221,62 @@ export async function recoverStuckInProgressIssues(
     const previousStateName: string = state?.name ?? "In Progress";
 
     try {
+      // BEC-184: For long-running zombie runs, mark the pipeline_runs row as
+      // failed before moving Linear state, so future PM ticks don't re-detect
+      // the same run as active.
+      if (isLongRunningRun && lastRunId) {
+        const errorMessage = `recovered: running > ${stuckRunAgeMinutes} min with no completion`;
+        await (db as any)
+          .update(pipelineRuns)
+          .set({
+            status: "failed",
+            errorMessage,
+            completedAt: new Date(),
+          })
+          .where(eq(pipelineRuns.id, lastRunId));
+
+        log.info(
+          {
+            identifier: issue.identifier,
+            runId: lastRunId,
+            stuckRunAgeMinutes,
+          },
+          "marked long-running pipeline run as failed",
+        );
+
+        // Emit audit event for visibility into zombie run recovery
+        if (lastRunStartedAt) {
+          void logAuditEventUnchecked(
+            db,
+            pmRecoveredLongRunningEvent({
+              issueId: issue.identifier,
+              runId: lastRunId,
+              startedAt: lastRunStartedAt,
+              stuckRunAgeMinutes,
+              targetState: effectiveTargetState,
+            }),
+          );
+        }
+      }
+
       await linearClient.updateIssue(issue.id, { stateId: effectiveTargetStateId });
 
-      const runNote = lastRunStatus
-        ? `Most recent pipeline run status: \`${lastRunStatus}\`${lastRunPrUrl ? ` (PR: ${lastRunPrUrl})` : ""}.`
+      const displayStatus = isLongRunningRun ? "running (marked failed — zombie)" : lastRunStatus;
+      const runNote = displayStatus
+        ? `Most recent pipeline run status: \`${displayStatus}\`${lastRunPrUrl ? ` (PR: ${lastRunPrUrl})` : ""}.`
         : "No pipeline run record found in the database.";
       const overrideNote = inReviewOverride
         ? "\n\n*BEC-165 override: completed run produced a PR — moving to In Review instead of re-promoting.*"
+        : "";
+      const longRunningNote = isLongRunningRun
+        ? `\n\n*BEC-184: run was still status \`running\` after >${stuckRunAgeMinutes} min — marked as failed and issue recovered.*`
         : "";
       await linearClient.createComment({
         issueId: issue.id,
         body:
           `🤖 **PM Agent — Auto-recovered stuck issue**\n\n` +
           `This issue was detected in **In Progress** state with no active pipeline run. ` +
-          `It has been automatically moved to **${effectiveTargetState}** for re-evaluation.\n\n${runNote}${overrideNote}`,
+          `It has been automatically moved to **${effectiveTargetState}** for re-evaluation.\n\n${runNote}${overrideNote}${longRunningNote}`,
       });
 
       results.push({
@@ -203,6 +286,7 @@ export async function recoverStuckInProgressIssues(
         previousState: previousStateName,
         lastRunStatus,
         targetState: effectiveTargetState,
+        recoveredLongRunning: isLongRunningRun,
       });
 
       log.info(
@@ -212,6 +296,7 @@ export async function recoverStuckInProgressIssues(
           lastRunStatus,
           targetState: effectiveTargetState,
           inReviewOverride: inReviewOverride !== undefined,
+          recoveredLongRunning: isLongRunningRun,
         },
         "auto-recovered stuck In Progress issue",
       );

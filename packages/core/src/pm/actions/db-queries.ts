@@ -1,6 +1,6 @@
 import type { AnyDb } from "../../db/client.js";
 import { pipelineRuns } from "../../db/schema.js";
-import { and, desc, eq, gte, inArray } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, or } from "drizzle-orm";
 
 /** Statuses considered "active" (pipeline currently running). */
 export const ACTIVE_STATUSES = ["queued", "running"] as const;
@@ -15,15 +15,40 @@ const RECENT_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
  *
  * Used by both startTodoIssues and recoverStuckInProgressIssues to avoid
  * re-processing issues that already have pipeline activity.
+ *
+ * BEC-184: when `stuckRunAgeMs` is provided, 'running' runs that started MORE
+ * THAN `stuckRunAgeMs` ago are excluded from `activeIssueIds`. This allows
+ * recoverStuckInProgressIssues to treat zombie/stalled runs as stuck.
+ * 'queued' runs are always considered active regardless of age.
  */
 export async function getActiveAndRecentIssueIds(
   db: AnyDb,
   recentWindowMs = RECENT_WINDOW_MS,
+  stuckRunAgeMs?: number,
 ): Promise<{ activeIssueIds: Set<string>; recentlyProcessed: Set<string> }> {
-  const activeRows = await db
-    .select({ issueId: pipelineRuns.issueId })
-    .from(pipelineRuns)
-    .where(inArray(pipelineRuns.status, [...ACTIVE_STATUSES]));
+  let activeRows: any[];
+  if (stuckRunAgeMs !== undefined) {
+    // BEC-184: exclude long-running 'running' rows from the active set so they
+    // fall through to the stuck detection logic. 'queued' is always active.
+    const stuckCutoff = new Date(Date.now() - stuckRunAgeMs);
+    activeRows = await db
+      .select({ issueId: pipelineRuns.issueId })
+      .from(pipelineRuns)
+      .where(
+        or(
+          eq(pipelineRuns.status, "queued"),
+          and(
+            eq(pipelineRuns.status, "running"),
+            gte(pipelineRuns.startedAt, stuckCutoff),
+          ),
+        ),
+      );
+  } else {
+    activeRows = await db
+      .select({ issueId: pipelineRuns.issueId })
+      .from(pipelineRuns)
+      .where(inArray(pipelineRuns.status, [...ACTIVE_STATUSES]));
+  }
   const activeIssueIds = new Set<string>((activeRows as any[]).map((r) => r.issueId));
 
   const recentCutoff = new Date(Date.now() - recentWindowMs);

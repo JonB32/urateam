@@ -102,6 +102,27 @@ export function pmTriageClassifiedEvent(args: {
   });
 }
 
+export function pmRecoveredLongRunningEvent(args: {
+  issueId: string;
+  runId: string;
+  startedAt: Date;
+  stuckRunAgeMinutes: number;
+  targetState: string;
+}): AuditEvent {
+  return base({
+    eventType: "pm.recovered_long_running",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    issueId: args.issueId,
+    runId: args.runId,
+    payload: {
+      startedAt: args.startedAt.toISOString(),
+      stuckRunAgeMinutes: args.stuckRunAgeMinutes,
+      targetState: args.targetState,
+    },
+  });
+}
+
 export function pmSkippedCircuitBreakerEvent(args: {
   issueId: string;
   failureCount: number;

@@ -1,20 +1,35 @@
 /**
- * BEC-184 reproduction: recoverStuckInProgressIssues silently skips issues
- * whose most recent pipeline_runs row has status='running' regardless of age.
+ * BEC-184: recoverStuckInProgressIssues — long-running run recovery.
  *
- * Root cause: getActiveAndRecentIssueIds() puts ALL running/queued runs into
- * `activeIssueIds`, then recoverStuckInProgressIssues filters those OUT.
- * A zombie run that has been `status='running'` for 8+ hours is indistinguishable
- * from a healthy 30-second-old run — both block recovery.
+ * Original reproduction file — updated to reflect the FIXED behavior.
  *
- * Expected (per BEC-184 AC): runs with status='running' AND
- *   startedAt < NOW() - PM_AGENT_STUCK_RUN_AGE_MIN (default 60 min)
- * should be treated as stuck and recovered.
+ * Root cause was: getActiveAndRecentIssueIds() put ALL running/queued runs into
+ * `activeIssueIds` with no age discrimination. A zombie run stuck at
+ * status='running' for 8+ hours was indistinguishable from a healthy 30-second
+ * run — both blocked recovery.
+ *
+ * Fix (BEC-184): getActiveAndRecentIssueIds accepts a `stuckRunAgeMs` param.
+ * 'running' runs older than the threshold are excluded from `activeIssueIds`,
+ * allowing recoverStuckInProgressIssues to detect and reap them.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { recoverStuckInProgressIssues } from "../pm/actions/recover-stuck.js";
 import { getActiveAndRecentIssueIds } from "../pm/actions/db-queries.js";
+
+// Mock the audit writer so tests don't need a real DB for audit events.
+// vi.hoisted ensures the mock fn is created before vi.mock factories execute.
+const { mockLogAuditEventUnchecked } = vi.hoisted(() => ({
+  mockLogAuditEventUnchecked: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../audit/index.js", () => ({
+  logAuditEventUnchecked: mockLogAuditEventUnchecked,
+  pmRecoveredLongRunningEvent: (args: any) => ({
+    eventType: "pm.recovered_long_running",
+    ...args,
+  }),
+}));
 
 vi.mock("../logger.js", () => ({
   createLogger: vi.fn(() => ({
@@ -53,27 +68,35 @@ function makeDb(
     .mockResolvedValueOnce(activeRows)
     .mockResolvedValueOnce(recentRows)
     .mockResolvedValueOnce(runsRows);
+
+  const updateWhereFn = vi.fn().mockResolvedValue({ rowsAffected: 1 });
+  const updateSetFn = vi.fn().mockReturnValue({ where: updateWhereFn });
+  const updateFn = vi.fn().mockReturnValue({ set: updateSetFn });
+
   return {
     select: vi.fn().mockReturnValue({
       from: vi.fn().mockReturnValue({
         where: whereFn,
       }),
     }),
+    update: updateFn,
   };
 }
 
 // ---------------------------------------------------------------------------
-// BEC-184 reproduction
+// BEC-184 fix verification
 // ---------------------------------------------------------------------------
 
-describe("BEC-184: recoverStuckInProgressIssues — long-running run not recovered", () => {
+describe("BEC-184 FIXED: recoverStuckInProgressIssues — long-running run recovery", () => {
   beforeEach(() => vi.clearAllMocks());
 
   // -------------------------------------------------------------------------
-  // FAILING TEST (demonstrates the bug): an issue whose run has been
-  // status='running' for 90 minutes IS silently skipped by the current code.
+  // FIXED: an issue whose run has been status='running' for 90 minutes IS
+  // now recovered when stuckRunAgeMinutes is set to 60 (default).
+  // The DB's active query returns [] because the zombie run is excluded by the
+  // age gate in getActiveAndRecentIssueIds.
   // -------------------------------------------------------------------------
-  it("BUG: issue with status=running run older than 60 min is NOT recovered (should be)", async () => {
+  it("FIXED: issue with status=running run older than 60 min IS now recovered", async () => {
     const ninetyMinutesAgo = new Date(Date.now() - 90 * 60 * 1000);
 
     const issue = {
@@ -86,13 +109,14 @@ describe("BEC-184: recoverStuckInProgressIssues — long-running run not recover
 
     const linearClient = makeLinearClient([issue]);
 
-    // DB: the run is still status='running' (never completed), started 90 min ago
-    // activeRows (1st query) returns BEC-177 — this is what blocks recovery today.
+    // BEC-184 fix: getActiveAndRecentIssueIds with stuckRunAgeMs=60min excludes
+    // the zombie run from activeIssueIds, so the active query returns [].
     const db = makeDb(
-      [{ issueId: "BEC-177" }],           // activeRows: run appears "active"
+      [],                                  // activeRows: zombie excluded by age gate
       [],                                  // recentRows: no completed/failed
       [
         {
+          id: "run-zombie-bec177",
           issueId: "BEC-177",
           status: "running",
           startedAt: ninetyMinutesAgo,
@@ -109,15 +133,17 @@ describe("BEC-184: recoverStuckInProgressIssues — long-running run not recover
       teamIds: ["team-1"],
       targetState: "Backlog",
       maxPerTick: 5,
+      stuckRunAgeMinutes: 60,
       stateMap,
     });
 
-    // BUG CONFIRMED: current code returns [] because BEC-177 is in activeIssueIds.
-    // The assertion below documents what the code ACTUALLY does (wrong behaviour).
-    // After the fix, this assertion should be flipped:
-    //   expect(result).toHaveLength(1)  and  expect(result[0].identifier).toBe("BEC-177")
-    expect(result).toHaveLength(0);  // <-- BUG: should be 1 after fix
-    expect(linearClient.updateIssue).not.toHaveBeenCalled();  // <-- BUG: should have been called after fix
+    // FIXED: now recovers the zombie issue
+    expect(result).toHaveLength(1);
+    expect(result[0].identifier).toBe("BEC-177");
+    expect(result[0].recoveredLongRunning).toBe(true);
+    expect(linearClient.updateIssue).toHaveBeenCalledWith("issue-uuid-bec177", {
+      stateId: "state-backlog-1",
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -137,12 +163,13 @@ describe("BEC-184: recoverStuckInProgressIssues — long-running run not recover
 
     const linearClient = makeLinearClient([issue]);
 
-    // DB: run is status='running' but only 5 min old — should NOT be recovered
+    // Fresh run IS in activeIssueIds (within the age threshold)
     const db = makeDb(
-      [{ issueId: "BEC-200" }],   // activeRows: appears active
+      [{ issueId: "BEC-200" }],   // activeRows: fresh run is still protected
       [],
       [
         {
+          id: "run-fresh-1",
           issueId: "BEC-200",
           status: "running",
           startedAt: fiveMinutesAgo,
@@ -159,33 +186,26 @@ describe("BEC-184: recoverStuckInProgressIssues — long-running run not recover
       teamIds: ["team-1"],
       targetState: "Backlog",
       maxPerTick: 5,
+      stuckRunAgeMinutes: 60,
       stateMap,
     });
 
-    // Fresh run should remain protected — this should stay passing after the fix too.
+    // Fresh run should remain protected — this stays passing after the fix.
     expect(result).toHaveLength(0);
     expect(linearClient.updateIssue).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------
-  // Second angle: verify the root cause directly in getActiveAndRecentIssueIds.
-  // The function has no age threshold — it returns all running runs regardless
-  // of how long ago they started.
+  // Verify the root cause fix in getActiveAndRecentIssueIds directly.
+  // With stuckRunAgeMs=60min, an 8-hour-old running run is excluded from
+  // activeIssueIds (no longer treated the same as a fresh run).
   // -------------------------------------------------------------------------
-  it("getActiveAndRecentIssueIds includes an 8-hour-old running run in activeIssueIds (no age gate)", async () => {
-    const eightHoursAgo = new Date(Date.now() - 8 * 60 * 60 * 1000);
-    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-
-    // Mock DB returns two running rows: one fresh, one 8 hours old
-    const activeRows = [
-      { issueId: "BEC-FRESH" },
-      { issueId: "BEC-ZOMBIE" },
-    ];
-    const recentRows: any[] = [];
-
+  it("getActiveAndRecentIssueIds with stuckRunAgeMs excludes zombie runs from activeIssueIds", async () => {
+    // Active query with age gate returns only fresh run (zombie excluded)
     const whereFn = vi.fn()
-      .mockResolvedValueOnce(activeRows)
-      .mockResolvedValueOnce(recentRows);
+      .mockResolvedValueOnce([{ issueId: "BEC-FRESH" }])  // age-gated active query
+      .mockResolvedValueOnce([]);                           // recent query
+
     const db = {
       select: vi.fn().mockReturnValue({
         from: vi.fn().mockReturnValue({
@@ -194,16 +214,15 @@ describe("BEC-184: recoverStuckInProgressIssues — long-running run not recover
       }),
     };
 
-    const { activeIssueIds } = await getActiveAndRecentIssueIds(db as any);
+    const { activeIssueIds } = await getActiveAndRecentIssueIds(
+      db as any,
+      undefined,
+      60 * 60 * 1000, // stuckRunAgeMs = 60 minutes
+    );
 
-    // BUG: both end up in activeIssueIds with no age discrimination
-    expect(activeIssueIds.has("BEC-ZOMBIE")).toBe(true);  // 8-hour zombie treated same as fresh run
-    expect(activeIssueIds.has("BEC-FRESH")).toBe(true);   // fresh run is also protected (good)
-
-    // After the fix: BEC-ZOMBIE (8 hours old) should NOT be in activeIssueIds
-    // when a stuckRunAgeMinutes threshold (e.g. 60) is applied.
-    // The fixed getActiveAndRecentIssueIds should accept a stuckRunAgeMs param and
-    // exclude runs older than the threshold from the "active" set so they fall
-    // through to stuck detection.
+    // FIXED: zombie run is no longer in activeIssueIds
+    expect(activeIssueIds.has("BEC-ZOMBIE")).toBe(false);
+    // Fresh run is still protected
+    expect(activeIssueIds.has("BEC-FRESH")).toBe(true);
   });
 });
