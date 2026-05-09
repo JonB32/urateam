@@ -129,11 +129,10 @@ describe("autoCommitChanges scratchpad filter (BEC-157)", () => {
     expect(result).toBe(false);
   });
 
-  // BEC-157 safety net (Sonnet review Important #1): if a scratchpad file is
-  // ALREADY tracked in HEAD (operator committed it pre-filter), unstaging via
-  // `git rm --cached` would record a permanent deletion. Skip the unstage for
-  // tracked entries — preserve the file as a normal commit.
-  it("preserves tracked scratchpad files instead of silently deleting them", async () => {
+  // BEC-157 / BEC-180: DIRECTORY-LEVEL tracked scratchpad (.claude/settings.json)
+  // is still preserved — the operator may have committed it intentionally.
+  // Only ROOT-LEVEL tracked scratchpad (no path separator) is actively cleaned up.
+  it("preserves DIRECTORY-LEVEL tracked scratchpad (.claude/settings.json) — not deleted even when tracked", async () => {
     // Operator previously (pre-filter) committed .claude/settings.json
     mkdirSync(join(repo, ".claude"), { recursive: true });
     writeFileSync(join(repo, ".claude", "settings.json"), "old\n");
@@ -156,6 +155,93 @@ describe("autoCommitChanges scratchpad filter (BEC-157)", () => {
     // Verify the file is not staged for deletion in HEAD~1..HEAD
     const headContent = git(["show", "HEAD:.claude/settings.json"], repo);
     expect(headContent).toBe("new\n");
+  });
+
+  // BEC-180: tracked ROOT-LEVEL scratchpad that is UNCHANGED from HEAD would
+  // never appear in `git status --porcelain` (no delta) and was therefore
+  // silently re-committed by every auto-commit.  The new proactive scan finds
+  // such files via `git ls-files` and deletes them so `git add -A` stages
+  // the deletion.
+  it("deletes tracked root-level HANDOFF-*.md even when unchanged (proactive BEC-180 scan)", async () => {
+    // Previous auto-commit accidentally included HANDOFF-SUMMARY.md
+    writeFileSync(join(repo, "HANDOFF-SUMMARY.md"), "# handoff\n");
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "real.ts"), "v1\n");
+    git(["add", "."], repo);
+    git(["commit", "-m", "previous auto-commit with handoff artifact"], repo);
+
+    // Next run: agent changes real code but doesn't touch HANDOFF-SUMMARY.md
+    writeFileSync(join(repo, "src", "real.ts"), "v2\n");
+
+    const result = await autoCommitChanges(repo, "BEC-999");
+
+    expect(result).toBe(true);
+    // git show --name-only lists ALL changed files (additions AND deletions).
+    // For a deletion we verify the file is no longer reachable from HEAD.
+    const headContent = (() => {
+      try {
+        return git(["show", "HEAD:HANDOFF-SUMMARY.md"], repo);
+      } catch {
+        return null;
+      }
+    })();
+    expect(headContent).toBeNull(); // file deleted from HEAD
+
+    // Confirm ls-files no longer lists it as tracked
+    const tracked = git(["ls-files", "HANDOFF-SUMMARY.md"], repo).trim();
+    expect(tracked).toBe("");
+  });
+
+  it("deletes tracked root-level TEST-STAGE-*.{md,txt} even when unchanged (proactive BEC-180 scan)", async () => {
+    // Previous auto-commit accidentally included TEST-STAGE artifacts
+    writeFileSync(join(repo, "TEST-STAGE-COMPLETION.txt"), "done\n");
+    writeFileSync(join(repo, "TEST-STAGE-OUTPUT.md"), "# output\n");
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "real.ts"), "real\n");
+    git(["add", "."], repo);
+    git(["commit", "-m", "previous auto-commit with test stage artifacts"], repo);
+
+    // Next run: agent changes something real
+    writeFileSync(join(repo, "src", "real.ts"), "real-v2\n");
+
+    const result = await autoCommitChanges(repo, "BEC-999");
+
+    expect(result).toBe(true);
+    // Both artifact files must be removed from HEAD
+    const txt = (() => {
+      try { return git(["show", "HEAD:TEST-STAGE-COMPLETION.txt"], repo); }
+      catch { return null; }
+    })();
+    expect(txt).toBeNull();
+
+    const md = (() => {
+      try { return git(["show", "HEAD:TEST-STAGE-OUTPUT.md"], repo); }
+      catch { return null; }
+    })();
+    expect(md).toBeNull();
+  });
+
+  it("creates a deletion-only commit when stale tracked scratchpad are the only change (BEC-180)", async () => {
+    // Scenario: pipeline ran with no real changes, only has stale HANDOFF artifact
+    writeFileSync(join(repo, "HANDOFF-SUMMARY.md"), "old handoff\n");
+    git(["add", "HANDOFF-SUMMARY.md"], repo);
+    git(["commit", "-m", "stale tracked scratchpad"], repo);
+
+    // Nothing else changed — but autoCommitChanges must still return true
+    // (the deletion commit is real and necessary)
+    const result = await autoCommitChanges(repo, "BEC-999");
+
+    expect(result).toBe(true);
+    // Confirm file is not in HEAD
+    const headContent = (() => {
+      try { return git(["show", "HEAD:HANDOFF-SUMMARY.md"], repo); }
+      catch { return null; }
+    })();
+    expect(headContent).toBeNull();
+
+    // And not tracked anymore
+    const tracked = git(["ls-files", "HANDOFF-SUMMARY.md"], repo).trim();
+    expect(tracked).toBe("");
   });
 });
 
@@ -204,6 +290,31 @@ describe("isScratchpadPath unit tests (BEC-157)", () => {
     // Pattern tightened (was overbroad in initial PR; would have filtered these):
     expect(isScratchpadPath("SECURITY-VERIFICATION.md")).toBe(false);
     expect(isScratchpadPath("API-VERIFICATION.md")).toBe(false);
+  });
+
+  it("matches root-level HANDOFF-*.md (BEC-180)", () => {
+    expect(isScratchpadPath("HANDOFF-SUMMARY.md")).toBe(true);
+    expect(isScratchpadPath("HANDOFF-BEC-180.md")).toBe(true);
+    expect(isScratchpadPath("HANDOFF-.md")).toBe(true);
+  });
+
+  it("does NOT match HANDOFF-*.md in subdirs or non-HANDOFF root files", () => {
+    expect(isScratchpadPath("docs/HANDOFF-SUMMARY.md")).toBe(false);
+    expect(isScratchpadPath("HANDOFF")).toBe(false); // no extension
+    expect(isScratchpadPath("HANDOFF.md")).toBe(false); // no dash
+    expect(isScratchpadPath("myHANDOFF-x.md")).toBe(false); // not anchored
+  });
+
+  it("matches root-level TEST-STAGE-*.{md,txt} (BEC-180)", () => {
+    expect(isScratchpadPath("TEST-STAGE-COMPLETION.txt")).toBe(true);
+    expect(isScratchpadPath("TEST-STAGE-OUTPUT.md")).toBe(true);
+    expect(isScratchpadPath("TEST-STAGE-SUMMARY.md")).toBe(true);
+  });
+
+  it("does NOT match TEST-STAGE-* in subdirs or with wrong extension", () => {
+    expect(isScratchpadPath("docs/TEST-STAGE-OUTPUT.md")).toBe(false);
+    expect(isScratchpadPath("TEST-STAGE-OUTPUT.ts")).toBe(false); // wrong extension
+    expect(isScratchpadPath("TEST-STAGE.md")).toBe(false); // no second dash segment
   });
 
   it("does NOT match legitimate root-level files", () => {

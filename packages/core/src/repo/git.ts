@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { join } from "node:path";
-import { access, chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { createLogger, getLogContext } from "../logger.js";
 
 const baseLog = createLogger({ component: "git" });
@@ -519,6 +519,10 @@ const SCRATCHPAD_PATTERNS: ReadonlyArray<(path: string) => boolean> = [
   // tightened from `[A-Z][A-Z0-9_-]*-VERIFICATION.md` so legitimate operator
   // docs like `SECURITY-VERIFICATION.md` aren't filtered)
   (p) => /^BEC-\d+-.*-VERIFICATION\.md$/.test(p),
+  // Root-level HANDOFF-*.md (stage-to-stage handoff summaries; not repo docs)
+  (p) => /^HANDOFF-.*\.md$/.test(p),
+  // Root-level TEST-STAGE-*.{md,txt} (test-stage completion artifacts; BEC-180)
+  (p) => /^TEST-STAGE-.*\.(md|txt)$/.test(p),
 ];
 
 export function isScratchpadPath(path: string): boolean {
@@ -594,6 +598,35 @@ export async function autoCommitChanges(
     await verifyBranchMatch(worktreePath, expectedBranch);
   }
 
+  // BEC-180: proactively remove tracked root-level scratchpad files that are
+  // *unchanged* from HEAD.  Such files don't appear in `git status --porcelain`
+  // (no delta), so the reactive filter below can't see them.  Deleting them
+  // here causes `git status` to list them as working-tree deletions, which
+  // `git add -A` then stages so the next commit records their removal.
+  //
+  // We limit the scan to root-level (no `/`) files to avoid accidental matches
+  // inside src/ or other package subdirectories.
+  {
+    const lsOutput = await gitExecSafe(["ls-files", "--full-name"], worktreePath);
+    const stalePatterns = lsOutput
+      .split("\n")
+      .filter(Boolean)
+      .filter((f) => !f.includes("/") && isScratchpadPath(f));
+    if (stalePatterns.length > 0) {
+      getLog().info(
+        { issueId, stalePatterns },
+        "auto-commit: removing stale tracked scratchpad files from HEAD (BEC-180)",
+      );
+      for (const f of stalePatterns) {
+        try {
+          await unlink(join(worktreePath, f));
+        } catch {
+          // already absent — git add -A will stage the deletion regardless
+        }
+      }
+    }
+  }
+
   const status = await gitExecSafe(["status", "--porcelain"], worktreePath);
   if (!status.trim()) return false;
 
@@ -606,14 +639,19 @@ export async function autoCommitChanges(
   const realPaths = allPaths.filter((p) => !isScratchpadPath(p));
   const filteredPaths = allPaths.filter((p) => isScratchpadPath(p));
 
-  // BEC-157 safety net: if any filtered path is ALREADY TRACKED in HEAD
-  // (operator committed it pre-filter, e.g., before this PR shipped),
-  // unstaging via `git rm --cached` would record a permanent deletion in the
-  // new commit and remove the file from the repo. Detect and skip the unstage
-  // for those entries — leaving them staged as legit modifications/additions.
-  // Worst case: a tracked scratchpad file gets a normal modify-commit. Better
-  // than silent data loss.
+  // BEC-157: detect scratchpad files that are ALREADY TRACKED in HEAD.
+  // These were committed by a prior auto-commit before their pattern was added
+  // to SCRATCHPAD_PATTERNS (or on their first run, before BEC-157 shipped).
+  // To remove them we delete the files from the working tree; `git add -A`
+  // then stages the deletion, and the next commit records their removal.
+  //
+  // Old behaviour: skip the unlink and let them be committed again ("worst
+  // case: a tracked scratchpad file gets a normal modify-commit").  New
+  // behaviour (BEC-180): delete them — the patterns are authoritative, and a
+  // file matching them was never meant to be in the repo.
   const trackedScratchpad = await findTrackedPaths(worktreePath, filteredPaths);
+  // safeToUnstage = newly-staged scratchpad files that were NOT in HEAD;
+  // handled by `git rm --cached` after `git add -A`.
   const safeToUnstage = filteredPaths.filter((p) => !trackedScratchpad.includes(p));
 
   if (filteredPaths.length > 0) {
@@ -622,11 +660,23 @@ export async function autoCommitChanges(
       "auto-commit filtered scratchpad paths (BEC-157)",
     );
   }
-  if (trackedScratchpad.length > 0) {
-    getLog().warn(
-      { issueId, trackedScratchpad },
-      "auto-commit: scratchpad paths are tracked in HEAD; preserving as committed changes (operator should remove these from the repo manually if unwanted)",
+  // Only delete ROOT-LEVEL tracked scratchpad files (no path separator).
+  // Directory-level scratchpad (e.g. .claude/settings.json) may legitimately
+  // hold operator data; preserve the old behaviour of committing them as
+  // modifications rather than deleting them (the BEC-157 safety net).
+  const trackedRootScratchpad = trackedScratchpad.filter((p) => !p.includes("/"));
+  if (trackedRootScratchpad.length > 0) {
+    getLog().info(
+      { issueId, trackedRootScratchpad },
+      "auto-commit: removing tracked root-level scratchpad files from working tree so git add -A stages their deletion (BEC-180)",
     );
+    for (const p of trackedRootScratchpad) {
+      try {
+        await unlink(join(worktreePath, p));
+      } catch {
+        // file may already be absent (e.g. proactive scan removed it); git add -A handles either way
+      }
+    }
   }
 
   if (realPaths.length === 0 && trackedScratchpad.length === 0) {
@@ -645,6 +695,9 @@ export async function autoCommitChanges(
   // explicit path list looks cleaner but doesn't stage deletions of tracked
   // files (regression caught by the existing "handles deleted files"
   // integration test).
+  //
+  // For tracked scratchpad (trackedScratchpad), the working-tree deletion above
+  // already means git add -A will stage them as deleted — no git rm needed.
   await gitExecSafe(["add", "-A"], worktreePath);
   if (safeToUnstage.length > 0) {
     // Unstage scratchpad files. `git rm --cached -- <paths>` removes index

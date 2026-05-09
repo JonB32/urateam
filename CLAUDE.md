@@ -123,6 +123,7 @@ It is a pnpm monorepo with 3 packages:
 - `rebaseBranch()` — returns `{ success, hasConflicts }` for push queue conflict resolution
 - `verifyBranchMatch(worktreePath, expectedBranch)` — throws if HEAD ≠ expected branch (cross-contamination guard)
 - `installPrePushHook(repoDir)` — idempotent; writes `.git/hooks/pre-push` that aborts pushes when HEAD ≠ remote ref
+- `pruneWorktreesInRepoDirs(baseDir)` — runs `git worktree prune` only on subdirs of `baseDir` that have a `.git` entry; silently skips non-git dirs (e.g. `.agent-sweep/`) to prevent noisy ERROR logs from `git worktree`'s "not a git repository" complaint (BEC-180)
 - PR creation via `gh` CLI (fallback), GitHub App (Octokit), or GitLab REST API
 
 ### Worktree Isolation Model & Parallel Agent Dispatch Safety (BEC-99)
