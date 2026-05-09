@@ -5,6 +5,8 @@ export interface StageCostBreakdown {
   stage: string;
   inputTokens: number;
   outputTokens: number;
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
   /** When present, per-model rows from the fanout review stage. */
   modelRuns?: ModelRunRow[];
 }
@@ -90,21 +92,32 @@ export function formatPRCostSummary(
   pipelineKey: string,
   config: CostSummaryConfig,
 ): string {
-  const rendered = stages
-    .map((s) => renderStage(s, pipelineKey, config))
-    .filter((r) => r.inputTokens > 0 || r.outputTokens > 0);
-  if (rendered.length === 0) return "";
+  const pairs = stages
+    .map((s) => ({ stage: s, rendered: renderStage(s, pipelineKey, config) }))
+    .filter(({ rendered: r }) => r.inputTokens > 0 || r.outputTokens > 0);
+  if (pairs.length === 0) return "";
 
+  const rendered = pairs.map(({ rendered: r }) => r);
   const labelWidth = Math.max(...rendered.map((r) => r.label.length));
   const inWidth = Math.max(...rendered.map((r) => fmt(r.inputTokens).length));
   const outWidth = Math.max(...rendered.map((r) => fmt(r.outputTokens).length));
 
-  const lines = rendered.map((r) => {
+  const lines: string[] = [];
+  for (const { stage: s, rendered: r } of pairs) {
     const labelPad = `${r.label}:`.padEnd(labelWidth + 1);
     const inPad = fmt(r.inputTokens).padStart(inWidth);
     const outPad = fmt(r.outputTokens).padStart(outWidth);
-    return `- ${labelPad} ${inPad} in / ${outPad} out tokens — $${r.dollars.toFixed(4)}`;
-  });
+    lines.push(`- ${labelPad} ${inPad} in / ${outPad} out tokens — $${r.dollars.toFixed(4)}`);
+    const cacheRead = s.cacheReadInputTokens ?? 0;
+    const cacheCreation = s.cacheCreationInputTokens ?? 0;
+    if (cacheRead > 0 || cacheCreation > 0) {
+      const divisor = cacheRead + cacheCreation + s.inputTokens;
+      const pct = divisor > 0 ? Math.round((cacheRead / divisor) * 100) : 0;
+      const readK = (cacheRead / 1000).toFixed(1);
+      const createdK = (cacheCreation / 1000).toFixed(1);
+      lines.push(`  cache hit: ${pct}% — read ${readK}K / created ${createdK}K`);
+    }
+  }
 
   const totalDollars = rendered.reduce((a, r) => a + r.dollars, 0);
   return [
