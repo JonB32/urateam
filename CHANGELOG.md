@@ -17,6 +17,15 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+## [0.1.43] — 2026-05-10
+
+Bumps:
+- `@urateam/core`: 0.1.28 → 0.1.29
+- `@urateam/cli`: 0.1.30 → 0.1.31
+- `@urateam/dashboard`: 0.1.28 → 0.1.29
+- `create-urateam`: 0.1.31 → 0.1.32
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
 ## [0.1.42] — 2026-05-10
 
 Bumps:
