@@ -147,6 +147,26 @@ describe("POST /runs/:id/retry", () => {
       });
       expect(res.status).toBe(404);
     });
+
+    it("HX-Request header → 200 with HX-Redirect, not a 302 (so HTMX does full-page nav instead of swapping into the open dialog)", async () => {
+      await db
+        .update(pipelineRuns)
+        .set({ resumePayload: JSON.stringify({ stageIndex: 1 }) })
+        .where(eq(pipelineRuns.id, "run_1"));
+      const runner = {
+        resume: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(),
+      };
+      const app = appWith("operator", runner);
+      const res = await app.request("/runs/run_1/retry", {
+        method: "POST",
+        headers: { "HX-Request": "true" },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("HX-Redirect")).toBe("/runs/run_1");
+      expect(res.headers.get("Location")).toBeNull();
+      expect(runner.resume).toHaveBeenCalledWith("run_1");
+    });
   });
 });
 
