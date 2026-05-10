@@ -17,6 +17,10 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+### Added (OSS+)
+- **BEC-173** ([#191](https://github.com/JonB32/urateam/pull/191)) — `runGhLinearSync` utility + `.github/workflows/gh-linear-sync.yml` hourly cron. Open GitHub issues are scanned and synced as Linear tickets in the Triage state, with idempotency via `<!-- gh-linear-sync:NNN -->` markers. Optional `bidirectionalClose` mode closes GH issues when their Linear counterpart reaches Done. DI for SDK clients keeps the engine testable.
+- **BEC-177** ([#198](https://github.com/JonB32/urateam/pull/198)) — `selectRepoConfig(pipelineLabel, teamId, projectId, repoConfigs)` enables multi-repo PM routing. RepoConfigs can declare a `labelPattern`; tickets matching that label clone the corresponding repo. Backwards compatible — no labelPattern means the existing teamId/projectId key lookup. Wired in at the webhook handler `start` path and the PM scheduler's `start-todo` action.
+
 ## [0.1.41] — 2026-05-09
 
 Bumps:
@@ -34,6 +38,7 @@ Bumps:
 
 ### Fixed (OSS+)
 - **BEC-167** ([#197](https://github.com/JonB32/urateam/pull/197)) — Review-stage prompt now emits a `HandoffArtifact` JSON envelope with `reviewFindings` nested inside `context`. Eliminates the "Stage review completed — agent output was not parseable prose" placeholder summary on trivial no-finding PRs. Prompt change only; downstream consumers unchanged.
+- **BEC-183** ([#234](https://github.com/JonB32/urateam/pull/234)) — Executor pre-stream stall fix: `query()` could hang before emitting the first message, leaving the watchdog inactive (the watchdog only ticks on first message). New pre-stream timeout in `executor.ts` + `agent-stream.ts` aborts the query if no message arrives within the configured stall window, surfaces a clear error, and unblocks the run.
 
 ### Deploy
 - **BEC-137** ([#233](https://github.com/JonB32/urateam/pull/233)) — `quality-observer` sidecar service definition added to `docker-compose.dogfood.yml`. Build context defaults to `../urateam-quality-observer` (sibling clone); shares dogfood's sqlite + Claude OAuth volumes read-only. Operator-specific bits (Caddyfile, gh-app.pem, port mappings) remain on the host.
