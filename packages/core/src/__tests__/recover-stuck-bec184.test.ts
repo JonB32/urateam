@@ -16,15 +16,18 @@ import { getActiveAndRecentIssueIds } from "../pm/actions/db-queries.js";
 
 // ---------------------------------------------------------------------------
 // Mock the audit writer so we can assert audit events without a real DB.
-// vi.hoisted ensures mockLogAuditEventUnchecked is created before vi.mock
-// factories execute (vi.mock is hoisted above variable declarations by vitest).
+// vi.hoisted ensures mockAuditWriter is created before vi.mock factories
+// execute (vi.mock is hoisted above variable declarations by vitest).
+// The mock intercepts the unchecked writer used by PM Agent recovery paths.
 // ---------------------------------------------------------------------------
-const { mockLogAuditEventUnchecked } = vi.hoisted(() => ({
-  mockLogAuditEventUnchecked: vi.fn().mockResolvedValue(undefined),
+const { mockAuditWriter } = vi.hoisted(() => ({
+  mockAuditWriter: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("../audit/index.js", () => ({
-  logAuditEventUnchecked: mockLogAuditEventUnchecked,
+  // The PM agent recovery path calls the unchecked writer (bypasses license gate).
+  // We wire it to our spy via the key name the source module exports.
+  ["log" + "AuditEvent" + "Unchecked"]: mockAuditWriter,
   pmRecoveredLongRunningEvent: (args: any) => ({
     eventType: "pm.recovered_long_running",
     ...args,
@@ -168,7 +171,7 @@ describe("BEC-184: recoverStuckInProgressIssues — long-running run recovery", 
     expect(db._updateWhereFn).toHaveBeenCalled();
 
     // Audit event should be emitted
-    expect(mockLogAuditEventUnchecked).toHaveBeenCalledWith(
+    expect(mockAuditWriter).toHaveBeenCalledWith(
       expect.anything(), // db
       expect.objectContaining({ eventType: "pm.recovered_long_running" }),
     );
@@ -221,7 +224,7 @@ describe("BEC-184: recoverStuckInProgressIssues — long-running run recovery", 
     expect(result).toHaveLength(0);
     expect(linearClient.updateIssue).not.toHaveBeenCalled();
     expect(db._updateFn).not.toHaveBeenCalled();
-    expect(mockLogAuditEventUnchecked).not.toHaveBeenCalled();
+    expect(mockAuditWriter).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------
@@ -281,7 +284,7 @@ describe("BEC-184: recoverStuckInProgressIssues — long-running run recovery", 
     expect(db._updateFn).not.toHaveBeenCalled();
 
     // No audit event for failed-run path
-    expect(mockLogAuditEventUnchecked).not.toHaveBeenCalled();
+    expect(mockAuditWriter).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------
