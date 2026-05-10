@@ -36,11 +36,12 @@ const doneState: LinearSyncState = {
 function makeGhIssue(
   overrides: Partial<GitHubIssue> = {},
 ): GitHubIssue {
+  const number = overrides.number ?? 42;
   return {
-    number: 42,
+    number,
     title: "Some bug report",
     body: "The app crashes when login.",
-    html_url: "https://github.com/owner/repo/issues/42",
+    html_url: `https://github.com/owner/repo/issues/${number}`,
     labels: [{ name: "urateam-quality-observer" }],
     state: "open",
     ...overrides,
