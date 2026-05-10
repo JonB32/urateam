@@ -1,7 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   renderChangeSummary,
   type ChangeSummaryInput,
+  maybePostChangeSummary,
+  type MaybePostChangeSummaryDeps,
 } from "../../pipeline/pr-change-summary.js";
 import type { HandoffArtifact } from "../../types.js";
 import type { ReviewFeedbackComment } from "../../webhook/github-handler.js";
@@ -232,5 +234,109 @@ describe("renderChangeSummary", () => {
     });
     expect(out).toContain("https://github.com/o/r/pull/1#discussion_r999");
     expect(out).toContain("https://github.com/o/r/pull/1#issuecomment-888");
+  });
+});
+
+function makeDeps(over: Partial<MaybePostChangeSummaryDeps> = {}): MaybePostChangeSummaryDeps {
+  const noopLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  return {
+    run: {
+      id: "run_abc",
+      runType: "review-feedback",
+      prUrl: "https://github.com/o/r/pull/1",
+      feedbackContext: JSON.stringify(triggeringComments),
+      totalInputTokens: 1000,
+      totalOutputTokens: 200,
+    },
+    handoff,
+    prNumber: 1,
+    owner: "o",
+    repo: "r",
+    octokit: {} as never,
+    postPRComment: vi.fn().mockResolvedValue(undefined),
+    dashboardBaseUrl: "https://dogfood.urateams.com:8443",
+    logger: noopLogger,
+    ...over,
+  };
+}
+
+describe("maybePostChangeSummary", () => {
+  it("posts exactly once for a review-feedback run with a prUrl", async () => {
+    const deps = makeDeps();
+    await maybePostChangeSummary(deps);
+    expect(deps.postPRComment).toHaveBeenCalledTimes(1);
+    const [, owner, repo, prNumber, body] = (
+      deps.postPRComment as ReturnType<typeof vi.fn>
+    ).mock.calls[0];
+    expect(owner).toBe("o");
+    expect(repo).toBe("r");
+    expect(prNumber).toBe(1);
+    expect(body).toContain("## 🤖 Addressed PR feedback");
+  });
+
+  it("does NOT post for runType=standard", async () => {
+    const deps = makeDeps({
+      run: { ...makeDeps().run, runType: "standard" },
+    });
+    await maybePostChangeSummary(deps);
+    expect(deps.postPRComment).not.toHaveBeenCalled();
+  });
+
+  it("does NOT post when prUrl is null", async () => {
+    const deps = makeDeps({
+      run: { ...makeDeps().run, prUrl: null },
+      prNumber: null,
+    });
+    await maybePostChangeSummary(deps);
+    expect(deps.postPRComment).not.toHaveBeenCalled();
+    expect(deps.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: "run_abc" }),
+      "skipped change summary: no PR URL on run",
+    );
+  });
+
+  it("does NOT post when handoff is missing", async () => {
+    const deps = makeDeps({ handoff: null });
+    await maybePostChangeSummary(deps);
+    expect(deps.postPRComment).not.toHaveBeenCalled();
+    expect(deps.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: "run_abc" }),
+      "skipped change summary: no handoff persisted",
+    );
+  });
+
+  it("posts a degraded comment when feedback_context JSON is malformed", async () => {
+    const deps = makeDeps({
+      run: { ...makeDeps().run, feedbackContext: "{not json" },
+    });
+    await maybePostChangeSummary(deps);
+    expect(deps.postPRComment).toHaveBeenCalledTimes(1);
+    const body = (deps.postPRComment as ReturnType<typeof vi.fn>).mock.calls[0][4];
+    expect(body).toContain("## 🤖 Addressed PR feedback");
+    // Degraded body has no "In response to" section
+    expect(body).not.toContain("**In response to:**");
+    expect(deps.logger.error).toHaveBeenCalled();
+  });
+
+  it("does not throw when postPRComment rejects (logs at warn level)", async () => {
+    const deps = makeDeps({
+      postPRComment: vi.fn().mockRejectedValue(new Error("rate limit")),
+    });
+    await expect(maybePostChangeSummary(deps)).resolves.toBeUndefined();
+    expect(deps.logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: "run_abc", prNumber: 1 }),
+      "PR change summary post failed (non-fatal)",
+    );
+  });
+
+  it("treats null/missing feedback_context as empty triggering comments (no In response to section)", async () => {
+    const deps = makeDeps({
+      run: { ...makeDeps().run, feedbackContext: null },
+    });
+    await maybePostChangeSummary(deps);
+    expect(deps.postPRComment).toHaveBeenCalledTimes(1);
+    const body = (deps.postPRComment as ReturnType<typeof vi.fn>).mock.calls[0][4];
+    expect(body).toContain("## 🤖 Addressed PR feedback");
+    expect(body).not.toContain("**In response to:**");
   });
 });
