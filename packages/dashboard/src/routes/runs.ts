@@ -193,7 +193,17 @@ export function createRunsRouter(
           }),
         );
       }
-      return c.redirect(`${effectiveBasePath}/runs/${id}`, 302);
+      // HTMX-driven submits (the real user path — CSRF requires HX-Request)
+      // need HX-Redirect for a full-page navigation. A plain 302 makes HTMX
+      // follow the redirect via XHR and swap the response into the originating
+      // form, leaving the <dialog> open with the run-detail page rendered
+      // inside the dialog's <form>.
+      const target = `${effectiveBasePath}/runs/${id}`;
+      if (c.req.header("HX-Request")) {
+        c.header("HX-Redirect", target);
+        return c.body(null, 200);
+      }
+      return c.redirect(target, 302);
     },
   );
 
