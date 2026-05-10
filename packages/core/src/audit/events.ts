@@ -98,7 +98,30 @@ export function pmTriageClassifiedEvent(args: {
     actor: "pm-agent",
     actorType: "pm-agent",
     issueId: args.issueId,
+    // Truncate rationale to 500 chars to keep the audit payload bounded
+    // (target max audit event JSON size ~2KB; most rationale strings are <100 chars).
     payload: { label: args.label, rationale: args.rationale.slice(0, 500) },
+  });
+}
+
+export function pmRecoveredLongRunningEvent(args: {
+  issueId: string;
+  runId: string;
+  startedAt: Date;
+  stuckRunAgeMinutes: number;
+  targetState: string;
+}): AuditEvent {
+  return base({
+    eventType: "pm.recovered_long_running",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    issueId: args.issueId,
+    runId: args.runId,
+    payload: {
+      startedAt: args.startedAt.toISOString(),
+      stuckRunAgeMinutes: args.stuckRunAgeMinutes,
+      targetState: args.targetState,
+    },
   });
 }
 

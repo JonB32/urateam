@@ -1,9 +1,24 @@
 import type { AnyDb } from "../../db/client.js";
 import { pipelineRuns } from "../../db/schema.js";
-import { and, desc, eq, gte, inArray } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, or } from "drizzle-orm";
 
 /** Statuses considered "active" (pipeline currently running). */
 export const ACTIVE_STATUSES = ["queued", "running"] as const;
+
+/**
+ * Count leading 'failed' rows in a most-recent-first ordered list of pipeline
+ * run rows, stopping at the first non-failed row.  Shared by
+ * `countConsecutiveFailures` (single issue) and `batchCountConsecutiveFailures`
+ * (batch variant) to keep the counting logic in one place.
+ */
+function countLeadingFailures(rows: Array<{ status: string }>): number {
+  let count = 0;
+  for (const row of rows) {
+    if (row.status === "failed") count++;
+    else break;
+  }
+  return count;
+}
 
 /** Default window for considering a recently-completed run as still "fresh". */
 const RECENT_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
@@ -15,15 +30,40 @@ const RECENT_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
  *
  * Used by both startTodoIssues and recoverStuckInProgressIssues to avoid
  * re-processing issues that already have pipeline activity.
+ *
+ * BEC-184: when `stuckRunAgeMs` is provided, 'running' runs that started MORE
+ * THAN `stuckRunAgeMs` ago are excluded from `activeIssueIds`. This allows
+ * recoverStuckInProgressIssues to treat zombie/stalled runs as stuck.
+ * 'queued' runs are always considered active regardless of age.
  */
 export async function getActiveAndRecentIssueIds(
   db: AnyDb,
   recentWindowMs = RECENT_WINDOW_MS,
+  stuckRunAgeMs?: number,
 ): Promise<{ activeIssueIds: Set<string>; recentlyProcessed: Set<string> }> {
-  const activeRows = await db
-    .select({ issueId: pipelineRuns.issueId })
-    .from(pipelineRuns)
-    .where(inArray(pipelineRuns.status, [...ACTIVE_STATUSES]));
+  let activeRows: any[];
+  if (stuckRunAgeMs !== undefined) {
+    // BEC-184: exclude long-running 'running' rows from the active set so they
+    // fall through to the stuck detection logic. 'queued' is always active.
+    const stuckCutoff = new Date(Date.now() - stuckRunAgeMs);
+    activeRows = await db
+      .select({ issueId: pipelineRuns.issueId })
+      .from(pipelineRuns)
+      .where(
+        or(
+          eq(pipelineRuns.status, "queued"),
+          and(
+            eq(pipelineRuns.status, "running"),
+            gte(pipelineRuns.startedAt, stuckCutoff),
+          ),
+        ),
+      );
+  } else {
+    activeRows = await db
+      .select({ issueId: pipelineRuns.issueId })
+      .from(pipelineRuns)
+      .where(inArray(pipelineRuns.status, [...ACTIVE_STATUSES]));
+  }
   const activeIssueIds = new Set<string>((activeRows as any[]).map((r) => r.issueId));
 
   const recentCutoff = new Date(Date.now() - recentWindowMs);
@@ -70,12 +110,7 @@ export async function countConsecutiveFailures(
     // string, so it gives us a stable ordering when `startedAt` collides.
     .orderBy(desc(pipelineRuns.startedAt), desc(pipelineRuns.id));
 
-  let count = 0;
-  for (const row of rows as Array<{ status: string }>) {
-    if (row.status === "failed") count++;
-    else break;
-  }
-  return count;
+  return countLeadingFailures(rows as Array<{ status: string }>);
 }
 
 /**
@@ -118,16 +153,11 @@ export async function batchCountConsecutiveFailures(
     }
   }
 
-  // Count leading "failed" rows for each issue (same logic as countConsecutiveFailures).
+  // Count leading "failed" rows for each issue (delegates to shared helper).
   const result = new Map<string, number>();
   for (const issueId of issueIds) {
     const issueRows = byIssue.get(issueId) ?? [];
-    let count = 0;
-    for (const row of issueRows) {
-      if (row.status === "failed") count++;
-      else break;
-    }
-    result.set(issueId, count);
+    result.set(issueId, countLeadingFailures(issueRows));
   }
   return result;
 }

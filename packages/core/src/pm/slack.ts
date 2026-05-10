@@ -149,7 +149,7 @@ export class PmSlackNotifier {
     ];
     for (const issue of issues) {
       const runNote = issue.lastRunStatus
-        ? ` (last run: \`${issue.lastRunStatus}\`)`
+        ? ` (last run: \`${issue.lastRunStatus}\`${issue.recoveredLongRunning ? " — zombie run marked failed" : ""})`
         : "";
       lines.push(
         `• *${issue.identifier}* — ${issue.title}: \`${issue.previousState}\` → \`${issue.targetState}\`${runNote}`,
