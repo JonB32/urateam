@@ -112,7 +112,7 @@ export function renderChangeSummary(input: ChangeSummaryInput): string {
 
   const runLink = dashboardBaseUrl
     ? `[${run.id}](${dashboardBaseUrl}/runs/${run.id})`
-    : `Run ${run.id}`;
+    : run.id;
   const footer = `\n<sub>Run ${runLink} · auto-generated</sub>`;
 
   return `## 🤖 Addressed PR feedback\n\n${summary}\n${inResponseSection}${filesSection}${footer}`;

@@ -190,9 +190,12 @@ describe("renderChangeSummary", () => {
     expect(out).not.toContain("**In response to:**");
   });
 
-  it("renders a plain run id with no link when dashboardBaseUrl is empty", () => {
+  it("renders a plain run id with no link when dashboardBaseUrl is empty (no doubled 'Run')", () => {
     const out = renderChangeSummary({ ...baseInput, dashboardBaseUrl: "" });
-    expect(out).toContain("Run run_abc");
+    // The footer's "Run " prefix should be the ONLY "Run " in the output;
+    // earlier impl produced "Run Run run_abc" by doubling.
+    expect(out).toContain("<sub>Run run_abc · auto-generated</sub>");
+    expect(out).not.toContain("Run Run");
     expect(out).not.toContain("](/runs/run_abc)");
   });
 
