@@ -9,6 +9,12 @@ import type { ReviewFeedbackComment } from "../../webhook/github-handler.js";
 // Task 4 will add htmlUrl to ReviewFeedbackComment. Until then, extend locally.
 type Cmt = ReviewFeedbackComment & { htmlUrl?: string };
 
+// Task 3 will add addressedComments to the HandoffArtifact Zod schema. Until
+// then, use a local alias so tests avoid repetitive inline casts.
+type ContextWithAddressed = HandoffArtifact["context"] & {
+  addressedComments?: { commentId: string; response: string }[];
+};
+
 const handoff: HandoffArtifact = {
   runId: "run_abc",
   issueId: "BEC-100",
@@ -22,11 +28,11 @@ const handoff: HandoffArtifact = {
     constraints: [],
     assumptions: [],
     // Task 3 will add addressedComments to the Zod schema; cast for now
-    ...(({ addressedComments: [
+    addressedComments: [
       { commentId: "c-101", response: "Added null check before destructuring." },
       { commentId: "c-102", response: "Renamed `flag` → `isEnabled` per request." },
-    ] }) as Record<string, unknown>),
-  } as HandoffArtifact["context"] & { addressedComments?: { commentId: string; response: string }[] },
+    ],
+  } as ContextWithAddressed,
   tokenBudget: { contextTokensUsed: 5000, recommendedMaxTurns: 10 },
 };
 
@@ -94,7 +100,7 @@ describe("renderChangeSummary", () => {
       ...baseInput,
       handoff: {
         ...handoff,
-        context: { ...handoff.context, addressedComments: undefined } as HandoffArtifact["context"] & { addressedComments?: { commentId: string; response: string }[] },
+        context: { ...handoff.context, addressedComments: undefined } as ContextWithAddressed,
       },
     });
     expect(out).toContain("**In response to:**");
@@ -111,7 +117,7 @@ describe("renderChangeSummary", () => {
       ...baseInput,
       handoff: {
         ...handoff,
-        context: { ...handoff.context, addressedComments: [] } as HandoffArtifact["context"] & { addressedComments?: { commentId: string; response: string }[] },
+        context: { ...handoff.context, addressedComments: [] } as ContextWithAddressed,
       },
     });
     expect(out).toContain("_(per-comment responses unavailable; see diff)_");
@@ -128,7 +134,7 @@ describe("renderChangeSummary", () => {
             { commentId: "c-101", response: "Added null check." },
             { commentId: "c-FAKE", response: "This should not render." },
           ],
-        } as HandoffArtifact["context"] & { addressedComments?: { commentId: string; response: string }[] },
+        } as ContextWithAddressed,
       },
     });
     expect(out).toContain("Added null check.");
@@ -146,7 +152,7 @@ describe("renderChangeSummary", () => {
             { commentId: "c-101", response: "Did the thing." },
             // c-102 has no response
           ],
-        } as HandoffArtifact["context"] & { addressedComments?: { commentId: string; response: string }[] },
+        } as ContextWithAddressed,
       },
     });
     expect(out).toContain("Did the thing.");
@@ -179,7 +185,7 @@ describe("renderChangeSummary", () => {
     expect(out).toContain("src/\\[weird\\]\\_\\*name.ts");
   });
 
-  it("renders an empty 'In response to' section when triggeringComments is empty", () => {
+  it("suppresses the 'In response to' section when triggeringComments is empty", () => {
     const out = renderChangeSummary({
       ...baseInput,
       triggeringComments: [],
@@ -205,7 +211,7 @@ describe("renderChangeSummary", () => {
       prUrl: "https://github.com/o/r/pull/1",
       handoff: {
         ...handoff,
-        context: { ...handoff.context, addressedComments: undefined } as HandoffArtifact["context"] & { addressedComments?: { commentId: string; response: string }[] },
+        context: { ...handoff.context, addressedComments: undefined } as ContextWithAddressed,
       },
       triggeringComments: [
         {

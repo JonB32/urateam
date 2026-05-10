@@ -20,6 +20,9 @@ type ReviewFeedbackCommentWithUrl = ReviewFeedbackComment & {
  * strings (author names, file paths, comment bodies). Conservative — escapes
  * anything that could affect markdown rendering.
  */
+// `.` is omitted from the escape set: it is only markdown-special at the
+// start of a line in ordered-list contexts (e.g. `1.`) — not in author
+// names or file-paths rendered inline within link text.
 function escapeMd(s: string): string {
   return s.replace(/[\\`*_{}\[\]()<>#+\-!|]/g, (ch) => `\\${ch}`);
 }
@@ -84,6 +87,12 @@ export function renderChangeSummary(input: ChangeSummaryInput): string {
       : `@${escapeMd(c.author)}'s general comment`;
     const link = url ? `[${linkText}](${url})` : linkText;
     const response = addressedById.get(c.commentId);
+    // Agent-emitted responses are interpolated raw — they are pipeline-
+    // controlled output (not third-party user input) and may legitimately
+    // contain markdown formatting (e.g. backticks for code references).
+    // The agent prompt instructs ≤12 words per response, limiting injection
+    // surface. If we ever discover prompt-injection paths from PR comments
+    // that survive into `response`, revisit this decision.
     return response ? `- ${link} — ${response}` : `- ${link}`;
   });
 
@@ -192,17 +201,26 @@ export async function maybePostChangeSummary(
     }
   }
 
-  const body = renderChangeSummary({
-    handoff,
-    run: {
-      id: run.id,
-      totalInputTokens: run.totalInputTokens,
-      totalOutputTokens: run.totalOutputTokens,
-    },
-    triggeringComments,
-    dashboardBaseUrl,
-    prUrl: run.prUrl,
-  });
+  let body: string;
+  try {
+    body = renderChangeSummary({
+      handoff,
+      run: {
+        id: run.id,
+        totalInputTokens: run.totalInputTokens,
+        totalOutputTokens: run.totalOutputTokens,
+      },
+      triggeringComments,
+      dashboardBaseUrl,
+      prUrl: run.prUrl,
+    });
+  } catch (err) {
+    logger.error(
+      { runId: run.id, err: err instanceof Error ? err.message : String(err) },
+      "failed to render change summary — skipping post",
+    );
+    return;
+  }
 
   try {
     await postPRComment(octokit, owner, repo, prNumber, body);
@@ -212,11 +230,7 @@ export async function maybePostChangeSummary(
     );
   } catch (err) {
     logger.warn(
-      {
-        runId: run.id,
-        prNumber,
-        err: err instanceof Error ? err.message : String(err),
-      },
+      { runId: run.id, prNumber, err: err instanceof Error ? err.message : String(err) },
       "PR change summary post failed (non-fatal)",
     );
   }
