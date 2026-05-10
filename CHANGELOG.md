@@ -25,7 +25,11 @@ Bumps:
 - `@urateam/dashboard`: 0.1.28 → 0.1.29
 - `create-urateam`: 0.1.31 → 0.1.32
 
-<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+### Fixed (OSS+)
+- **Dashboard "Confirm retry" button** ([#240](https://github.com/JonB32/urateam/pull/240)) — the retry POST handler returned a plain 302, but the user-facing form is HTMX-driven (CSRF requires `HX-Request`). HTMX follows 302s via XHR and swaps the response into the originating form, leaving the `<dialog>` open with the run-detail page rendered inside the dialog's `<form>`. Fixed: when `HX-Request` is present, return 200 + `HX-Redirect: <url>` so HTMX does a full-page navigation. Plain 302 retained for non-HTMX callers.
+
+### Added
+- **BEC-184** ([#235](https://github.com/JonB32/urateam/pull/235)) — `recoverStuckInProgressIssues` now also detects long-`running` runs (previously only `failed`). Closes the visibility gap where a run that hung past its watchdog window stayed in `running` indefinitely with no recovery path. Configurable stall threshold via `PM_AGENT_RUNNING_STALL_HOURS` (default 4h).
 ## [0.1.42] — 2026-05-10
 
 Bumps:
