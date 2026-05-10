@@ -1,0 +1,74 @@
+name: GitHub Issues → Linear Sync
+
+# Syncs open GitHub issues to Linear tickets in the Triage state.
+# Runs every hour and can be triggered manually for immediate sync.
+#
+# Required secrets (configure in repo Settings → Secrets → Actions):
+#   GH_LINEAR_SYNC_GITHUB_TOKEN  — GitHub PAT or GITHUB_TOKEN
+#   GH_LINEAR_SYNC_LINEAR_API_KEY — Linear API key (Personal API key, not OAuth)
+#   GH_LINEAR_SYNC_LINEAR_TEAM_ID — Linear team UUID to receive new tickets
+#
+# Optional env vars (set as repo variables or add to the env block below):
+#   GH_LINEAR_SYNC_LABEL_FILTERS       — comma-separated GH label names to filter
+#   GH_LINEAR_SYNC_TRIAGE_STATE        — Linear state name (default: Triage)
+#   GH_LINEAR_SYNC_BIDIRECTIONAL_CLOSE — set to "true" to close GH issues when Linear is Done
+#   GH_LINEAR_SYNC_DRY_RUN             — set to "true" to log without mutating data
+#
+# See deploy/GH_LINEAR_SYNC_SETUP.md for the full setup guide.
+
+on:
+  schedule:
+    # Every hour at minute 0
+    - cron: "0 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry-run (log planned actions, no writes)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      label_filters:
+        description: "Comma-separated GitHub label filters (overrides repo variable)"
+        required: false
+        default: ""
+
+# Prevent concurrent runs so we don't double-create Linear tickets.
+concurrency:
+  group: gh-linear-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync GitHub Issues to Linear
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages
+        run: pnpm build
+
+      - name: Run sync
+        env:
+          GH_LINEAR_SYNC_GITHUB_TOKEN: ${{ secrets.GH_LINEAR_SYNC_GITHUB_TOKEN || github.token }}
+          GH_LINEAR_SYNC_GITHUB_REPO: ${{ github.repository }}
+          GH_LINEAR_SYNC_LINEAR_API_KEY: ${{ secrets.GH_LINEAR_SYNC_LINEAR_API_KEY }}
+          GH_LINEAR_SYNC_LINEAR_TEAM_ID: ${{ secrets.GH_LINEAR_SYNC_LINEAR_TEAM_ID }}
+          GH_LINEAR_SYNC_LABEL_FILTERS: ${{ inputs.label_filters || vars.GH_LINEAR_SYNC_LABEL_FILTERS || 'urateam-quality-observer,bug,enhancement' }}
+          GH_LINEAR_SYNC_TRIAGE_STATE: ${{ vars.GH_LINEAR_SYNC_TRIAGE_STATE || 'Triage' }}
+          GH_LINEAR_SYNC_BIDIRECTIONAL_CLOSE: ${{ vars.GH_LINEAR_SYNC_BIDIRECTIONAL_CLOSE || 'false' }}
+          GH_LINEAR_SYNC_DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: pnpm exec tsx scripts/gh-linear-sync.ts
