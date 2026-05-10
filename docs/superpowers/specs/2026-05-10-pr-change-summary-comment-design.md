@@ -67,7 +67,7 @@ At the existing `onPipelineComplete` callsite (the same one BEC-175 hooks), afte
 ```ts
 if (run.runType === "review-feedback" && run.prUrl) {
   try {
-    const triggeringComments = JSON.parse(run.triggeringComments ?? "[]");
+    const triggeringComments = JSON.parse(run.feedbackContext ?? "[]");
     const body = renderChangeSummary({
       handoff: lastImplementHandoff,
       run,
@@ -96,15 +96,11 @@ addressedComments?: Array<{
 
 Additive only — existing handoffs without the field continue to parse.
 
-### DB migration: `pipeline_runs.triggering_comments`
+### DB: reuse existing `pipeline_runs.feedback_context` column
 
-Add a nullable JSON column to persist the `ReviewFeedbackComment[]` that kicked off a `review-feedback` run, so `onPipelineComplete` can read them. `startReviewFeedback()` writes the column at run-create time. Older rows are NULL; renderer treats NULL as empty array.
+No migration needed. The `feedback_context` column already exists (migration `003_review_feedback.sql` / postgres `004_review_feedback.sql`) and `runner.startReviewFeedback()` already writes `JSON.stringify(feedbackComments)` to it. `onPipelineComplete` reads from this column when rendering the change summary. Older runs without the column populated parse as empty array.
 
-```sql
-ALTER TABLE pipeline_runs ADD COLUMN triggering_comments TEXT;  -- JSON, nullable
-```
-
-(SQLite TEXT — same encoding as other JSON columns in the schema.)
+The original spec assumed a new `triggering_comments` column was needed; codebase exploration showed the persistence is already in place.
 
 ### Prompt change: `packages/core/src/executor/prompt/templates.ts`
 
@@ -129,7 +125,7 @@ webhook/github-handler.ts builds ReviewFeedbackComment[]
         ▼
 runner.startReviewFeedback({ comments, ... })
    • inserts pipeline_runs row with runType="review-feedback"
-   • NEW: writes JSON.stringify(comments) to triggering_comments column
+   • already writes JSON.stringify(comments) to existing feedback_context column
         │
         ▼
 implement stage runs with the BEC-167 review-feedback prompt
@@ -179,7 +175,7 @@ Comment posting is best-effort; pipeline completion never fails because of it.
 |---|---|
 | `addPRComment` rejects (rate-limit, transient GH outage, deleted PR) | Wrap in try/catch; log at `level: 40` with `{ runId, prUrl, err }`. No retry. |
 | `run.prUrl` missing (review-feedback gave up without a PR) | `level: 30` `"skipped change summary: no PR URL on run"`, return. |
-| `triggering_comments` JSON parse fails (corrupted column, drift) | `level: 50` (real bug worth seeing). Still post a degraded comment: summary + files changed, no "In response to" section. |
+| `feedback_context` JSON parse fails (corrupted column, drift) | `level: 50` (real bug worth seeing). Still post a degraded comment: summary + files changed, no "In response to" section. |
 | `lastImplementHandoff` missing (run completed but no handoff persisted) | `level: 30` skip, same as `prUrl` missing. Nothing to summarize. |
 | `context.addressedComments` missing or empty | Renderer fallback: list triggering comments without per-comment responses, append `_(per-comment responses unavailable; see diff)_`. Still posts. |
 
@@ -188,8 +184,7 @@ Comment posting is best-effort; pipeline completion never fails because of it.
 | Test file | Coverage |
 |---|---|
 | `packages/core/src/__tests__/pr-change-summary.test.ts` | All-fields-present case renders the documented markdown shape exactly. Missing `addressedComments` falls back to no-response rendering with the disclaimer line. Extra commentIds in `addressedComments` not in `triggeringComments` are dropped silently. HTML/markdown injection in author names + file paths is escaped. Empty `triggeringComments` produces a comment with no "In response to" section but still has summary + files changed. |
-| `packages/core/src/__tests__/runner-pr-change-summary.test.ts` | `onPipelineComplete` posts exactly once for a `review-feedback` run with `prUrl`. Does NOT post for `runType: "standard"`. Does NOT post when `prUrl` is null. Survives an `addPRComment` rejection without throwing (assert pipeline completion still succeeds). Reads `triggering_comments` from the persisted row. |
-| Migration test in existing migration test file | New `triggering_comments` column round-trips JSON correctly; older rows with NULL load as empty array on read. |
+| `packages/core/src/__tests__/runner-pr-change-summary.test.ts` | `onPipelineComplete` posts exactly once for a `review-feedback` run with `prUrl`. Does NOT post for `runType: "standard"`. Does NOT post when `prUrl` is null. Survives an `addPRComment` rejection without throwing (assert pipeline completion still succeeds). Reads `feedback_context` from the persisted row. |
 
 ## Out of scope (explicitly)
 
@@ -203,7 +198,7 @@ Comment posting is best-effort; pipeline completion never fails because of it.
 
 - Should the `dashboardBaseUrl` come from config or env? BEC-175's run links use the same value; we should reuse whatever it does. (Spec defers to implementation discovery.)
 - If a reviewer leaves N+1 new comments while a review-feedback run is in flight, the new comments aren't part of `triggeringComments` for the running pipeline. The runner already has rate-limit gating (`PR URL -> runId`); the new comments will trigger a follow-up run after the current one completes, which posts its own change summary. Acceptable.
-- Migration rollout: fresh installs get the new column from the create-table SQL; existing dogfood deploy needs the ALTER TABLE applied. The repo already runs migrations on boot; this one is additive and safe to apply at any time.
+- Migration rollout: not applicable — `feedback_context` column already exists on all environments.
 
 ## Acceptance criteria
 
@@ -211,7 +206,7 @@ Comment posting is best-effort; pipeline completion never fails because of it.
 - [ ] `runner.onPipelineComplete` calls the renderer and `addPRComment` exactly once for a successful `review-feedback` run with a `prUrl`.
 - [ ] No comment is posted for runs with `runType !== "review-feedback"`.
 - [ ] No comment is posted when `prUrl` is null/missing.
-- [ ] `pipeline_runs` schema has a nullable `triggering_comments` JSON column; `startReviewFeedback` populates it; older rows continue to load as NULL.
+- [ ] `onPipelineComplete` reads `feedback_context` (existing column) for the triggering comments; treats null/missing as empty array.
 - [ ] `HandoffArtifact.context` schema accepts an optional `addressedComments: Array<{ commentId: string; response: string }>` field; absence does not break parsing.
 - [ ] Review-feedback implement-stage prompt instructs the agent to emit `addressedComments` with one entry per triggering comment, response ≤ 12 words.
 - [ ] Renderer renders the documented markdown shape when all fields are present; falls back gracefully when `addressedComments` is empty/missing.
