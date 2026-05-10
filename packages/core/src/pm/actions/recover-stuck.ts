@@ -228,7 +228,7 @@ export async function recoverStuckInProgressIssues(
       // the same run as active.
       if (isLongRunningRun && lastRunId) {
         const errorMessage = `recovered: running > ${stuckRunAgeMinutes} min with no completion`;
-        await (db as any)
+        await db
           .update(pipelineRuns)
           .set({
             status: "failed",
