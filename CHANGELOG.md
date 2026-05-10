@@ -17,10 +17,17 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+## [0.1.42] — 2026-05-10
+
+Bumps:
+- `@urateam/core`: 0.1.27 → 0.1.28
+- `@urateam/cli`: 0.1.29 → 0.1.30
+- `@urateam/dashboard`: 0.1.27 → 0.1.28
+- `create-urateam`: 0.1.30 → 0.1.31
+
 ### Added (OSS+)
 - **BEC-173** ([#191](https://github.com/JonB32/urateam/pull/191)) — `runGhLinearSync` utility + `.github/workflows/gh-linear-sync.yml` hourly cron. Open GitHub issues are scanned and synced as Linear tickets in the Triage state, with idempotency via `<!-- gh-linear-sync:NNN -->` markers. Optional `bidirectionalClose` mode closes GH issues when their Linear counterpart reaches Done. DI for SDK clients keeps the engine testable.
 - **BEC-177** ([#198](https://github.com/JonB32/urateam/pull/198)) — `selectRepoConfig(pipelineLabel, teamId, projectId, repoConfigs)` enables multi-repo PM routing. RepoConfigs can declare a `labelPattern`; tickets matching that label clone the corresponding repo. Backwards compatible — no labelPattern means the existing teamId/projectId key lookup. Wired in at the webhook handler `start` path and the PM scheduler's `start-todo` action.
-
 ## [0.1.41] — 2026-05-09
 
 Bumps:
