@@ -15,6 +15,28 @@ export interface PostFanoutResult {
    * Audit events (`review.fanout_model_completed`) still fire for suppressed runs.
    */
   suppressedEmptyCount: number;
+  /**
+   * Number of failed runs suppressed from PR comments because the failure is
+   * an upstream-provider fault (200 OK but no completion / `Provider returned
+   * error` from OpenRouter free-tier models). The run still records as failed
+   * in the DB and emits its audit event — we just don't post a noisy "Status:
+   * failed" comment on the PR for something the operator can't act on.
+   */
+  suppressedProviderFailureCount: number;
+}
+
+/**
+ * Match the error class introduced by the openrouter-client when the upstream
+ * provider returns 200 OK with `{ error: ... }` and no `choices`. Repeats
+ * regularly for free-tier / community models (notably the nvidia free tier).
+ * Surfacing each such failure as a per-model PR comment was creating noise
+ * with no operator action — the right fix is to remove the model from
+ * REVIEW_MODELS, which the model-health probe already flags advisorily.
+ */
+function isUpstreamProviderError(run: ReviewModelRun): boolean {
+  if (run.status !== "failed") return false;
+  const msg = run.errorMessage ?? "";
+  return msg.includes("openrouter response missing choices");
 }
 
 export async function postFanoutCommentsToPR(
@@ -26,17 +48,25 @@ export async function postFanoutCommentsToPR(
 ): Promise<PostFanoutResult> {
   const toPost: ReviewModelRun[] = [];
   let suppressedEmptyCount = 0;
+  let suppressedProviderFailureCount = 0;
 
   for (const run of runs) {
-    const shouldSuppress =
+    const isEmptySuccess =
       run.status !== "failed" &&
       run.findings.length === 0 &&
       run.rawOutput === undefined;
-    if (shouldSuppress) {
+    const isUpstreamFault = isUpstreamProviderError(run);
+    if (isEmptySuccess) {
       suppressedEmptyCount++;
       log.debug(
         { modelId: run.modelId },
         "fanout: suppressing empty-findings comment (no findings, no rawOutput)",
+      );
+    } else if (isUpstreamFault) {
+      suppressedProviderFailureCount++;
+      log.info(
+        { modelId: run.modelId, err: run.errorMessage },
+        "fanout: suppressing upstream-provider failure from PR comment (DB row + audit event still recorded)",
       );
     } else {
       toPost.push(run);
@@ -58,7 +88,7 @@ export async function postFanoutCommentsToPR(
     }
   });
   const fallbackCount = runs.filter((r) => r.rawOutput !== undefined).length;
-  return { fallbackCount, suppressedEmptyCount };
+  return { fallbackCount, suppressedEmptyCount, suppressedProviderFailureCount };
 }
 
 export function renderRunMarkdown(run: ReviewModelRun): string {
