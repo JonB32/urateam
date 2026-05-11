@@ -25,7 +25,19 @@ Bumps:
 - `@urateam/dashboard`: 0.1.32 → 0.1.33
 - `create-urateam`: 0.1.35 → 0.1.36
 
-<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+### Added (OSS+)
+- **BEC-207: first-class `CLAUDE_CODE_OAUTH_TOKEN` support + `AuthMonitor`** ([#274](https://github.com/JonB32/urateam/pull/274)) — three auth paths now resolved with documented precedence (`CLAUDE_CODE_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` → mounted CLI session). `resolveClaudeAuth()` logs the active method per stage. `isClaudeAuthValid()` and `preflightClaudeAuth()` short-circuit to true when either env var is set (no subprocess check needed for paths that don't expire). New `AuthMonitor` runs `claude auth status` every 6h on the session path, posts a Slack alert + emits `claude.auth_expired` audit event on expiry; no-ops when an env var is configured. Wired into the PM scheduler tick.
+- **BEC-187: 5 missing hot-path indexes on `pipeline_runs` + `pm_approvals`** ([#271](https://github.com/JonB32/urateam/pull/271)) — `pr_url`, `branch`, `started_at`, `completed_at` on `pipeline_runs`; `issue_id` on `pm_approvals`. Cover webhook lookups (every check_suite/pull_request/review event), PM tick range scans, and approval batch fetches. Idempotent migrations for both SQLite and Postgres; `getCreateTablesDDL()` kept in sync so fresh installs converge on the same schema.
+
+### Fixed (OSS+)
+- **BEC-186: Linear stays "In Review" after manual PR merge / GitHub auto-merge-when-ready** ([#275](https://github.com/JonB32/urateam/pull/275)) — new `pull_request.closed` + `merged === true` webhook handler. Looks up the pipeline run by PR URL, marks `auto_merged = true` in the DB, and fires a new optional `Notifier.onPRMerged(run)` hook. `LinearNotifier.onPRMerged()` posts a "PR Merged ✅" comment and transitions the Linear issue to Done. Idempotent: replayed webhooks no-op when the run is already marked merged; PRs from non-agent sources are silently skipped.
+- **Fanout: suppress upstream-provider failures from PR comments** ([#270](https://github.com/JonB32/urateam/pull/270)) — OpenRouter free-tier / community models (notably the nvidia free tier) regularly return 200 OK with `{ error: { message: "Provider returned error" } }` and no `choices`. The fanout was posting these as noisy "Status: failed" PR comments the operator can't act on. `postFanoutCommentsToPR` now recognises this specific error class via `isUpstreamProviderError()` and suppresses the per-model PR comment (DB row + audit event still fire). New `suppressedProviderFailureCount` field returned for observability.
+
+### Refactor (OSS+)
+- **BEC-196: split `release-manager/scheduler.ts` (566 lines) → `release-tick.ts` + `release-helpers.ts`** ([#273](https://github.com/JonB32/urateam/pull/273)) — no behavior change except one intentional improvement (`MAX_AUDITED_RUN_IDS = 10_000` cap on the previously-unbounded `auditedCompletedRunIds` set, with inline comment documenting the trade-off).
+
+### Audit log
+- New event type `claude.auth_expired` (BEC-207). Bypasses the `audit-log` feature gate via `logAuditEventUnchecked` because session expiry is a base-tier operational signal — `auth-monitor.ts` joins `license.ts` as the second authorised bypass call site outside the Pro-tier modules.
 ## [0.1.46] — 2026-05-11
 
 Bumps:
