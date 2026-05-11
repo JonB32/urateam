@@ -1983,7 +1983,13 @@ export class PipelineRunner {
                 pendingFanoutRuns,
               );
               runLog.info(
-                { prNumber: fanoutPrNumber, count: pendingFanoutRuns.length, fallbackCount: fanoutResult.fallbackCount, suppressedEmptyCount: fanoutResult.suppressedEmptyCount },
+                {
+                  prNumber: fanoutPrNumber,
+                  count: pendingFanoutRuns.length,
+                  fallbackCount: fanoutResult.fallbackCount,
+                  suppressedEmptyCount: fanoutResult.suppressedEmptyCount,
+                  suppressedProviderFailureCount: fanoutResult.suppressedProviderFailureCount,
+                },
                 "fanout: posted per-model PR comments",
               );
               if (fanoutResult.fallbackCount > 0) {
