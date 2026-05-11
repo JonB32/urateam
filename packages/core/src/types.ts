@@ -49,6 +49,14 @@ export const PipelineConfigSchema = z.object({
   deepReviewPasses: z.number().int().min(0).max(5).optional(),
   /** Hard cap on deep review passes. Prevents infinite loops. Default: 3. */
   maxDeepReviewPasses: z.number().int().min(1).max(10).optional(),
+  /** Hard cap on the total number of deep-review loop iterations (turns) across
+   *  the entire review block, independent of deepReviewPasses and maxDeepReviewPasses.
+   *  When the accumulated pass count reaches this value the loop exits immediately
+   *  and logs the reason. Each iteration runs one review-providers call + one
+   *  implement stage + one review stage (~3 agent stages per turn).
+   *  Default: 15. Set lower to save tokens; set higher for complex pipelines that
+   *  genuinely need more passes. See docs in pipeline/convergence.ts for details. */
+  maxReviewTurns: z.number().int().min(1).optional(),
   /** Auto-merge PRs when changes are trivial. Default: false (opt-in). */
   autoMerge: z.boolean().optional(),
   /** Max diff lines for auto-merge eligibility. Default: 200. */

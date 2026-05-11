@@ -27,6 +27,7 @@
 import { describe, it, expect } from "vitest";
 import type { ReviewFinding } from "../types.js";
 import { PipelineConfigSchema } from "../types.js";
+import { detectConvergence, type PassHistory } from "../pipeline/convergence.js";
 
 // ---------------------------------------------------------------------------
 // Helpers — mirror the exact convergence logic in runner.ts ~1510-1522
@@ -159,66 +160,90 @@ describe("BEC-211 GAP 1: convergence check is count-only, misses oscillation", (
     expect(stoppedAt).toBe(2);
   });
 
-  it("a future fix should detect file-level oscillation and stop early", () => {
+  it("detectConvergence (BEC-211 fix) detects file-level oscillation and stops early", () => {
     /**
-     * This test FAILS today — it documents the expected post-fix behaviour:
+     * Previously this test was a stub using a naive oscillation detector.
+     * It now calls the real `detectConvergence` function introduced by BEC-211.
      *
-     * A convergence-detection function that tracks *which files* were changed
-     * per pass (not just the count) should detect that the same files appear
-     * in consecutive contradicting passes and break out of the loop.
-     *
-     * Expected: stop no later than pass 3 (two consecutive passes on same
-     * files with different outcomes is enough to flag an oscillation).
-     *
-     * Post-fix this test should be moved into a non-repro test file and
-     * updated to call the real `detectConvergence` function once it exists.
+     * The function detects that the same files appear in consecutive passes
+     * and breaks out of the loop at pass 2 (the first repeat).
      */
-    // Stub: naive oscillation detector — same file set two passes in a row
-    function naiveOscillationDetected(history: string[][]): boolean {
-      if (history.length < 2) return false;
-      const last = history[history.length - 1];
-      const prev = history[history.length - 2];
-      return last.length === prev.length && last.every((f, i) => f === prev[i]);
-    }
-
-    let fileHistory: string[][] = [];
+    const passHistories: PassHistory[] = [];
     let stoppedAtPass = oscillatingPasses.length;
+
     for (let i = 0; i < oscillatingPasses.length; i++) {
-      fileHistory.push([...oscillatingPasses[i].filesChanged].sort());
-      if (naiveOscillationDetected(fileHistory)) {
+      const pass = oscillatingPasses[i];
+      passHistories.push({
+        passNumber: i + 1,
+        filesChanged: pass.filesChanged,
+        findingsCount: pass.findings.length,
+      });
+      const result = detectConvergence(passHistories, i + 1, 15, i + 1);
+      if (result) {
         stoppedAtPass = i + 1; // 1-based
+        expect(result.reason).toBe("file-oscillation");
         break;
       }
     }
 
-    // With a file-tracking detector: stops at pass 2 (same files as pass 1)
+    // With the real file-tracking detector: stops at pass 2 (same files as pass 1)
     expect(stoppedAtPass).toBeLessThan(oscillatingPasses.length);
     expect(stoppedAtPass).toBe(2); // first time same file set seen twice
   });
 });
 
 // ---------------------------------------------------------------------------
-// GAP 2: PipelineConfig has no maxReviewTurns field
+// GAP 2: PipelineConfig now has maxReviewTurns field (fixed in BEC-211)
 // ---------------------------------------------------------------------------
 
-describe("BEC-211 GAP 2: no MAX_REVIEW_TURNS configuration key exists", () => {
-  it("PipelineConfigSchema does not have a maxReviewTurns field", () => {
-    // Confirm the field is absent — the AC requires adding it with default 15.
-    // This test PASSES today (confirming the gap) and should be UPDATED to
-    // expect the field to exist once the fix lands.
+describe("BEC-211 GAP 2 (fixed): MAX_REVIEW_TURNS configuration key now exists", () => {
+  it("PipelineConfigSchema has a maxReviewTurns field (added by BEC-211 fix)", () => {
+    // Confirm the field now exists with the expected constraints.
     const shape = (PipelineConfigSchema as unknown as { shape: Record<string, unknown> }).shape;
-    expect(shape).not.toHaveProperty("maxReviewTurns");
+    expect(shape).toHaveProperty("maxReviewTurns");
   });
 
-  it("parsed config has no maxReviewTurns even when arbitrary key supplied", () => {
-    // Zod strips unknown keys by default, so maxReviewTurns would be silently
-    // ignored even if an operator tried to set it.
-    const result = PipelineConfigSchema.safeParse({ maxReviewTurns: 15 });
+  it("parsed config accepts maxReviewTurns and preserves the value", () => {
+    // The field is now validated and enforced (not silently dropped).
+    const result = PipelineConfigSchema.safeParse({
+      name: "test",
+      stages: ["implement"],
+      retry: { maxAttempts: 0, strategy: "fail-fast" },
+      review: { requiredApprovals: 0 },
+      prStrategy: "ready",
+      maxReviewTurns: 10,
+    });
     expect(result.success).toBe(true);
     if (result.success) {
-      // Field is silently dropped — not validated, not enforced.
+      expect((result.data as Record<string, unknown>).maxReviewTurns).toBe(10);
+    }
+  });
+
+  it("maxReviewTurns defaults to undefined (optional field; runner uses 15 as default)", () => {
+    const result = PipelineConfigSchema.safeParse({
+      name: "test",
+      stages: ["implement"],
+      retry: { maxAttempts: 0, strategy: "fail-fast" },
+      review: { requiredApprovals: 0 },
+      prStrategy: "ready",
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      // Field is optional; absence is fine — runner defaults to 15.
       expect((result.data as Record<string, unknown>).maxReviewTurns).toBeUndefined();
     }
+  });
+
+  it("maxReviewTurns rejects values less than 1", () => {
+    const result = PipelineConfigSchema.safeParse({
+      name: "test",
+      stages: ["implement"],
+      retry: { maxAttempts: 0, strategy: "fail-fast" },
+      review: { requiredApprovals: 0 },
+      prStrategy: "ready",
+      maxReviewTurns: 0,
+    });
+    expect(result.success).toBe(false);
   });
 });
 

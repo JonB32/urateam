@@ -24,6 +24,7 @@ import { computeEffectiveRalphIterations } from "./runner-ralph-helpers.js";
 import { checkTestQuality } from "../executor/test-quality.js";
 import { buildDeepReviewContext } from "../executor/deep-review.js";
 import { runReviewProviders } from "./review-providers-runner.js";
+import { detectConvergence, type PassHistory } from "./convergence.js";
 import { postFanoutCommentsToPR } from "../executor/review/post-fanout-comments.js";
 import type { ReviewModelRun } from "../executor/review/review-provider.js";
 import { extractHandoff } from "../executor/extract-handoff.js";
@@ -1339,10 +1340,13 @@ export class PipelineRunner {
       const hasImplement = config.stages.includes("implement");
 
       if (deepReviewPasses > 0 && hasReview && hasImplement) {
-        // Cap deep review iterations against maxReviewPasses
-        const passLimit = Math.min(deepReviewPasses, maxDeepReviewPasses);
+        // Cap deep review iterations against maxDeepReviewPasses and the
+        // independent maxReviewTurns safety cap (default 15, BEC-211).
+        const maxReviewTurns = config.maxReviewTurns ?? 15;
+        const passLimit = Math.min(deepReviewPasses, maxDeepReviewPasses, maxReviewTurns);
 
-        let previousFindingsCount = Infinity;
+        // Per-pass history for convergence detection (file-level oscillation).
+        const passHistory: PassHistory[] = [];
 
         for (let drPass = 1; drPass <= passLimit; drPass++) {
           if (!handoff) {
@@ -1393,23 +1397,38 @@ export class PipelineRunner {
 
           const findingsCount = deepResult.findings.length;
           runLog.info(
-            { drPass, findings: findingsCount, previousFindings: previousFindingsCount },
+            { drPass, passLimit, findings: findingsCount },
             "deep review: sub-agents complete",
           );
 
-          // Convergence: stop when no findings or count didn't change
-          if (findingsCount === 0) {
-            runLog.info({ drPass }, "deep review: no findings — converged");
-            break;
-          }
-          if (findingsCount >= previousFindingsCount) {
+          // Record this pass in history for convergence analysis.
+          passHistory.push({
+            passNumber: drPass,
+            filesChanged: handoff.filesChanged ?? [],
+            findingsCount,
+          });
+
+          // BEC-211: convergence detection — checks for ideal convergence,
+          // max-turns safety cap, file-level oscillation, and count plateau.
+          // Replaces the old count-only guard with richer cycle detection.
+          const convergence = detectConvergence(
+            passHistory,
+            drPass,
+            maxReviewTurns,
+            drPass,
+          );
+          if (convergence) {
             runLog.info(
-              { drPass, findingsCount, previousFindingsCount },
-              "deep review: findings count did not decrease — stopping to prevent loop",
+              {
+                drPass,
+                passLimit,
+                convergenceReason: convergence.reason,
+                convergenceDetail: convergence.detail,
+              },
+              "deep review: convergence detected — exiting loop",
             );
             break;
           }
-          previousFindingsCount = findingsCount;
 
           // Re-run implement stage with deep review context. The agentic
           // review provider already converts DeepReviewFinding -> ReviewFinding

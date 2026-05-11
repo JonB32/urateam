@@ -17,6 +17,12 @@ export {
   type LockAdapter,
 } from "./distributed-lock.js";
 export { isTransientError } from "./error-classifier.js";
+export {
+  detectConvergence,
+  type PassHistory,
+  type ConvergenceResult,
+  type ConvergenceReason,
+} from "./convergence.js";
 export { generatePRDescription, type PRDescriptionOptions } from "./pr-description.js";
 export {
   checkAutoMergeEligibility,
