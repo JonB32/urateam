@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { randomBytes } from "node:crypto";
 import { unlinkSync } from "node:fs";
 import { eq, gte, lt } from "drizzle-orm";
-import { createDb, pipelineRuns, pmApprovals } from "../db/index.js";
+import { createDb, type AnyDb, pipelineRuns, pmApprovals } from "../db/index.js";
 import { loadMigrationFiles, runMigrationsSqlite, getMigrationStatusSqlite } from "../db/migrator.js";
 
 function tmpDbPath(): string {
@@ -13,7 +13,7 @@ function tmpDbPath(): string {
 describe("database migrations", () => {
   const paths: string[] = [];
 
-  async function makeDb() {
+  async function makeDb(): Promise<AnyDb> {
     const path = tmpDbPath();
     paths.push(path);
     return createDb({ driver: "sqlite", connectionString: path });
@@ -102,7 +102,7 @@ describe("database migrations", () => {
   });
 
   it("can query pipeline_runs by pr_url (indexed column)", async () => {
-    const db = await makeDb() as any;
+    const db = await makeDb();
     const now = new Date();
 
     // Insert test data
@@ -125,7 +125,7 @@ describe("database migrations", () => {
   });
 
   it("can query pipeline_runs by branch (indexed column)", async () => {
-    const db = await makeDb() as any;
+    const db = await makeDb();
     const now = new Date();
 
     await db.insert(pipelineRuns).values({
@@ -146,7 +146,7 @@ describe("database migrations", () => {
   });
 
   it("can range query pipeline_runs by started_at (indexed column)", async () => {
-    const db = await makeDb() as any;
+    const db = await makeDb();
     const baseTime = new Date("2026-05-11T10:00:00Z");
     const later = new Date("2026-05-11T11:00:00Z");
 
@@ -182,7 +182,7 @@ describe("database migrations", () => {
   });
 
   it("can range query pipeline_runs by completed_at (indexed column)", async () => {
-    const db = await makeDb() as any;
+    const db = await makeDb();
     const baseTime = new Date("2026-05-11T10:00:00Z");
     const midTime = new Date("2026-05-11T11:00:00Z");
 
@@ -218,7 +218,7 @@ describe("database migrations", () => {
   });
 
   it("can query pm_approvals by issue_id (indexed column)", async () => {
-    const db = await makeDb() as any;
+    const db = await makeDb();
     const now = new Date();
 
     await db.insert(pmApprovals).values([
