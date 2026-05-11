@@ -392,6 +392,12 @@ export interface PipelineRun {
    * Used to skip RALPH for review-feedback runs (BEC-182).
    */
   runType?: string | null;
+  /**
+   * JSON-serialised `ReviewFeedbackComment[]` captured at run start. Mirrors
+   * the DB `feedback_context` column. Used by the PR change-summary dispatcher
+   * to reconstruct the triggering review comments.
+   */
+  feedbackContext?: string | null;
 }
 
 // --- Pipeline Result / Error ---
