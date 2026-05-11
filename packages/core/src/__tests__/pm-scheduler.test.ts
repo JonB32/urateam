@@ -46,6 +46,7 @@ describe("PmScheduler.tick", () => {
     evaluateBudget: vi.fn().mockResolvedValue(mockOkEvaluation()),
     recoverRetriableRuns: vi.fn().mockResolvedValue({ recovered: [], exhausted: [] }),
     recoverStuckInProgressIssues: vi.fn().mockResolvedValue([]),
+    checkStalledStages: vi.fn().mockResolvedValue([]),
     triageNewIssues: vi.fn().mockResolvedValue([]),
     resolveApprovals: vi.fn().mockResolvedValue({ resolved: 0, stillPending: 0 }),
     promoteReadyIssues: vi.fn().mockResolvedValue([]),
@@ -96,6 +97,7 @@ describe("PmScheduler.tick", () => {
     });
     mockActions.recoverRetriableRuns.mockImplementation(async () => { callOrder.push("recover"); return { recovered: [], exhausted: [] }; });
     mockActions.recoverStuckInProgressIssues.mockImplementation(async () => { callOrder.push("recoverStuck"); return []; });
+    mockActions.checkStalledStages.mockImplementation(async () => { callOrder.push("checkStalledStages"); return []; });
     mockActions.triageNewIssues.mockImplementation(async () => { callOrder.push("triage"); return []; });
     mockActions.resolveApprovals.mockImplementation(async () => { callOrder.push("resolveApprovals"); return { resolved: 0, stillPending: 0 }; });
     mockActions.promoteReadyIssues.mockImplementation(async () => { callOrder.push("promote"); return []; });
@@ -106,7 +108,7 @@ describe("PmScheduler.tick", () => {
     await scheduler.tick();
 
     expect(callOrder).toEqual([
-      "budget", "recover", "recoverStuck", "triage", "resolveApprovals", "promote", "deprioritize", "cancel",
+      "budget", "recover", "recoverStuck", "checkStalledStages", "triage", "resolveApprovals", "promote", "deprioritize", "cancel",
     ]);
   });
 
@@ -161,6 +163,59 @@ describe("PmScheduler.tick", () => {
     expect(mockActions.postDigest).toHaveBeenCalledWith(
       expect.objectContaining({
         errors: expect.arrayContaining([expect.stringContaining("triage")]),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it("calls checkStalledStages on each tick and records stalled stages in tick result", async () => {
+    const stalledStage = {
+      runId: "run-stalled-1",
+      issueId: "BEC-99",
+      stageName: "implement",
+      lastActiveTimestamp: new Date(Date.now() - 35 * 60 * 1000),
+      stalledDurationSeconds: 35 * 60,
+    };
+    mockActions.checkStalledStages.mockResolvedValue([stalledStage]);
+
+    const scheduler = makeScheduler();
+    await scheduler.tick();
+
+    expect(mockActions.checkStalledStages).toHaveBeenCalledTimes(1);
+    expect(mockActions.postDigest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stalledStages: expect.arrayContaining([
+          expect.objectContaining({ runId: "run-stalled-1", stageName: "implement" }),
+        ]),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it("checkStalledStages is called after recoverStuck and before triage", async () => {
+    const scheduler = makeScheduler();
+    await scheduler.tick();
+
+    const recoverStuckOrder = mockActions.recoverStuckInProgressIssues.mock.invocationCallOrder[0];
+    const checkStalledOrder = mockActions.checkStalledStages.mock.invocationCallOrder[0];
+    const triageOrder = mockActions.triageNewIssues.mock.invocationCallOrder[0];
+
+    expect(checkStalledOrder).toBeGreaterThan(recoverStuckOrder);
+    expect(checkStalledOrder).toBeLessThan(triageOrder);
+  });
+
+  it("checkStalledStages errors do not crash the tick", async () => {
+    mockActions.checkStalledStages.mockRejectedValue(new Error("DB connection lost"));
+
+    const scheduler = makeScheduler();
+    await scheduler.tick();
+
+    // Tick should still complete — digest is posted
+    expect(mockActions.postDigest).toHaveBeenCalled();
+    // Error is recorded in tick.errors
+    expect(mockActions.postDigest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errors: expect.arrayContaining([expect.stringContaining("checkStalledStages")]),
       }),
       expect.any(Number),
     );

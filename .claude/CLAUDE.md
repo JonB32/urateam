@@ -34,12 +34,13 @@ pnpm monorepo with 4 packages:
 
 ## PM Agent
 Autonomous backlog manager in `packages/core/src/pm/`:
-- `scheduler.ts` — cron-based tick: budget → recover retriable → recover stuck → **startTodoIssues** → triage → resolve approvals → promote → deprioritize → cancel → digest
+- `scheduler.ts` — cron-based tick: budget → recover retriable → recover stuck → **checkStalledStages** → **startTodoIssues** → triage → resolve approvals → promote → deprioritize → cancel → digest
 - `actions/start-todo.ts` — scans Linear for issues in "Todo" state with no active pipeline run, starts pipelines for orphaned issues (closes gap when webhooks are missed or process restarts)
 - `actions/select-repo-config.ts` — **BEC-177**: `selectRepoConfig(pipelineLabel, teamId, projectId, repoConfigs)` — label-pattern lookup first (multi-repo routing), teamId/projectId key fallback (backwards compat)
 - `actions/triage.ts` — classifies issues via Claude Haiku, adds pipeline label (auto-implement/bug/quick-fix), generates acceptance criteria
 - `actions/promote.ts` — moves highest-priority non-conflicting issues Backlog → Todo
 - `actions/recover-stuck.ts` — detects issues stuck in "In Progress" with no active run, moves to Backlog
+- `actions/check-stalled-stages.ts` — **BEC-210**: detects `active_work` entries with no progress for > threshold (default 30 min, env: `PM_AGENT_STALLED_STAGE_THRESHOLD_MIN`). Emits structured `warn` log alerts with `runId`, `stageName`, `lastActiveTimestamp`, `stalledDurationSeconds`. Manual recovery: `POST /runs/:id/resume-stalled` (dashboard) marks run as `retriable` and removes stale `active_work` row.
 - `actions/approval-helpers.ts` — shared `requestApprovalIfNotPending()` used by deprioritize + cancel
 - `conflict.ts` — two-phase: git diff for active branches + Claude prediction
 - `slack.ts` — digests, approval requests via reactions

@@ -9,6 +9,8 @@ import {
   dashboardRetryRunEvent,
   isFeatureLicensed,
   canAccess,
+  markRunAsResumeEligible,
+  removeActiveWorkForRun,
   type Role,
 } from "@urateam/core";
 import { layout } from "../views/layout.js";
@@ -198,6 +200,84 @@ export function createRunsRouter(
       // follow the redirect via XHR and swap the response into the originating
       // form, leaving the <dialog> open with the run-detail page rendered
       // inside the dialog's <form>.
+      const target = `${effectiveBasePath}/runs/${id}`;
+      if (c.req.header("HX-Request")) {
+        c.header("HX-Redirect", target);
+        return c.body(null, 200);
+      }
+      return c.redirect(target, 302);
+    },
+  );
+
+  /**
+   * BEC-210: Resume a stalled run.
+   *
+   * A run is "stalled" when its pipeline is still status="running" but has
+   * made no active_work progress for > the stall threshold (default 30 min).
+   * This endpoint:
+   *   1. Marks the pipeline_runs row as "retriable" so the next PM tick
+   *      recovery sweep can re-queue it.
+   *   2. Removes the stale active_work row so stall detection won't re-alert.
+   *   3. Optionally calls runner.resume(id) immediately if available.
+   *
+   * Accessible to admin and operator roles (uses runs.retry permission).
+   * Does NOT require RBAC license — always accessible as a safety valve.
+   */
+  router.post(
+    "/runs/:id/resume-stalled",
+    requirePermission("runs.retry"),
+    async (c) => {
+      const id = c.req.param("id");
+      const rows = await d
+        .select()
+        .from(pipelineRuns)
+        .where(eq(pipelineRuns.id, id))
+        .limit(1);
+      if (rows.length === 0) {
+        return c.text("Run not found", 404);
+      }
+      const run = rows[0] as any;
+      if (run.status !== "running") {
+        return c.text(
+          `Cannot resume-stalled a run in status ${run.status} — only 'running' runs can be resumed via this endpoint`,
+          409,
+        );
+      }
+
+      try {
+        // Mark the run as retriable so the next PM tick's recovery sweep
+        // picks it up (same path as transient failure recovery).
+        await markRunAsResumeEligible(d as any, id);
+
+        // Remove the stale active_work row to stop stall-detection re-alerting.
+        await removeActiveWorkForRun(d as any, id);
+
+        // Immediately re-queue via runner if available and run has a resume
+        // checkpoint (best-effort; the PM recovery sweep will catch it next
+        // tick if runner is absent or this call fails).
+        if (runner && run.resumePayload) {
+          await runner.resume(id);
+        }
+      } catch (err) {
+        return c.text(`Resume failed: ${(err as Error).message}`, 500);
+      }
+
+      const user = c.get("user" as never) as
+        | { id: string; email: string }
+        | undefined;
+      if (user) {
+        void logAuditEvent(
+          db as any,
+          dashboardRetryRunEvent({
+            runId: id,
+            issueId: run.issueId,
+            previousStatus: "running (stalled)",
+            actorUserId: user.id,
+            actorEmail: user.email,
+          }),
+        );
+      }
+
       const target = `${effectiveBasePath}/runs/${id}`;
       if (c.req.header("HX-Request")) {
         c.header("HX-Redirect", target);

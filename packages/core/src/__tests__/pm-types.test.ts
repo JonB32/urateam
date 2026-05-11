@@ -207,6 +207,27 @@ describe("PmAgentConfigSchema — full coverage", () => {
     expect(parsed.budgets).toBeUndefined();
   });
 
+  it("accepts stalledStageThresholdMinutes when provided (BEC-210)", () => {
+    const parsed = PmAgentConfigSchema.parse({
+      ...minimalRequired,
+      stalledStageThresholdMinutes: 15,
+    });
+    expect(parsed.stalledStageThresholdMinutes).toBe(15);
+  });
+
+  it("stalledStageThresholdMinutes is absent when not provided (backward compat)", () => {
+    const parsed = PmAgentConfigSchema.parse(minimalRequired);
+    expect(parsed.stalledStageThresholdMinutes).toBeUndefined();
+  });
+
+  it("rejects stalledStageThresholdMinutes < 1", () => {
+    const result = PmAgentConfigSchema.safeParse({
+      ...minimalRequired,
+      stalledStageThresholdMinutes: 0,
+    });
+    expect(result.success).toBe(false);
+  });
+
   it("rejects non-positive budget values", () => {
     const resultNeg = PmAgentConfigSchema.safeParse({
       ...minimalRequired,

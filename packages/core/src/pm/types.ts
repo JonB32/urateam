@@ -26,6 +26,13 @@ export const PmAgentConfigSchema = z.object({
    * Set via PM_AGENT_MAX_CONSECUTIVE_FAILURES (default 3, 0 disables).
    */
   maxConsecutiveFailures: z.number().int().min(0).default(3),
+  /**
+   * BEC-210: age threshold (in minutes) after which a pipeline stage with no
+   * active_work updates is considered stalled and an alert is emitted.
+   * Optional — defaults to 30 when absent. Overrideable via
+   * PM_AGENT_STALLED_STAGE_THRESHOLD_MIN env var.
+   */
+  stalledStageThresholdMinutes: z.number().int().min(1).optional(),
   budgets: z
     .object({
       /** Default daily token budget for any team or repo not explicitly listed. Falls back to top-level dailyTokenBudget if omitted. */
@@ -116,6 +123,14 @@ export interface TickResult {
   recoveredStuckIssues?: string[];
   /** Todo issues that were started by the tick (orphaned from webhook). */
   startedTodoIssues?: Array<{ identifier: string; started: boolean; reason: string }>;
+  /** Stalled stages detected this tick (no active_work updates for > threshold). */
+  stalledStages?: Array<{
+    runId: string;
+    issueId: string;
+    stageName: string;
+    lastActiveTimestamp: Date;
+    stalledDurationSeconds: number;
+  }>;
 }
 
 export type ApprovalAction = "deprioritize" | "cancel";

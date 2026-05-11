@@ -12,6 +12,7 @@ import { resolveApprovals, type ResolveApprovalsInput, type ResolveApprovalsResu
 import { recoverRetriableRuns, type RecoverResult } from "./actions/recover.js";
 import { recoverStuckInProgressIssues, type StuckIssueResult } from "./actions/recover-stuck.js";
 import { startTodoIssues, type StartTodoInput, type StartTodoResult } from "./actions/start-todo.js";
+import { checkStalledStages, type StalledStageResult } from "./actions/check-stalled-stages.js";
 import { getActiveFileMaps, predictConflict, type ActiveRun } from "./conflict.js";
 import { PmSlackNotifier } from "./slack.js";
 import { isPmPaused } from "./slack-interface.js";
@@ -51,6 +52,7 @@ interface PmSchedulerActions {
   postSlackMessage?: PostSlackMessage;
   recoverRetriableRuns: (input: any) => Promise<RecoverResult>;
   recoverStuckInProgressIssues?: (input: any) => Promise<StuckIssueResult[]>;
+  checkStalledStages?: (input: any) => Promise<StalledStageResult[]>;
   startTodoIssues?: (input: StartTodoInput) => Promise<StartTodoResult[]>;
   triageNewIssues: (input: TriageInput) => Promise<any[]>;
   resolveApprovals: (input: ResolveApprovalsInput) => Promise<ResolveApprovalsResult>;
@@ -293,6 +295,33 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
             log.error({ err }, "stuck issue recovery sweep failed");
             tick.errors.push(`recoverStuck: ${(err as Error).message}`);
           }
+        }
+
+        // --- Stalled stage detection ---
+        // Detects active_work entries with no progress for > threshold minutes and
+        // emits structured log alerts for operators/monitoring systems.
+        // Threshold is configurable via PM_AGENT_STALLED_STAGE_THRESHOLD_MIN (default 30).
+        try {
+          const _parsedThreshold = parseInt(
+            process.env.PM_AGENT_STALLED_STAGE_THRESHOLD_MIN ?? "",
+            10,
+          );
+          const staleAgeMinutes = isNaN(_parsedThreshold)
+            ? ((config as any).stalledStageThresholdMinutes ?? 30)
+            : Math.max(1, _parsedThreshold);
+          const stalledResults = actions?.checkStalledStages
+            ? await actions.checkStalledStages({} as any)
+            : await checkStalledStages({ db, staleAgeMinutes });
+          if (stalledResults.length > 0) {
+            tick.stalledStages = stalledResults;
+            log.warn(
+              { count: stalledResults.length, runIds: stalledResults.map((r) => r.runId) },
+              "stalled stages detected — review via dashboard or POST /runs/:id/resume-stalled",
+            );
+          }
+        } catch (err) {
+          log.error({ err }, "stalled stage detection failed");
+          tick.errors.push(`checkStalledStages: ${(err as Error).message}`);
         }
 
         // Compute available slots once for both startTodo and promote

@@ -71,6 +71,14 @@ export { createPmScheduler } from "./pm/scheduler.js";
 export type { PmAgentConfig, TickResult } from "./pm/types.js";
 export { PmAgentConfigSchema } from "./pm/types.js";
 export {
+  checkStalledStages,
+  markRunAsResumeEligible,
+  removeActiveWorkForRun,
+  DEFAULT_STALLED_STAGE_THRESHOLD_MINUTES,
+  type CheckStalledStagesInput,
+  type StalledStageResult,
+} from "./pm/actions/check-stalled-stages.js";
+export {
   loadMigrationFiles,
   runMigrationsSqlite,
   runMigrationsPostgres,
