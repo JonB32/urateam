@@ -72,7 +72,7 @@ A codebase-wide analysis (2026-05-11) surfaced a set of foundational improvement
 - **Foundation (P1 Urgent)**: BEC-187 (DB indexes), BEC-188 (`util/env.ts` + `util/json.ts`), BEC-190 (tighten `AnyDb` + `retry_count` schema fix + Linear SDK typing).
 - **Completed**: BEC-189 (`util/linear.ts` + Promise.all relations) ✅ — `getLinearClient`, `resolveIssueRelations`, `resolveWorkflowStatesByTeam` shipped in `packages/core/src/util/linear.ts`.
 - **Cleanup (P2 High)**: BEC-191 (dead code), BEC-192 (resume-payload zod), BEC-193 (Octokit memoization + parseRepoUrl hoist).
-- **File splits (P2 High, sequential)**: BEC-194 (`create-urateam/index.ts`), BEC-195 (`pm/slack-interface.ts`), BEC-196 (`release-manager/scheduler.ts`), BEC-197 (`audit/events.ts`), BEC-199 (extract feedback-pipeline from `runner.ts`).
+- **File splits (P2 High, sequential)**: BEC-194 (`create-urateam/index.ts`), BEC-195 (`pm/slack-interface.ts`), BEC-196 (`release-manager/scheduler.ts` — **done**: split into `scheduler.ts` cron factory, `release-tick.ts` tick orchestration, `release-helpers.ts` persistence helpers), BEC-197 (`audit/events.ts`), BEC-199 (extract feedback-pipeline from `runner.ts`).
 - **Infrastructure (P2 High)**: BEC-198 (env-validation module + `deploy/ENV_VARS.md`), BEC-200 (test gaps in runner retry-strategies + policyErr + status webhook + paused-tick).
 - **Competitive response (P2/P3)**: BEC-201 (multi-AI for implement stage), BEC-207 (`CLAUDE_CODE_OAUTH_TOKEN`), BEC-203 (Sentry + CloudWatch integrations), BEC-205 (one-command bootstrap), BEC-206 (GitLab parity + Bitbucket).
 - **Strategic / needs-design**: BEC-202 (managed-runtime tier), BEC-204 (IDE/CLI agent surface).
