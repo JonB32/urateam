@@ -1147,18 +1147,15 @@ export class PipelineRunner {
           }
         }
 
-        // After stage completes: update coordination with actual files modified
-        // so other agents can check for overlaps before starting their next stage.
+        // After stage completes: update the in-memory file list so the next
+        // stage's pre-loop upsertActiveWork persists the accumulated set.
+        // We intentionally skip a second DB write here — the row was already
+        // written at the start of this stage and will be refreshed again at
+        // the start of the next one, avoiding a redundant intermediate write.
         if (worktreePath) {
           const freshFiles = await getModifiedFiles(worktreePath);
           if (freshFiles.length > 0) {
             allModifiedFiles = freshFiles;
-            await upsertActiveWork(db, {
-              runId,
-              issueId: sanitizedIssue.id,
-              stage: stageType,
-              filesModified: allModifiedFiles,
-            });
           }
         }
       }
@@ -2141,6 +2138,8 @@ export class PipelineRunner {
             ? parseInt(summaryPrMatch[1]!, 10)
             : null;
           if (summaryPrNumber !== null) {
+            // Fetch stage runs first; reviewModelRuns query depends on the
+            // resulting stageIds so the two queries are necessarily sequential.
             const stages = await (this.db as AnyDb)
               .select()
               .from(stageRuns)

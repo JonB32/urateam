@@ -55,6 +55,41 @@ import { nanoid } from "nanoid";
 
 const execFileAsync = promisify(execFileCb);
 
+// ---------------------------------------------------------------------------
+// Module-level constants
+// ---------------------------------------------------------------------------
+
+/** Run type identifier for review-feedback pipeline runs. */
+const FEEDBACK_RUN_TYPE = "review-feedback" as const;
+
+/** Stage name for the implement step in feedback pipelines. */
+const FEEDBACK_IMPL_STAGE: StageType = "implement";
+
+/**
+ * Stages skipped by the feedback pipeline.
+ * Feedback runs operate on an existing PR branch, so setup stages are not needed.
+ */
+const FEEDBACK_SKIP_STAGES = new Set<StageType>(["triage", "reproduce", "await-approval"]);
+
+// ---------------------------------------------------------------------------
+// Module-level helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Commit any uncommitted agent changes and mark the run as auto-committed.
+ * No-op if the working tree is clean.
+ */
+async function applyAutoCommit(
+  worktreePath: string,
+  issueId: string,
+  branch: string,
+  run: PipelineRun,
+): Promise<void> {
+  if (await autoCommitChanges(worktreePath, issueId, branch)) {
+    run.autoCommitted = true;
+  }
+}
+
 /**
  * Map webhook-shaped `ReviewFeedbackComment[]` (the wire format we receive
  * from GitHub) into the `ReviewFeedbackContext` that the implement template
@@ -182,6 +217,10 @@ export async function executeFeedbackPipeline(
 
   let worktreePath: string | undefined;
   let devcontainerSession: DevcontainerSession | undefined;
+  // Track the current stage so the catch block can report a meaningful name
+  // rather than the fallback "unknown" string. Declared outside try/catch
+  // so it remains accessible in the catch block scope.
+  let currentStage: string = "unknown";
 
   await db
     .update(pipelineRuns)
@@ -276,8 +315,7 @@ export async function executeFeedbackPipeline(
     // -----------------------------------------------------------------------
     // Execute pipeline stages — skip triage, reproduce, await-approval
     // -----------------------------------------------------------------------
-    const skipStages = new Set<string>(["triage", "reproduce", "await-approval"]);
-    const stagesToRun = config.stages.filter((s) => !skipStages.has(s));
+    const stagesToRun = config.stages.filter((s) => !FEEDBACK_SKIP_STAGES.has(s));
 
     runLog.info({ stages: stagesToRun }, "feedback: starting pipeline stages");
 
@@ -286,6 +324,7 @@ export async function executeFeedbackPipeline(
 
     for (const stage of stagesToRun) {
       const stageType = stage as StageType;
+      currentStage = stage;
       runLog.info({ stage: stageType }, "feedback: executing stage");
 
       await upsertActiveWork(db, {
@@ -298,7 +337,7 @@ export async function executeFeedbackPipeline(
       // Only the implement stage uses reviewFeedback; the test/review stages
       // get their context from the implement stage's handoff.
       const stageReviewFeedback =
-        stageType === "implement" ? reviewFeedback : undefined;
+        stageType === FEEDBACK_IMPL_STAGE ? reviewFeedback : undefined;
 
       const result = await executeStage({
         runId,
@@ -330,20 +369,17 @@ export async function executeFeedbackPipeline(
 
       handoff = result.handoffArtifact;
 
-      if (await autoCommitChanges(worktreePath, sanitizedIssue.id, branch)) {
-        run.autoCommitted = true;
-      }
+      // worktreePath is guaranteed to be set at this point — createWorktreeFromRemote
+      // succeeded earlier in the try block; a failure there throws before we reach the loop.
+      await applyAutoCommit(worktreePath!, sanitizedIssue.id, branch, run);
 
+      // Update the in-memory file list only; the next stage's pre-loop upsertActiveWork
+      // call will persist the accumulated list. This avoids a redundant intermediate write
+      // that would be immediately overwritten when the next stage begins.
       if (worktreePath) {
         const freshFiles = await getModifiedFiles(worktreePath);
         if (freshFiles.length > 0) {
           allModifiedFiles = freshFiles;
-          await upsertActiveWork(db, {
-            runId,
-            issueId: sanitizedIssue.id,
-            stage: stageType,
-            filesModified: allModifiedFiles,
-          });
         }
       }
     }
@@ -359,9 +395,7 @@ export async function executeFeedbackPipeline(
         async () => {
           const wtPath = worktreePath!;
 
-          if (await autoCommitChanges(wtPath, sanitizedIssue.id, branch)) {
-            run.autoCommitted = true;
-          }
+          await applyAutoCommit(wtPath, sanitizedIssue.id, branch, run);
 
           runLog.info(
             { defaultBranch: repoConfig.defaultBranch },
@@ -369,6 +403,9 @@ export async function executeFeedbackPipeline(
           );
           const rebaseResult = await rebaseBranch(wtPath, repoConfig.defaultBranch);
 
+          // rebaseBranch guarantees: success=false AND hasConflicts=true means
+          // merge conflicts exist; success=false AND hasConflicts=false means
+          // an unrelated git error — the outer catch block handles that.
           const feedbackHasConflicts = !rebaseResult.success && rebaseResult.hasConflicts;
           if (feedbackHasConflicts) {
             runLog.warn(
@@ -456,7 +493,7 @@ export async function executeFeedbackPipeline(
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     runLog.error({ err: error }, "feedback pipeline failed with unexpected error");
-    await ctx.failPipeline(db, runId, run, "unknown", errorMsg, true);
+    await ctx.failPipeline(db, runId, run, currentStage, errorMsg, true);
   } finally {
     ctx.budgetAlertedRuns.delete(runId);
     await removeActiveWork(db, runId);
@@ -599,7 +636,7 @@ export async function startFeedbackPipeline(
     branch,
     status: "queued",
     prUrl,
-    runType: "review-feedback",
+    runType: FEEDBACK_RUN_TYPE,
     parentRunId: parentRunId ?? null,
     feedbackContext: JSON.stringify(feedbackComments),
     linearTeamId,
@@ -607,7 +644,7 @@ export async function startFeedbackPipeline(
 
   const run = ctx.buildPipelineRun(runId, issue, pipelineKey, repoConfig, branch);
   run.prUrl = prUrl;
-  run.runType = "review-feedback";
+  run.runType = FEEDBACK_RUN_TYPE;
   run.feedbackContext = JSON.stringify(feedbackComments);
 
   // Register in activeFeedbackRuns BEFORE enqueue so rate-limit check works immediately.
