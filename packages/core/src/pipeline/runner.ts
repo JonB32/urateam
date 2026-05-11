@@ -63,6 +63,7 @@ import {
   checkDuplicateBranch,
   branchName,
   pruneWorktreesInRepoDirs,
+  gitExecSafe,
 } from "../repo/git.js";
 import {
   addPRComment,
@@ -1459,10 +1460,19 @@ export class PipelineRunner {
           }
 
           // BEC-213: record this cycle for diagnostic logging and increment the
-          // shared reviewTurns counter.
+          // shared reviewTurns counter. Capture a --stat diff to aid misalignment
+          // diagnosis; gitExecSafe returns "" on failure so this is fire-and-forget.
           const rfCurrentBlockingFindings =
             handoff?.context?.reviewFindings?.filter((f) => f.severity === "blocking") ?? [];
-          reviewCycles.push({ pass: reviewTurns + 1, findings: rfCurrentBlockingFindings });
+          const rfDiff = await gitExecSafe(
+            ["diff", "--stat", `origin/${repoConfig.defaultBranch}`],
+            worktreePath,
+          );
+          reviewCycles.push({
+            pass: reviewTurns + 1,
+            findings: rfCurrentBlockingFindings,
+            diff: rfDiff || undefined,
+          });
           reviewTurns++;
 
           // Convergence check: if blocking findings are identical to the previous
@@ -1667,6 +1677,13 @@ export class PipelineRunner {
 
           handoff = drImplementResult.handoffArtifact;
 
+          // Capture a --stat diff after the implement stage for cycle diagnostic
+          // logging. gitExecSafe returns "" on failure so this is fire-and-forget.
+          const drImplDiff = await gitExecSafe(
+            ["diff", "--stat", `origin/${repoConfig.defaultBranch}`],
+            worktreePath,
+          );
+
           // Re-run review stage to verify fixes
           runLog.info({ drPass }, "deep review: re-running review stage");
           const drReviewResult = await executeStage({
@@ -1733,7 +1750,11 @@ export class PipelineRunner {
           // log a diagnostic report and terminate.  The check at the TOP of the
           // next loop iteration provides an additional guard, but we also check
           // here (bottom) so the log fires promptly after the last cycle.
-          reviewCycles.push({ pass: reviewTurns + 1, findings: deepResult.findings });
+          reviewCycles.push({
+            pass: reviewTurns + 1,
+            findings: deepResult.findings,
+            diff: drImplDiff || undefined,
+          });
           reviewTurns++;
 
           if (reviewTurns >= maxReviewTurns) {

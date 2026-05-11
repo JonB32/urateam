@@ -26,6 +26,12 @@ export interface LoopingFinding {
  * BEC-213: reduced from 50 to 15 so that the 33-turn incident run
  * (7HaVmAKKn4gluPgv9T9pm) — and any future run that exceeds the
  * MAX_REVIEW_TURNS pipeline cap — is immediately flagged by the observer.
+ *
+ * NOTE: This value is intentionally kept in sync with MAX_REVIEW_TURNS in
+ * packages/core/src/pipeline/convergence-checker.ts (currently 15). If
+ * MAX_REVIEW_TURNS changes, update this constant to match. The observers
+ * package does not depend on @urateam/core, so the two values cannot share
+ * a single source of truth at compile time.
  */
 export const LOOP_TURN_THRESHOLD = 15;
 
@@ -36,7 +42,10 @@ export const LOOP_TURN_THRESHOLD = 15;
  */
 export function findLoopingDeepReviews(runs: RunSummary[]): LoopingFinding[] {
   return runs
-    .filter((run) => run.total_turns > LOOP_TURN_THRESHOLD)
-    .filter((run) => !(run.status === "completed" && run.pr_url !== null))
+    .filter(
+      (run) =>
+        run.total_turns > LOOP_TURN_THRESHOLD &&
+        !(run.status === "completed" && run.pr_url !== null),
+    )
     .map((run) => ({ runId: run.id, totalTurns: run.total_turns }));
 }

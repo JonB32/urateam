@@ -42,12 +42,19 @@ import type { ReviewFinding } from "../types.js";
 export const MAX_REVIEW_TURNS = 15;
 
 /**
+ * Separator used between fields when building a ReviewFinding fingerprint.
+ * A null byte is chosen because it cannot appear in any of the string fields
+ * produced by the review agent, eliminating any possibility of collisions.
+ */
+const FINGERPRINT_SEPARATOR = "\x00";
+
+/**
  * Produces a stable fingerprint for a ReviewFinding based on its identity
  * fields. Two findings are considered the same issue when they share the same
  * file, line, category, and description — regardless of field ordering.
  */
 export function fingerprintFinding(f: ReviewFinding): string {
-  return `${f.file}\x00${f.line}\x00${f.category}\x00${f.description}`;
+  return [f.file, f.line, f.category, f.description].join(FINGERPRINT_SEPARATOR);
 }
 
 /**
@@ -83,9 +90,11 @@ export interface CycleRecord {
   /** Findings produced by the review stage in this cycle. */
   findings: ReviewFinding[];
   /**
-   * Abbreviated git diff from the implement stage in this cycle.
-   * Included when available; helps identify which changes were (or weren't)
-   * made in response to the previous cycle's findings.
+   * Abbreviated git diff (e.g. `--stat` output) from the implement stage
+   * in this cycle. Only populated by callers that have access to git diffs;
+   * may be undefined when the diff is unavailable. When present, helps
+   * identify which changes were (or weren't) made in response to the
+   * previous cycle's findings.
    */
   diff?: string;
 }
