@@ -278,6 +278,17 @@ Known limitations being addressed (don't compound these):
 - Guardrails: `setUserRole` wraps SELECT+COUNT+UPDATE in a transaction (SQLite `BEGIN IMMEDIATE`; Postgres `db.transaction()`) to prevent the TOCTOU race on last-admin demotion
 - Setup doc: `deploy/RBAC_SETUP.md`
 
+### Operator stop & container halt (`packages/core/src/pipeline/control-signals.ts`)
+- **Single-run stop** (`requestStop(runId, mode)`): two modes — `"cancel"` aborts the active Agent SDK stream via an `AbortController` wired into `consumeAgentStream`; `"graceful"` lets the current stage finish, then the runner skips remaining stages at the per-stage signal check at the top of the stage loop. Both land the run in `status: "cancelled"` (distinct from `"aborted"` which is reserved for system-initiated aborts).
+- **Container halt** (`PipelineRunner.haltAll()`): sets `setPmPaused(true)` (same flag as BEC-170 / Slack `/pm pause`) AND sends `cancel` to every entry in `activeRuns` + `activeFeedbackRuns`. Reversible via `/pm resume` (in-flight cancellations themselves stay cancelled).
+- **Three surfaces**, all funnel through `Runner.requestStop` / `Runner.haltAll`:
+  - **Dashboard**: `POST /runs/:id/cancel`, `POST /runs/:id/stop`, `POST /admin/halt-all` — RBAC-gated (`runs.stop`, `system.halt`), CSRF-protected via `HX-Request` header. Buttons in the run-detail meta card. Routes 404 when RBAC is unlicensed.
+  - **CLI**: `ura stop <runId> [--graceful]`, `ura halt` — POST to `/cli/runs/:id/{cancel,stop}` and `/cli/halt-all`. Auth: `URATEAM_CLI_TOKEN` shared secret in `X-Ura-Cli-Token`; routes 404 when the env var is unset. Works regardless of RBAC license.
+  - **Slack**: `/pm cancel <runId>`, `/pm stop <runId>`, `/pm halt`. Reacts with 🤔 on receipt of an app_mention / message; swaps to ✅ / ⚠️ on completion. Slash commands return an immediate ephemeral "Working on it…" and post the real reply via `response_url` so slow commands don't trip Slack's 3s timeout.
+- **Audit events**: `run.cancelled` per stopped run (`mode`, `actor`, `actorType`), and `system.halted` for halt-all (`cancelledRunIds`, `cancelledCount`). `actorType` distinguishes `dashboard-user` / `cli` / `slack`.
+- **Single-process state caveat**: signal map lives in memory; resets on container restart. Cross-container coordination (Redis) intentionally out of scope.
+- Setup doc: `deploy/STOP_AND_HALT.md`.
+
 ### Coordination (`packages/core/src/pm/coordination.ts`)
 - DB-backed `active_work` table tracks files modified by in-flight pipeline runs
 - `upsertActiveWork` uses atomic `onConflictDoUpdate` (requires UNIQUE on `run_id`)
@@ -291,6 +302,8 @@ Known limitations being addressed (don't compound these):
 - `QUALITY_OBSERVER_FIRST_TICK_FILE=true` env var bypasses seeding and files normally on first tick (CI / deliberate-reset use case). Also configurable programmatically via `ObserverSchedulerDeps.firstTickFile`.
 - SQLite tables: `observer_findings` (fingerprint + timestamp), `observer_meta` (key/value, stores `firstTickAt`)
 - `createObserverScheduler(deps)` accepts pluggable `computeFindings` and `fileGithubIssue` functions — the observers package does not depend on `@urateam/core`.
+- **PM Agent observer-origin gate:** Every GitHub issue filed by the quality observer embeds `<!-- urateam-qo-observer: <id> -->` in the body. `gh-linear-sync` copies the body verbatim into the Linear ticket description, so the marker survives the sync (the GH `urateam-quality-observer` label does NOT — gh-linear-sync drops labels). `triageNewIssues` in `pm/actions/triage.ts` short-circuits when it sees this marker: skips the Claude classifier, assigns the `needs-design` pipeline label, moves the ticket to Backlog with priority 3, and posts an explanatory comment. The `needs-design` pipeline runs `triage` → `await-approval` → ..., so the issue surfaces but blocks for human approval before any implement-stage tokens are spent. Rationale: observer findings ("Pipeline X deep-review loop hit Y turns", etc.) are diagnostic signals about past runs, not actionable coding tasks; auto-implementing them burns tokens with no useful outcome.
+- **Linear label requirement for the gate:** the operator's Linear workspace must have a label named `needs-design`. If absent, the gate still moves the ticket to Backlog but logs a warning and the promote step won't route it (no pipeline label resolved).
 
 ## Conventions
 - Use `execFile` (never `exec`) for shell commands

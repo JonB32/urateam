@@ -20,8 +20,14 @@ import { resolveTooling } from "./mcp-resolver.js";
 import type { TechStackProfile } from "../repo/tech-stack.js";
 import type { DevcontainerSession } from "../repo/devcontainer.js";
 import { createLogger } from "../logger.js";
-import { consumeAgentStream, StagePreStreamStalledError, type StreamMessage } from "./agent-stream.js";
+import {
+  consumeAgentStream,
+  StagePreStreamStalledError,
+  StageCancelledError,
+  type StreamMessage,
+} from "./agent-stream.js";
 import { isClaudeAuthValid } from "./auth-check.js";
+import { onStop } from "../pipeline/control-signals.js";
 
 /**
  * BEC-183: wall-clock stage timeouts. Independent of the in-stream watchdog
@@ -224,6 +230,17 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       },
     };
 
+    // Operator-cancel plumbing: an AbortController shared with consumeAgentStream
+    // fires when a `"cancel"` stop signal is recorded for this run. The
+    // subscription is set up before the stream is consumed so a signal recorded
+    // mid-import is honoured immediately (onStop also fires synchronously when
+    // a signal is already pending).
+    const abortController = new AbortController();
+    const unsubscribeStop = onStop(runId, () => {
+      log.info({ runId }, "cancel signal received — aborting stage stream");
+      abortController.abort();
+    });
+
     // BEC-183: wall-clock stage timeout — second defensive layer independent
     // of the in-stream watchdog. Fires as StagePreStreamStalledError so the
     // catch block below sets status=failed with a clear message.
@@ -252,6 +269,7 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
           }
         },
         firstMessageTimeoutMs: FIRST_MESSAGE_TIMEOUT_MS,
+        abortSignal: abortController.signal,
       }),
       stageTimeoutPromise,
     ]).catch((err: unknown) => {
@@ -268,6 +286,7 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       // or throws any other error — prevents the timer from dangling after the
       // stage exits the happy path.
       if (stageTimeoutTimer) clearTimeout(stageTimeoutTimer);
+      unsubscribeStop();
     });
 
     // Flush remaining log entries
@@ -320,21 +339,26 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       stageRunId,
     };
   } catch (error) {
+    const cancelled = error instanceof StageCancelledError;
     const errorMessage =
       error instanceof Error ? error.message : String(error);
-    log.error({ err: error }, "stage failed");
+    if (cancelled) {
+      log.info({ err: error }, "stage cancelled by operator");
+    } else {
+      log.error({ err: error }, "stage failed");
+    }
 
     await db.insert(agentLogs).values({
       id: nanoid(),
       stageRunId: stageRunId,
-      type: "error",
+      type: cancelled ? "cancelled" : "error",
       content: errorMessage.slice(0, 2048),
     });
 
     await db
       .update(stageRuns)
       .set({
-        status: "failed",
+        status: cancelled ? "cancelled" : "failed",
         completedAt: new Date(),
         inputTokens,
         outputTokens,
@@ -346,7 +370,7 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       .where(eq(stageRuns.id, stageRunId));
 
     return {
-      status: "failed",
+      status: cancelled ? "cancelled" : "failed",
       inputTokens,
       outputTokens,
       turns,

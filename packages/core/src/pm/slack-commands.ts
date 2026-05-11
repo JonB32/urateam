@@ -47,6 +47,10 @@ export type PmCommand =
   | { type: "pause" }
   | { type: "resume" }
   | { type: "assign"; issueId: string }
+  /** Operator-initiated stop. `runId` is a pipeline_runs row id (nanoid). */
+  | { type: "cancel"; runId: string }
+  | { type: "stop"; runId: string }
+  | { type: "halt" }
   | { type: "unknown"; original: string };
 
 /**
@@ -73,6 +77,19 @@ export interface CommandExecutorDeps {
   teamIds?: string[];
   /** Sonnet-model callable required for the `bulk_create` command. */
   callClaudeSonnet?: (prompt: string) => Promise<string>;
+  /**
+   * Reference to the live pipeline runner. Required for `cancel`/`stop`/`halt`
+   * commands; if absent, those commands report a clear configuration error
+   * rather than silently succeeding.
+   */
+  runner?: {
+    requestStop?: (runId: string, mode: "cancel" | "graceful") => { issueId: string | null; mode: "cancel" | "graceful" };
+    haltAll?: () => { cancelledRunIds: string[] };
+  };
+  /** DB handle for audit-event writes. */
+  db?: any;
+  /** Slack user id (e.g. "U123") for audit attribution. */
+  slackUserId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +170,65 @@ export async function executePmCommand(
       setPmPaused(false);
       log.info("PM Agent resumed via Slack");
       return "▶️ PM Agent autonomous assignment has been *resumed*.";
+    }
+
+    case "cancel":
+    case "stop": {
+      if (!deps.runner?.requestStop) {
+        return `⚠️ Runner not configured — cannot ${cmd.type} run *${cmd.runId}*.`;
+      }
+      const mode: "cancel" | "graceful" = cmd.type === "cancel" ? "cancel" : "graceful";
+      const { issueId } = deps.runner.requestStop(cmd.runId, mode);
+      if (deps.db) {
+        const { logAuditEvent, runCancelledEvent } = await import("../audit/index.js");
+        void logAuditEvent(
+          deps.db,
+          runCancelledEvent({
+            runId: cmd.runId,
+            issueId: issueId ?? "(unknown)",
+            actor: `slack:${deps.slackUserId ?? "unknown"}`,
+            actorType: "slack",
+            mode,
+          }),
+        );
+      }
+      log.info({ runId: cmd.runId, mode, slackUserId: deps.slackUserId }, "run stop requested via Slack");
+      return mode === "cancel"
+        ? `🛑 Cancel signal sent to run *${cmd.runId}*. The active stage will abort within a few seconds.`
+        : `⏹ Graceful stop requested for run *${cmd.runId}*. The current stage will finish, then the pipeline will stop.`;
+    }
+
+    case "halt": {
+      if (!deps.runner?.haltAll) {
+        return "⚠️ Runner not configured — cannot halt.";
+      }
+      const { cancelledRunIds } = deps.runner.haltAll();
+      if (deps.db) {
+        const { logAuditEvent, systemHaltedEvent, runCancelledEvent } = await import("../audit/index.js");
+        void logAuditEvent(
+          deps.db,
+          systemHaltedEvent({
+            actor: `slack:${deps.slackUserId ?? "unknown"}`,
+            actorType: "slack",
+            cancelledRunIds,
+          }),
+        );
+        for (const rid of cancelledRunIds) {
+          void logAuditEvent(
+            deps.db,
+            runCancelledEvent({
+              runId: rid,
+              issueId: "(halt)",
+              actor: `slack:${deps.slackUserId ?? "unknown"}`,
+              actorType: "slack",
+              mode: "cancel",
+              reason: "system.halt",
+            }),
+          );
+        }
+      }
+      log.warn({ count: cancelledRunIds.length, slackUserId: deps.slackUserId }, "container halt requested via Slack");
+      return `🚨 *Halted.* PM Agent paused; cancelled ${cancelledRunIds.length} active run(s). Use \`/pm resume\` when ready.`;
     }
 
     case "prioritize": {
@@ -312,7 +388,7 @@ export async function executePmCommand(
     }
 
     case "unknown":
-      return `🤔 I didn't understand that. Try:\n• \`/pm status\`\n• \`/pm prioritize BEC-25\`\n• \`/pm create "title" "description"\`\n• \`/pm assign BEC-13\`\n• \`/pm pause\` / \`/pm resume\``;
+      return `🤔 I didn't understand that. Try:\n• \`/pm status\`\n• \`/pm prioritize BEC-25\`\n• \`/pm create "title" "description"\`\n• \`/pm assign BEC-13\`\n• \`/pm pause\` / \`/pm resume\`\n• \`/pm cancel <runId>\` (interrupt immediately) / \`/pm stop <runId>\` (graceful)\n• \`/pm halt\` (pause PM + cancel all active runs)`;
 
     default:
       return `Unknown command.`;

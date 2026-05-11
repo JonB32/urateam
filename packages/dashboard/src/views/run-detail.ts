@@ -80,6 +80,11 @@ function formatJson(raw: string | null): string {
   }
 }
 
+export interface RunDetailExtraOptions {
+  canStop?: boolean;
+  canHalt?: boolean;
+}
+
 export function runDetailView(
   run: RunInfo,
   stages: StageInfo[],
@@ -87,12 +92,15 @@ export function runDetailView(
   page: number,
   totalLogs: number,
   canRetry: boolean = false,
+  extra: RunDetailExtraOptions = {},
 ): string {
   const basePath = getBasePath();
   const logsPerPage = 50;
   const totalPages = Math.max(1, Math.ceil(totalLogs / logsPerPage));
   const duration = formatDuration(run.startedAt, run.completedAt);
   const isInFlight = run.status === "running" || run.status === "queued";
+  const canStop = !!extra.canStop;
+  const canHalt = !!extra.canHalt;
 
   const metaHtml = `<div class="card">
     <h2>Run Details</h2>
@@ -121,6 +129,70 @@ export function runDetailView(
                   </form>
                   <form method="post" action="${action}" hx-post="${action}" hx-headers='{"HX-Request":"true"}' style="margin:0;">
                     <button type="submit" class="button-primary">Confirm retry</button>
+                  </form>
+                </div>
+              </dialog>`;
+            })()
+          : ""
+      }
+      ${
+        canStop && isInFlight
+          ? (() => {
+              const dialogId = `stop-confirm-${run.id}`;
+              const cancelAction = `${basePath}/runs/${encodeURIComponent(run.id)}/cancel`;
+              const stopAction = `${basePath}/runs/${encodeURIComponent(run.id)}/stop`;
+              return `<button
+                type="button"
+                class="button-secondary"
+                data-open-dialog="${escapeHtml(dialogId)}"
+                title="Stop this run"
+              >Stop…</button>
+              <dialog id="${escapeHtml(dialogId)}" class="retry-confirm-dialog">
+                <h3 style="margin-top:0;">Stop this run</h3>
+                <p style="margin:0.5rem 0 0.5rem;color:var(--color-text-muted);">
+                  <strong>Cancel (immediate):</strong> interrupts the current stage mid-stream. Tokens already spent are lost. Use for incident response.
+                </p>
+                <p style="margin:0 0 1rem;color:var(--color-text-muted);">
+                  <strong>Graceful:</strong> lets the current stage finish, then skips the rest. Slower; consistent worktree state. Cheapest cleanup.
+                </p>
+                <div style="display:flex;gap:0.5rem;justify-content:flex-end;flex-wrap:wrap;">
+                  <form method="dialog" style="margin:0;">
+                    <button type="submit" class="button-secondary">Keep running</button>
+                  </form>
+                  <form method="post" action="${stopAction}" hx-post="${stopAction}" hx-headers='{"HX-Request":"true"}' style="margin:0;">
+                    <button type="submit" class="button-secondary">Graceful stop</button>
+                  </form>
+                  <form method="post" action="${cancelAction}" hx-post="${cancelAction}" hx-headers='{"HX-Request":"true"}' style="margin:0;">
+                    <button type="submit" class="button-primary" style="background:var(--color-red);">Cancel immediately</button>
+                  </form>
+                </div>
+              </dialog>`;
+            })()
+          : ""
+      }
+      ${
+        canHalt
+          ? (() => {
+              const dialogId = `halt-all-confirm`;
+              const action = `${basePath}/admin/halt-all`;
+              return `<button
+                type="button"
+                class="button-secondary"
+                data-open-dialog="${escapeHtml(dialogId)}"
+                title="Halt the entire container"
+                style="margin-left:auto;color:var(--color-red);border-color:var(--color-red);"
+              >Halt all…</button>
+              <dialog id="${escapeHtml(dialogId)}" class="retry-confirm-dialog">
+                <h3 style="margin-top:0;">Halt entire container</h3>
+                <p style="margin:0.5rem 0 1rem;color:var(--color-text-muted);">
+                  Pauses the PM Agent (no new runs promoted) <strong>and</strong> cancels every in-flight pipeline + feedback run. Reversible: unpause via Slack <code>/pm resume</code>; cancelled runs themselves stay cancelled.
+                </p>
+                <div style="display:flex;gap:0.5rem;justify-content:flex-end;">
+                  <form method="dialog" style="margin:0;">
+                    <button type="submit" class="button-secondary">Never mind</button>
+                  </form>
+                  <form method="post" action="${action}" hx-post="${action}" hx-headers='{"HX-Request":"true"}' style="margin:0;">
+                    <button type="submit" class="button-primary" style="background:var(--color-red);">Halt all</button>
                   </form>
                 </div>
               </dialog>`;

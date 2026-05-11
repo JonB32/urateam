@@ -11,6 +11,7 @@ import type {
 import type { AnyDb } from "../db/client.js";
 import { pipelineRuns } from "../db/schema.js";
 import { executeStage } from "../executor/executor.js";
+import { getStopSignal } from "./control-signals.js";
 import {
   cloneRepo,
   createWorktreeFromRemote,
@@ -171,6 +172,19 @@ export interface FeedbackPipelineContext {
     retriesExhausted: boolean,
   ): Promise<void>;
   injectAgentConfig(worktreePath: string): Promise<void>;
+  /**
+   * Operator-initiated stop. Mirrors the main pipeline's path so feedback
+   * runs honour cancel/graceful signals. Passes the prUrl so the per-PR
+   * rate-limit slot is freed immediately rather than waiting on the queue's
+   * `finally` block.
+   */
+  markRunCancelled(
+    db: AnyDb,
+    runId: string,
+    run: PipelineRun,
+    mode: "cancel" | "graceful",
+    feedbackPrUrl?: string,
+  ): Promise<void>;
 }
 
 /**
@@ -327,6 +341,18 @@ export async function executeFeedbackPipeline(
       currentStage = stage;
       runLog.info({ stage: stageType }, "feedback: executing stage");
 
+      // Operator stop check (graceful path) — mirrors the main pipeline at
+      // runner.ts ~L840. Mid-stream cancel surfaces as result.status below.
+      const preStageStopSignal = getStopSignal(runId);
+      if (preStageStopSignal) {
+        runLog.info(
+          { stage: stageType, mode: preStageStopSignal },
+          "feedback: stop requested — aborting remaining stages",
+        );
+        await ctx.markRunCancelled(db, runId, run, preStageStopSignal, prUrl);
+        return;
+      }
+
       await upsertActiveWork(db, {
         runId,
         issueId: sanitizedIssue.id,
@@ -353,6 +379,18 @@ export async function executeFeedbackPipeline(
         reviewFeedback: stageReviewFeedback,
         stageModels: config.stageModels,
       });
+
+      // Mid-stream cancel: AbortController inside consumeAgentStream fired
+      // and the executor returned status="cancelled". Without this branch
+      // the loop would fall through to `if (result.status === "failed")` —
+      // which doesn't match — and continue to the next stage with an
+      // undefined handoff, eventually pushing partial work.
+      if (result.status === "cancelled") {
+        const mode = getStopSignal(runId) ?? "cancel";
+        runLog.info({ stage: stageType, mode }, "feedback: stage cancelled by operator");
+        await ctx.markRunCancelled(db, runId, run, mode, prUrl);
+        return;
+      }
 
       run.totalInputTokens += result.inputTokens;
       run.totalOutputTokens += result.outputTokens;

@@ -139,6 +139,13 @@ export async function createApp(config: ServerConfig) {
         channelId: config.pmSlack.channelId,
         linearApiKey: config.linearApiKey,
         teamIds: config.pmSlack.teamIds,
+        // Wire the live runner so `/pm cancel|stop|halt` fire real signals;
+        // db is threaded through for audit-event writes from those commands.
+        runner: {
+          requestStop: runner.requestStop.bind(runner),
+          haltAll: runner.haltAll.bind(runner),
+        },
+        db: db as any,
       });
       app.route("/", slackRouter);
     }

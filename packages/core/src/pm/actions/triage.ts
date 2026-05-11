@@ -11,6 +11,29 @@ const log = createLogger({ component: "PmAgent:triage" });
 const MAX_ISSUES_PER_TICK = 10;
 const DEFAULT_BATCH_SIZE = 3;
 
+/**
+ * Marker embedded in the body of every GitHub issue filed by the urateam
+ * quality-observer. `gh-linear-sync` copies the GitHub body verbatim into the
+ * Linear ticket description, so the marker survives the sync and is the
+ * authoritative way to detect observer-origin tickets on the Linear side
+ * (labels are not propagated by gh-linear-sync).
+ *
+ * Source of truth: urateam-quality-observer/src/github-issue-writer.ts.
+ */
+const OBSERVER_BODY_MARKER = "<!-- urateam-qo-observer:";
+
+/**
+ * Pipeline label assigned to observer-origin tickets. `needs-design` includes
+ * an `await-approval` stage that blocks until a human approves, so these
+ * findings surface without burning implement-stage tokens on a non-actionable
+ * diagnostic. See CLAUDE.md "Quality Observer" for the rationale.
+ */
+const OBSERVER_PIPELINE_LABEL = "needs-design";
+
+function isObserverOriginIssue(description: string | null | undefined): boolean {
+  return typeof description === "string" && description.includes(OBSERVER_BODY_MARKER);
+}
+
 export interface TriageInput {
   linearClient: any; // LinearClient from @linear/sdk
   teamIds: string[];
@@ -68,6 +91,61 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
     batchSize,
     async (issue: any) => {
       try {
+        if (isObserverOriginIssue(issue.description)) {
+          const team = await issue.team;
+          const teamId = team?.id;
+          const backlogStateId = teamId ? stateMap.get(`${teamId}:Backlog`) : undefined;
+
+          const issueLabels = [OBSERVER_PIPELINE_LABEL];
+          const labelIds = issueLabels
+            .map((l) => labelMap.get(l.toLowerCase()))
+            .filter(Boolean);
+          if (labelIds.length === 0) {
+            log.warn(
+              { issueId: issue.identifier, label: OBSERVER_PIPELINE_LABEL },
+              "observer-origin gate: '" + OBSERVER_PIPELINE_LABEL +
+                "' label not found in Linear — issue will move to Backlog without pipeline label and won't be routed by promote",
+            );
+          }
+
+          const rationale =
+            "Observer-origin finding (body marker detected) — routed to needs-design so the await-approval stage gates a human before any implement-stage work runs.";
+
+          const updatePayload: any = { priority: 3 };
+          if (labelIds.length > 0) updatePayload.labelIds = labelIds;
+          if (backlogStateId) updatePayload.stateId = backlogStateId;
+
+          await linearClient.updateIssue(issue.id, updatePayload);
+          await linearClient.createComment({
+            issueId: issue.id,
+            body:
+              `🤖 **PM Agent — Triaged (Quality Observer finding)**\n\n` +
+              `**Pipeline:** ${OBSERVER_PIPELINE_LABEL}\n` +
+              `**Rationale:** ${rationale}`,
+          });
+
+          const result: TriageResult = {
+            issueId: issue.identifier,
+            priority: 3,
+            labels: issueLabels,
+            complexity: "medium",
+            rationale,
+            acceptanceCriteria: [],
+          };
+          if (input.db) {
+            void logAuditEventUnchecked(input.db, pmTriageClassifiedEvent({
+              issueId: issue.identifier,
+              label: OBSERVER_PIPELINE_LABEL,
+              rationale,
+            }));
+          }
+          log.info(
+            { issueId: issue.identifier, pipelineLabel: OBSERVER_PIPELINE_LABEL },
+            "triaged observer-origin issue (skipped Claude classification)",
+          );
+          return result;
+        }
+
         const sanitizedDesc = sanitize(issue.description ?? "");
         const prompt =
           `Classify this software issue and generate acceptance criteria. Respond with ONLY a JSON object, no other text.\n\n` +

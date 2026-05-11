@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { desc, eq, inArray, count } from "drizzle-orm";
+import { timingSafeEqual } from "node:crypto";
 import type { Db } from "@urateam/core";
 import {
   pipelineRuns,
@@ -7,9 +8,12 @@ import {
   agentLogs,
   logAuditEvent,
   dashboardRetryRunEvent,
+  runCancelledEvent,
+  systemHaltedEvent,
   isFeatureLicensed,
   canAccess,
   type Role,
+  type StopMode,
 } from "@urateam/core";
 import { layout } from "../views/layout.js";
 import { runFeedView, type RunRow } from "../views/run-feed.js";
@@ -23,6 +27,10 @@ export interface RunsRouterDeps {
   runner?: {
     resume: (runOrIssueId: string) => Promise<void>;
     start: (...args: any[]) => Promise<void>;
+    /** Single-run stop. Looks up the issueId for the runId and records a stop signal. */
+    requestStop?: (runId: string, mode: StopMode) => { issueId: string | null; mode: StopMode };
+    /** Container-wide halt: pauses PM Agent + cancels every active run. */
+    haltAll?: () => { cancelledRunIds: string[] };
   };
   basePath?: string;
 }
@@ -130,7 +138,16 @@ export function createRunsRouter(
     const canRetry = isFeatureLicensed("rbac")
       ? canAccess((user?.role ?? "viewer") as Role, "runs.retry")
       : false;
-    const content = runDetailView(run, stages, logs, page, totalLogs, canRetry);
+    const canStop = isFeatureLicensed("rbac")
+      ? canAccess((user?.role ?? "viewer") as Role, "runs.stop")
+      : false;
+    const canHalt = isFeatureLicensed("rbac")
+      ? canAccess((user?.role ?? "viewer") as Role, "system.halt")
+      : false;
+    const content = runDetailView(run, stages, logs, page, totalLogs, canRetry, {
+      canStop,
+      canHalt,
+    });
     return c.html(layout(`Run ${id}`, content, effectiveBasePath, { userEmail: user?.email }));
   });
 
@@ -206,6 +223,220 @@ export function createRunsRouter(
       return c.redirect(target, 302);
     },
   );
+
+  /**
+   * Single-run stop. Two modes:
+   *  - POST /runs/:id/cancel  — interrupt the active stage stream immediately.
+   *  - POST /runs/:id/stop    — let the current stage finish, then stop.
+   *
+   * Both share the same handler factory; `mode` is bound at registration. The
+   * RBAC gate is `runs.stop` (operator+admin). Idempotent — calling on a run
+   * that's already terminal returns 409 so the operator gets feedback instead
+   * of silently accumulating audit events.
+   */
+  const stopHandler = (mode: StopMode) => async (c: any) => {
+    const id = c.req.param("id");
+    const rows = await d.select().from(pipelineRuns).where(eq(pipelineRuns.id, id)).limit(1);
+    if (rows.length === 0) return c.text("Run not found", 404);
+    const run = rows[0] as any;
+    const terminal = ["completed", "failed", "aborted", "cancelled"];
+    if (terminal.includes(run.status)) {
+      return c.text(`Cannot stop a run in status ${run.status}`, 409);
+    }
+
+    if (!runner?.requestStop) return c.text("Runner not configured", 500);
+    const { issueId } = runner.requestStop(id, mode);
+
+    const user = c.get("user" as never) as { id: string; email: string } | undefined;
+    if (user) {
+      void logAuditEvent(
+        db as any,
+        runCancelledEvent({
+          runId: id,
+          issueId: issueId ?? run.issueId,
+          actor: `dashboard:${user.email}`,
+          actorType: "dashboard-user",
+          mode,
+        }),
+      );
+    }
+
+    const target = `${effectiveBasePath}/runs/${id}`;
+    if (c.req.header("HX-Request")) {
+      c.header("HX-Redirect", target);
+      return c.body(null, 200);
+    }
+    return c.redirect(target, 302);
+  };
+
+  router.post(
+    "/runs/:id/cancel",
+    async (c, next) => {
+      if (!isFeatureLicensed("rbac")) return c.notFound();
+      return next();
+    },
+    requirePermission("runs.stop"),
+    stopHandler("cancel"),
+  );
+
+  router.post(
+    "/runs/:id/stop",
+    async (c, next) => {
+      if (!isFeatureLicensed("rbac")) return c.notFound();
+      return next();
+    },
+    requirePermission("runs.stop"),
+    stopHandler("graceful"),
+  );
+
+  /**
+   * Container-wide halt: pauses the PM Agent and cancels every active run.
+   * Reversible — operators can unpause via Slack `/pm resume` (or the planned
+   * dashboard equivalent) and re-trigger individual runs via retry. Cancelled
+   * runs themselves stay cancelled.
+   */
+  router.post(
+    "/admin/halt-all",
+    async (c, next) => {
+      if (!isFeatureLicensed("rbac")) return c.notFound();
+      return next();
+    },
+    requirePermission("system.halt"),
+    async (c) => {
+      if (!runner?.haltAll) return c.text("Runner not configured", 500);
+      const { cancelledRunIds } = runner.haltAll();
+
+      const user = c.get("user" as never) as { id: string; email: string } | undefined;
+      if (user) {
+        void logAuditEvent(
+          db as any,
+          systemHaltedEvent({
+            actor: `dashboard:${user.email}`,
+            actorType: "dashboard-user",
+            cancelledRunIds,
+          }),
+        );
+        // Per-run audit trail so each affected run shows the cancel reason in
+        // the audit feed alongside the halt event.
+        for (const runId of cancelledRunIds) {
+          const [row] = await d
+            .select({ issueId: pipelineRuns.issueId })
+            .from(pipelineRuns)
+            .where(eq(pipelineRuns.id, runId))
+            .limit(1);
+          if (row?.issueId) {
+            void logAuditEvent(
+              db as any,
+              runCancelledEvent({
+                runId,
+                issueId: row.issueId,
+                actor: `dashboard:${user.email}`,
+                actorType: "dashboard-user",
+                mode: "cancel",
+                reason: "system.halt",
+              }),
+            );
+          }
+        }
+      }
+
+      const target = `${effectiveBasePath}/`;
+      if (c.req.header("HX-Request")) {
+        c.header("HX-Redirect", target);
+        return c.body(null, 200);
+      }
+      return c.redirect(target, 302);
+    },
+  );
+
+  /**
+   * CLI-facing endpoints. Auth: shared secret in `X-Ura-Cli-Token` matching
+   * `URATEAM_CLI_TOKEN`. No RBAC dependency so this works in OSS deployments.
+   * Disabled (404) when `URATEAM_CLI_TOKEN` is unset — the absence of the
+   * secret is treated as "CLI control is opt-in", not "any caller is allowed".
+   *
+   * Actor in audit events is `cli:<x-ura-actor>` where the header is provided
+   * by the CLI from the local OS user so emergency stops are traceable.
+   */
+  const requireCliToken = async (c: any, next: any) => {
+    const expected = process.env.URATEAM_CLI_TOKEN;
+    if (!expected) return c.notFound();
+    const got = c.req.header("x-ura-cli-token") ?? "";
+    // Constant-time comparison — matches `verifyLinearSignature` and the SSO
+    // state-HMAC check. Length-mismatch short-circuits before timingSafeEqual
+    // because it requires equal-length buffers.
+    let ok = false;
+    if (got.length === expected.length) {
+      try {
+        ok = timingSafeEqual(Buffer.from(got), Buffer.from(expected));
+      } catch {
+        ok = false;
+      }
+    }
+    if (!ok) return c.text("invalid CLI token", 403);
+    return next();
+  };
+  const cliActor = (c: any): string => `cli:${c.req.header("x-ura-actor") ?? "unknown"}`;
+
+  const cliStopHandler = (mode: StopMode) => async (c: any) => {
+    const id = c.req.param("id");
+    const rows = await d.select().from(pipelineRuns).where(eq(pipelineRuns.id, id)).limit(1);
+    if (rows.length === 0) return c.text("Run not found", 404);
+    const run = rows[0] as any;
+    if (["completed", "failed", "aborted", "cancelled"].includes(run.status)) {
+      return c.json({ error: `Cannot stop a run in status ${run.status}` }, 409);
+    }
+    if (!runner?.requestStop) return c.text("Runner not configured", 500);
+    const { issueId } = runner.requestStop(id, mode);
+    void logAuditEvent(
+      db as any,
+      runCancelledEvent({
+        runId: id,
+        issueId: issueId ?? run.issueId,
+        actor: cliActor(c),
+        actorType: "cli",
+        mode,
+      }),
+    );
+    return c.json({ runId: id, mode, issueId: issueId ?? run.issueId });
+  };
+
+  router.post("/cli/runs/:id/cancel", requireCliToken, cliStopHandler("cancel"));
+  router.post("/cli/runs/:id/stop", requireCliToken, cliStopHandler("graceful"));
+
+  router.post("/cli/halt-all", requireCliToken, async (c) => {
+    if (!runner?.haltAll) return c.text("Runner not configured", 500);
+    const { cancelledRunIds } = runner.haltAll();
+    void logAuditEvent(
+      db as any,
+      systemHaltedEvent({
+        actor: cliActor(c),
+        actorType: "cli",
+        cancelledRunIds,
+      }),
+    );
+    for (const runId of cancelledRunIds) {
+      const [row] = await d
+        .select({ issueId: pipelineRuns.issueId })
+        .from(pipelineRuns)
+        .where(eq(pipelineRuns.id, runId))
+        .limit(1);
+      if (row?.issueId) {
+        void logAuditEvent(
+          db as any,
+          runCancelledEvent({
+            runId,
+            issueId: row.issueId,
+            actor: cliActor(c),
+            actorType: "cli",
+            mode: "cancel",
+            reason: "system.halt",
+          }),
+        );
+      }
+    }
+    return c.json({ cancelledRunIds });
+  });
 
   return router;
 }
