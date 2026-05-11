@@ -485,7 +485,7 @@ describe("createGitHubWebhookHandler", () => {
       buildConfig({ runner: runner as any, db: mockDb as any }),
     );
     const payload = makeReviewCommentPayload();
-    delete payload.comment.html_url;
+    delete (payload.comment as { html_url?: string }).html_url;
     const res = await postWebhook(app, payload);
     expect(res.status).toBe(200);
     const json = await res.json();
