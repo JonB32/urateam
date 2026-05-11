@@ -29,6 +29,7 @@ pnpm monorepo with 4 packages:
 - Shared helpers: `consumeAgentStream`, `parseJsonBlock`, `gitExecSafe`, `failPipeline`
 - Agent SDK stream messages: `type="assistant"` with text in `message.message` (no-tool sessions) or `message.content` (tool sessions) — `consumeAgentStream` handles both
 - **Pre-stream stall (BEC-183):** `consumeAgentStream` throws `StagePreStreamStalledError` if no message arrives within `firstMessageTimeoutMs` (default 5 min). `executor.ts` adds a second wall-clock cap via `Promise.race` (`WALL_CLOCK_STAGE_TIMEOUT_MS`: 60 min for implement, 30 min for others). Both paths result in `stage_runs.status = 'failed'`.
+- **Deep review convergence (BEC-211):** `detectConvergence()` in `pipeline/convergence.ts` exits the deep-review loop when any of four criteria fire: (1) zero findings, (2) `maxReviewTurns` (default 15) reached, (3) same files modified in consecutive passes (file-oscillation), or (4) findings count did not decrease. Logged at INFO under `"deep review: convergence detected — exiting loop"` with `convergenceReason` and `convergenceDetail` fields. Configure `maxReviewTurns` in `PipelineConfig` to cap iterations.
 - **Linear SDK lazy relations:** All relation fields (`.team`, `.state`, `.project`) are Promise-like — always `await` them. `.labels` is a **method** — call `await issue.labels()`. Sync access returns `undefined` silently.
 - **PR body generation**: `generatePRDescription()` in `pipeline/pr-description.ts` builds markdown body for all auto-generated PRs
 
