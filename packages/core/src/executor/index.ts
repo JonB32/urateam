@@ -18,6 +18,10 @@ export {
   runDeepReview,
   deepFindingsToReviewFindings,
   buildDeepReviewContext,
+  categorizeFilesForDeepReview,
+  filterReuseFiles,
+  filterQualityFiles,
+  filterEfficiencyFiles,
   type DeepReviewFinding,
   type DeepReviewResult,
 } from "./deep-review.js";

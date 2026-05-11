@@ -112,6 +112,27 @@ import {
 const log = createLogger({ component: "PipelineRunner" });
 
 /**
+ * Compute a short content-addressable fingerprint of the current worktree
+ * state by hashing both the latest commit SHA and any uncommitted diff.
+ *
+ * Using the commit SHA alone misses uncommitted changes; using `git diff HEAD`
+ * alone produces an empty string when the agent committed all its work (making
+ * every pass look identical even when commits differ).  Combining both ensures
+ * the hash changes whenever the implementation changes, regardless of commit
+ * hygiene.
+ *
+ * @param worktreePath - Absolute path of the worktree to fingerprint.
+ * @returns 16-char hex prefix of SHA256(commitSHA + diffContent).
+ */
+async function computeImplDiffHash(worktreePath: string): Promise<string> {
+  const [commit, diff] = await Promise.all([
+    gitExecSafe(["log", "--format=%H", "-1"], worktreePath),
+    gitExecSafe(["diff", "HEAD"], worktreePath),
+  ]);
+  return createHash("sha256").update(commit).update(diff).digest("hex").slice(0, 16);
+}
+
+/**
  * Map webhook-shaped `ReviewFeedbackComment[]` (the wire format we receive
  * from GitHub) into the `ReviewFeedbackContext` that the implement template
  * expects when handling PR review feedback.
@@ -1548,21 +1569,10 @@ export class PipelineRunner {
             };
           });
 
-          // BEC-208: compute the pre-implement state fingerprint so the
-          // convergence validator can detect whether the implementation changed
-          // between turns. We hash both the latest commit SHA (captures committed
-          // changes) and `git diff HEAD` (captures uncommitted changes), because
-          // when the agent commits all its work `git diff HEAD` is empty and a
-          // hash of "" would be identical every pass even when commits differ.
-          const [preImplCommit, preImplDiff] = await Promise.all([
-            gitExecSafe(["log", "--format=%H", "-1"], worktreePath ?? "."),
-            gitExecSafe(["diff", "HEAD"], worktreePath ?? "."),
-          ]);
-          const implDiffHash = createHash("sha256")
-            .update(preImplCommit)
-            .update(preImplDiff)
-            .digest("hex")
-            .slice(0, 16);
+          // BEC-208: snapshot the worktree state BEFORE re-running implement so
+          // the convergence validator can detect whether the agent's work
+          // actually changed anything between passes.
+          const implDiffHash = await computeImplDiffHash(worktreePath ?? ".");
 
           const deepReviewContext = buildDeepReviewContext(
             drPass,
@@ -1674,20 +1684,9 @@ export class PipelineRunner {
             };
           }
 
-          // BEC-208: compute the post-implement diff hash for this turn.
-          // We re-compute here (after the re-implement stage ran) so the hash
-          // reflects the state after all changes in this turn.
-          // Hash both the latest commit SHA and uncommitted diff so we detect
-          // changes regardless of whether the agent committed or not.
-          const [postImplCommit, postImplDiff] = await Promise.all([
-            gitExecSafe(["log", "--format=%H", "-1"], worktreePath ?? "."),
-            gitExecSafe(["diff", "HEAD"], worktreePath ?? "."),
-          ]);
-          const postImplDiffHash = createHash("sha256")
-            .update(postImplCommit)
-            .update(postImplDiff)
-            .digest("hex")
-            .slice(0, 16);
+          // BEC-208: snapshot the post-implement state for the TurnRecord so
+          // the convergence validator can compare it to the pre-implement hash.
+          const postImplDiffHash = await computeImplDiffHash(worktreePath ?? ".");
 
           // BEC-208: record this turn in the convergence history.
           convergenceHistory.push({

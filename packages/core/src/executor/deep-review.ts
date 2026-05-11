@@ -92,38 +92,81 @@ function matchesAny(file: string, patterns: RegExp[]): boolean {
 }
 
 /**
+ * Escape a closing XML tag in `content` to prevent injection out of a
+ * sandboxed block.  For example:
+ *   `escapeClosingTag(diffStat, "diff-stat")`
+ * replaces any `</diff-stat>` in the string with `[/diff-stat]`, preventing
+ * untrusted content from breaking out of the surrounding `<diff-stat>` element.
+ */
+function escapeClosingTag(content: string, tagName: string): string {
+  return content.replace(new RegExp(`</${tagName}>`, "gi"), `[/${tagName}]`);
+}
+
+/**
+ * Categorise files for deep-review in a single pass, assigning each file to
+ * the subset(s) it belongs to.  Returns `{ reuse, quality, efficiency }`.
+ *
+ * A single pass over `files` is used (rather than three separate filter calls)
+ * to keep the total pattern-test count at ~9 per file rather than ~51.
+ *
+ * Subset rules:
+ * - quality:    everything except generated/dist output.
+ * - efficiency: source files — no tests, no static assets, no generated output.
+ * - reuse:      pure source files — no tests, no config, no docs, no generated, no statics.
+ */
+export function categorizeFilesForDeepReview(files: string[]): {
+  reuse: string[];
+  quality: string[];
+  efficiency: string[];
+} {
+  const reuse: string[] = [];
+  const quality: string[] = [];
+  const efficiency: string[] = [];
+
+  for (const f of files) {
+    const isGenerated = matchesAny(f, GENERATED_PATTERNS);
+    const isTest = matchesAny(f, TEST_PATTERNS);
+    const isConfig = matchesAny(f, CONFIG_PATTERNS);
+    const isDoc = matchesAny(f, DOC_PATTERNS);
+    const isStatic = matchesAny(f, STATIC_ASSET_PATTERNS);
+
+    // quality: every file except generated/dist output
+    if (!isGenerated) quality.push(f);
+
+    // efficiency: hot-path source — no tests, no statics, no generated
+    if (!isTest && !isStatic && !isGenerated) efficiency.push(f);
+
+    // reuse: pure source — no tests, no config, no docs, no generated, no statics
+    if (!isTest && !isConfig && !isDoc && !isGenerated && !isStatic) reuse.push(f);
+  }
+
+  return { reuse, quality, efficiency };
+}
+
+/**
  * Reuse agent: source files only.
  * Skips tests, configs, docs, generated output, and static assets.
+ * @deprecated Use `categorizeFilesForDeepReview` for efficient single-pass categorisation.
  */
 export function filterReuseFiles(files: string[]): string[] {
-  return files.filter(
-    (f) =>
-      !matchesAny(f, TEST_PATTERNS) &&
-      !matchesAny(f, CONFIG_PATTERNS) &&
-      !matchesAny(f, DOC_PATTERNS) &&
-      !matchesAny(f, GENERATED_PATTERNS) &&
-      !matchesAny(f, STATIC_ASSET_PATTERNS),
-  );
+  return categorizeFilesForDeepReview(files).reuse;
 }
 
 /**
  * Efficiency agent: hot-path source files.
  * Skips tests, static assets, and generated output.
+ * @deprecated Use `categorizeFilesForDeepReview` for efficient single-pass categorisation.
  */
 export function filterEfficiencyFiles(files: string[]): string[] {
-  return files.filter(
-    (f) =>
-      !matchesAny(f, TEST_PATTERNS) &&
-      !matchesAny(f, STATIC_ASSET_PATTERNS) &&
-      !matchesAny(f, GENERATED_PATTERNS),
-  );
+  return categorizeFilesForDeepReview(files).efficiency;
 }
 
 /**
  * Quality agent: all source files but not generated/dist output.
+ * @deprecated Use `categorizeFilesForDeepReview` for efficient single-pass categorisation.
  */
 export function filterQualityFiles(files: string[]): string[] {
-  return files.filter((f) => !matchesAny(f, GENERATED_PATTERNS));
+  return categorizeFilesForDeepReview(files).quality;
 }
 
 // ---------------------------------------------------------------------------
@@ -184,12 +227,9 @@ function buildPrompt(
     "handoff-data",
     `Summary: ${summary || ""}\nFiles changed: ${filesJson}`,
   );
-  // diffStat is git output (not user-controlled), but still strip closing-tag
-  // injection as an extra defence layer.
-  const safeDiffStat = (diffStat || "No file changes detected").replace(
-    /<\/diff-stat>/gi,
-    "[/diff-stat]",
-  );
+  // diffStat is git output (not user-controlled), but still escape the closing
+  // tag as a defence-in-depth measure against unexpected injection.
+  const safeDiffStat = escapeClosingTag(diffStat || "No file changes detected", "diff-stat");
 
   return `You are a ${role}. Your ONLY job is to find ${agentType === "reuse" ? "code duplication and missed helper opportunities" : agentType === "quality" ? "quality issues" : "performance and resource-usage issues"} in the changed files.
 
@@ -323,10 +363,10 @@ export async function runDeepReview(
   const summary = handoff.summary;
   const allFiles = handoff.filesChanged;
 
-  // Compute per-agent file subsets.
-  const reuseFiles = filterReuseFiles(allFiles);
-  const qualityFiles = filterQualityFiles(allFiles);
-  const efficiencyFiles = filterEfficiencyFiles(allFiles);
+  // Compute per-agent file subsets in a single pass (avoids ~51 redundant
+  // pattern tests per file that three separate filter calls would incur).
+  const { reuse: reuseFiles, quality: qualityFiles, efficiency: efficiencyFiles } =
+    categorizeFilesForDeepReview(allFiles);
 
   log.debug(
     {
@@ -392,10 +432,11 @@ export function deepFindingsToReviewFindings(
  * @param pass - 1-based pass number.
  * @param findings - Findings from the review providers for this pass.
  * @param previousHandoff - Handoff artifact from the previous implement stage.
- * @param implDiffHash - Optional hash of `git diff HEAD` after the previous
- *   implement run. When provided it is embedded in the context block so that
- *   the convergence validator and downstream tooling can compare whether the
- *   implementation actually changed between passes.
+ * @param implDiffHash - Optional hash of the git state **before** the current
+ *   implement stage runs (i.e. the post-implement state from the previous pass).
+ *   When provided it is embedded in the context block so that the convergence
+ *   validator and downstream tooling can compare whether the implementation
+ *   actually changed between passes.
  */
 export function buildDeepReviewContext(
   pass: number,
@@ -412,8 +453,7 @@ export function buildDeepReviewContext(
   // Sanitize untrusted finding fields using the full sanitize() from the prompt
   // sanitizer (strips injection phrases, script tags, etc.) plus a closing-tag
   // defence to prevent breaking out of the <deep-review> block.
-  const sanitizeField = (s: string) =>
-    sanitize(s).replace(/<\/deep-review>/gi, "[/deep-review]");
+  const sanitizeField = (s: string) => escapeClosingTag(sanitize(s), "deep-review");
 
   const formatFindings = (fs: DeepReviewFinding[]) =>
     fs.length === 0
