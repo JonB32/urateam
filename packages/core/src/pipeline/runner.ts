@@ -90,6 +90,7 @@ import {
   removeActiveWork,
   checkFileOverlap,
   getModifiedFiles,
+  getActiveWork,
 } from "../pm/coordination.js";
 import { eq, and, or, sql, gte, lt, inArray } from "drizzle-orm";
 import { nanoid } from "nanoid";
@@ -125,6 +126,26 @@ export interface PipelineRunnerConfig {
    * the pipeline.  Defaults to 120 000 ms (2 minutes).
    */
   prLockTimeoutMs?: number;
+  /**
+   * Maximum time (ms) with no `active_work.updatedAt` refresh before a run is
+   * considered stalled and automatically terminated with `status='failed'` and
+   * `errorMessage='stalled process'`.
+   *
+   * Stall detection fires when a run has had no stage-boundary activity for
+   * longer than this threshold.  Long-running stages (e.g. `implement`) update
+   * `active_work.updatedAt` only at stage start, so set this value higher than
+   * the longest expected stage duration.
+   *
+   * Defaults to 30 minutes (1 800 000 ms).
+   * Recommended production value: 90 minutes (5 400 000 ms) if your implement
+   * stage routinely runs longer than 30 minutes.
+   */
+  stallThresholdMs?: number;
+  /**
+   * How often (ms) `checkForStalledRuns()` is invoked.
+   * Defaults to 60 seconds (60 000 ms).
+   */
+  stallCheckIntervalMs?: number;
 }
 
 // Simplified issue type from webhook
@@ -157,6 +178,9 @@ export class PipelineRunner {
   private gitlabConfig?: GitLabConfig;
   private lockAdapter: LockAdapter;
   private prLockTimeoutMs: number;
+  private stallThresholdMs: number;
+  private stallCheckIntervalMs: number;
+  private stallDetectionTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: PipelineRunnerConfig) {
     this.db = config.db;
@@ -169,6 +193,8 @@ export class PipelineRunner {
     this.gitlabConfig = config.gitlab;
     this.lockAdapter = createBranchLockAdapter(config.db as AnyDb);
     this.prLockTimeoutMs = config.prLockTimeoutMs ?? 120_000;
+    this.stallThresholdMs = config.stallThresholdMs ?? 30 * 60 * 1000;
+    this.stallCheckIntervalMs = config.stallCheckIntervalMs ?? 60 * 1000;
   }
 
   async start(
@@ -2634,6 +2660,10 @@ export class PipelineRunner {
 
     // Prune stale worktree administrative entries from every known repo clone.
     await this.pruneAllWorktreeRefs();
+
+    // Start the background stall-detection polling loop now that orphaned runs
+    // from a previous restart have been cleaned up.
+    this.startStalledRunDetection();
   }
 
   /**
@@ -2643,6 +2673,139 @@ export class PipelineRunner {
    */
   private async pruneAllWorktreeRefs(): Promise<void> {
     await pruneWorktreesInRepoDirs(this.repoCloneDir);
+  }
+
+  // ---------------------------------------------------------------------------
+  // BEC-214: Runner-level stall detection
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Check for pipeline runs that have had no stage-boundary activity for longer
+   * than `stallThresholdMs` (default 30 minutes). When a stalled run is found
+   * it is immediately terminated: the in-flight Agent SDK stream is cancelled
+   * via a `"cancel"` stop signal, the `pipeline_runs` row is set to
+   * `status='failed'` with `errorMessage='stalled process'`, the
+   * `active_work` coordination row is removed, and the in-memory `activeRuns`
+   * entry is deleted.
+   *
+   * Activity is measured by `active_work.updatedAt`, which is refreshed on
+   * every call to `upsertActiveWork()` (i.e. at every stage-boundary). A run
+   * that has made no stage transitions for longer than the threshold is
+   * considered stalled.
+   *
+   * This method is called automatically by the interval started in
+   * `startStalledRunDetection()`. It may also be called directly in tests.
+   *
+   * Emits a structured `error` log entry for every stalled run detected,
+   * including: `runId`, `stage`, `elapsedMs`, and `errorContext`.
+   */
+  async checkForStalledRuns(): Promise<void> {
+    const db = this.db as AnyDb;
+    const now = Date.now();
+    const cutoffMs = now - this.stallThresholdMs;
+
+    let entries: Awaited<ReturnType<typeof getActiveWork>>;
+    try {
+      entries = await getActiveWork(db);
+    } catch (err) {
+      log.warn({ err }, "checkForStalledRuns: failed to query active_work");
+      return;
+    }
+
+    for (const entry of entries) {
+      // Compute last-activity time — handle both Date objects and epoch ints.
+      const updatedAtMs =
+        entry.updatedAt instanceof Date
+          ? entry.updatedAt.getTime()
+          : Number(entry.updatedAt) * 1000;
+
+      if (updatedAtMs >= cutoffMs) continue; // Recently active — not stalled.
+
+      // Only terminate runs owned by this process to avoid interfering with
+      // runs from a different PipelineRunner instance sharing the same DB.
+      let owningIssueId: string | null = null;
+      for (const [issueId, runId] of this.activeRuns) {
+        if (runId === entry.runId) {
+          owningIssueId = issueId;
+          break;
+        }
+      }
+      if (!owningIssueId) continue;
+
+      const elapsedMs = now - updatedAtMs;
+      const errorContext = `no activity for ${Math.round(elapsedMs / 1000)}s (threshold: ${this.stallThresholdMs / 1000}s)`;
+
+      log.error(
+        {
+          runId: entry.runId,
+          stage: entry.stage,
+          elapsedMs,
+          errorContext,
+        },
+        "stalled run detected — terminating",
+      );
+
+      // Cancel any in-flight Agent SDK stream immediately.
+      requestStop(entry.runId, "cancel");
+
+      // Update the DB record to reflect the failure.
+      try {
+        await db
+          .update(pipelineRuns)
+          .set({
+            status: "failed",
+            completedAt: new Date(),
+            errorMessage: `stalled process: ${errorContext} in stage '${entry.stage}'`,
+          })
+          .where(eq(pipelineRuns.id, entry.runId));
+      } catch (err) {
+        log.warn({ err, runId: entry.runId }, "checkForStalledRuns: failed to update run status");
+      }
+
+      // Remove from the coordination table so conflict-detection is unblocked.
+      await removeActiveWork(db, entry.runId);
+
+      // Release the in-memory slot so new runs can start for this issue.
+      this.activeRuns.delete(owningIssueId);
+    }
+  }
+
+  /**
+   * Start the background stall-detection polling loop.
+   *
+   * Calls `checkForStalledRuns()` every `stallCheckIntervalMs` milliseconds
+   * (default 60 seconds). Idempotent — subsequent calls while the loop is
+   * already running are no-ops.
+   *
+   * Called automatically from `recoverStuckRuns()` on startup. Callers need
+   * not invoke this directly unless managing the lifecycle explicitly (e.g.
+   * in tests using fake timers).
+   */
+  startStalledRunDetection(): void {
+    if (this.stallDetectionTimer) return; // Already running — idempotent.
+    this.stallDetectionTimer = setInterval(() => {
+      this.checkForStalledRuns().catch((err) => {
+        log.warn({ err }, "checkForStalledRuns: uncaught error in poll tick");
+      });
+    }, this.stallCheckIntervalMs);
+    log.info(
+      {
+        stallThresholdMs: this.stallThresholdMs,
+        stallCheckIntervalMs: this.stallCheckIntervalMs,
+      },
+      "stall detection started",
+    );
+  }
+
+  /**
+   * Stop the background stall-detection polling loop.
+   * A no-op if the loop is not currently running.
+   */
+  stopStalledRunDetection(): void {
+    if (!this.stallDetectionTimer) return;
+    clearInterval(this.stallDetectionTimer);
+    this.stallDetectionTimer = null;
+    log.info("stall detection stopped");
   }
 
   /**

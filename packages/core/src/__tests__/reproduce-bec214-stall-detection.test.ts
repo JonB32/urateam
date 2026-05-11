@@ -1,141 +1,432 @@
 /**
- * Reproduction test for BEC-214:
- * Runner-level stall detection gap — `checkForStalledRuns()` is missing.
+ * BEC-214: Runner-level stall detection — integration tests.
  *
- * ## Root cause
+ * These tests verify that `PipelineRunner` detects and terminates stalled
+ * pipeline runs via the `checkForStalledRuns()` method and its periodic
+ * polling interval (`startStalledRunDetection` / `stopStalledRunDetection`).
  *
- * The acceptance criteria require a `checkForStalledRuns()` function on
- * `PipelineRunner` that is invoked periodically (at least every 60 seconds)
- * from the main orchestration loop. No such function exists today.
+ * ## What "stalled" means
  *
- * ## Existing stall defences (NOT sufficient to close BEC-214)
+ * A run is stalled when `active_work.updatedAt` has not advanced for longer
+ * than `stallThresholdMs` (default 30 minutes). The `active_work` table is
+ * updated at every stage boundary via `upsertActiveWork`, so a run stuck in
+ * the middle of a stage (or between stages) will trigger detection once the
+ * threshold elapses.
  *
- * 1. **Stream-level** (`executor/agent-stream.ts`):
- *    - `StageStalledError` — mid-stream silence after `progressTimeoutMs` (30 min)
- *    - `StagePreStreamStalledError` — no first message within `firstMessageTimeoutMs` (5 min)
- *    - Wall-clock per-stage hard cap in `executor.ts` (60 min implement / 30 min others)
- *    These fire *inside* the Agent SDK stream; they cannot cover hangs at the runner
- *    orchestration layer (e.g. between stage calls, during DB writes, inside the push
- *    queue).
+ * ## Existing defences (context)
  *
- * 2. **PM Agent zombie recovery** (`pm/actions/recover-stuck.ts`, BEC-184):
- *    - Triggered by the PM Agent `tick()`, NOT by `PipelineRunner` itself.
- *    - Fires every PM Agent tick (typically every few minutes, not every 60 s).
- *    - Detects runs `status='running'` for > `PM_AGENT_STUCK_RUN_AGE_MIN` minutes
- *      (default 60 min) by inspecting the DB — it does NOT monitor active runs
- *      in real time.
- *    - Has no concept of "inactivity windows" shorter than the full run age threshold.
+ * - Stream-level `StageStalledError` (progressTimeoutMs 30 min) — fires inside the
+ *   Agent SDK stream; cannot cover orchestration-layer hangs.
+ * - Wall-clock per-stage cap in executor.ts (60 min implement / 30 min others).
+ * - PM Agent zombie recovery (BEC-184) — fires every PM tick (~minutes), not
+ *   every 60 s, and uses full run-age (60 min) rather than inactivity window.
  *
- * Neither defence satisfies the ACs which require:
- *  - A dedicated `checkForStalledRuns()` method on `PipelineRunner`
- *  - Periodic invocation every ≥ 60 s from the main orchestration loop
- *  - Structured log emission (runId, stage, elapsed, error context)
- *  - Automatic termination with "stalled process" reason
- *  - Configuration for timeout and polling interval documented in deploy/
- *
- * ## Steps to reproduce the gap
- *
- * 1. `PipelineRunner` does not export or define `checkForStalledRuns`.
- * 2. There is no `setInterval` or periodic monitoring loop inside `PipelineRunner`.
- * 3. A run can sit in `status='running'` with no activity for 30–59 minutes before
- *    ANY existing mechanism fires (the earliest automated recovery is 60 min via BEC-184).
- * 4. No per-stage "last activity" timestamp is tracked at the runner level;
- *    only the `updatedAt` column on `pipeline_runs` is updated at stage boundaries.
+ * `checkForStalledRuns()` closes the gap: it runs every 60 s from within the
+ * PipelineRunner itself (no dependency on the PM Agent) and can detect a hung
+ * run that slipped past the stream-level guards.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { PipelineRunner } from "../pipeline/runner.js";
 
 // ---------------------------------------------------------------------------
-// BEC-214 Reproduction: checkForStalledRuns() does not exist on PipelineRunner
+// vi.mock must be at module top level — hoisted by vitest transform.
+// We mock only the coordination helpers used by checkForStalledRuns so the
+// rest of the runner is exercised as-is (no full DB setup needed).
+//
+// vi.hoisted ensures the mock functions are created BEFORE vi.mock factories
+// execute (vi.mock is hoisted above variable declarations by vitest's transform).
 // ---------------------------------------------------------------------------
 
-describe("BEC-214: runner-level stall detection — feature gap", () => {
-  /**
-   * AC 1 — `checkForStalledRuns()` must exist on `PipelineRunner`.
-   *
-   * Currently `PipelineRunner` has:
-   *   start(), resume(), abort(), haltAll(), cancelAll()
-   * There is no `checkForStalledRuns` method.
-   *
-   * This test FAILS until BEC-214 is implemented.
-   */
-  it("PipelineRunner should expose a checkForStalledRuns() method", () => {
-    expect(typeof PipelineRunner.prototype.checkForStalledRuns).toBe(
-      "function",
-      "PipelineRunner.prototype.checkForStalledRuns must exist — implement BEC-214",
-    );
+const { mockGetActiveWork, mockRemoveActiveWork } = vi.hoisted(() => ({
+  mockGetActiveWork: vi.fn(),
+  mockRemoveActiveWork: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../pm/coordination.js", () => ({
+  upsertActiveWork: vi.fn().mockResolvedValue(undefined),
+  removeActiveWork: (...args: unknown[]) => mockRemoveActiveWork(...args),
+  checkFileOverlap: vi.fn().mockResolvedValue({ hasOverlap: false, overlappingFiles: [], conflictingRunIds: [] }),
+  getModifiedFiles: vi.fn().mockResolvedValue([]),
+  getActiveWork: (...args: unknown[]) => mockGetActiveWork(...args),
+}));
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function buildSetWhereMock() {
+  const whereFn = vi.fn().mockResolvedValue({});
+  const setFn = vi.fn().mockReturnValue({ where: whereFn });
+  const updateFn = vi.fn().mockReturnValue({ set: setFn });
+  return { updateFn, setFn, whereFn };
+}
+
+function buildRunner(overrides?: {
+  stallThresholdMs?: number;
+  stallCheckIntervalMs?: number;
+}) {
+  const { updateFn, setFn, whereFn } = buildSetWhereMock();
+
+  const fakeDb = {
+    select: vi.fn().mockReturnValue({
+      from: vi.fn().mockReturnValue({
+        where: vi.fn().mockResolvedValue([]),
+      }),
+    }),
+    update: updateFn,
+    delete: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue({}) }),
+    insert: vi.fn().mockReturnValue({ values: vi.fn().mockResolvedValue({}) }),
+  };
+
+  const runner = new PipelineRunner({
+    db: fakeDb as any,
+    notifier: {} as any,
+    concurrency: 1,
+    agentRunDir: "/tmp/test-runs",
+    repoCloneDir: "/tmp/test-repos",
+    stallThresholdMs: overrides?.stallThresholdMs ?? 30 * 60 * 1000,
+    stallCheckIntervalMs: overrides?.stallCheckIntervalMs ?? 60 * 1000,
   });
 
-  /**
-   * AC 2 — stall detection must fire when a run has had no activity for more
-   * than the configured timeout (default 30 minutes).
-   *
-   * This test simulates the condition by constructing a fake `activeRuns` state
-   * where a run's last activity timestamp is 31 minutes ago.
-   *
-   * The test FAILS today because `checkForStalledRuns` does not exist and there
-   * is no last-activity tracking inside `PipelineRunner`.
-   */
-  it("checkForStalledRuns() detects a run inactive for > 30 minutes and marks it failed", async () => {
-    // Build a minimal config — real DB / notifier not needed for this unit check.
-    const fakeDb = {
-      select: () => ({ from: () => ({ where: async () => [] }) }),
-      update: () => ({ set: () => ({ where: async () => ({}) }) }),
-    };
-    const fakeNotifier = {};
+  return { runner, fakeDb, updateFn, setFn, whereFn };
+}
 
-    const runner = new PipelineRunner({
-      db: fakeDb as any,
-      notifier: fakeNotifier as any,
-      concurrency: 1,
-      agentRunDir: "/tmp/test-runs",
-      repoCloneDir: "/tmp/test-repos",
+// ---------------------------------------------------------------------------
+// AC 1 — PipelineRunner exposes the stall-detection API
+// ---------------------------------------------------------------------------
+
+describe("BEC-214 AC1: PipelineRunner stall-detection API", () => {
+  it("exposes checkForStalledRuns() as a public method", () => {
+    const { runner } = buildRunner();
+    expect(typeof runner.checkForStalledRuns).toBe("function");
+    runner.stopStalledRunDetection();
+  });
+
+  it("exposes startStalledRunDetection() as a public method", () => {
+    const { runner } = buildRunner();
+    expect(typeof runner.startStalledRunDetection).toBe("function");
+    runner.stopStalledRunDetection();
+  });
+
+  it("exposes stopStalledRunDetection() as a public method", () => {
+    const { runner } = buildRunner();
+    expect(typeof runner.stopStalledRunDetection).toBe("function");
+    runner.stopStalledRunDetection();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC 2 — Detection fires when run exceeds the stall threshold
+// ---------------------------------------------------------------------------
+
+describe("BEC-214 AC2: stall threshold detection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("marks a run stalled when updatedAt is older than stallThresholdMs", async () => {
+    const { runner, setFn } = buildRunner({ stallThresholdMs: 30 * 60 * 1000 });
+
+    const runId = "stalled-run-001";
+    const issueId = "BEC-TEST-1";
+    // Simulate a run that last updated 31 minutes ago (past the 30-min threshold).
+    const stalePastMs = Date.now() - 31 * 60 * 1000;
+
+    // Inject the run into the in-memory activeRuns map.
+    (runner as any).activeRuns.set(issueId, runId);
+
+    mockGetActiveWork.mockResolvedValueOnce([
+      {
+        id: runId,
+        runId,
+        issueId,
+        stage: "implement",
+        filesModified: null,
+        startedAt: new Date(stalePastMs - 5 * 60 * 1000),
+        updatedAt: new Date(stalePastMs),
+      },
+    ]);
+
+    await runner.checkForStalledRuns();
+
+    // The DB update should have been called with status='failed' and an
+    // error message containing 'stalled process'.
+    expect(setFn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "failed",
+        errorMessage: expect.stringContaining("stalled process"),
+      }),
+    );
+
+    runner.stopStalledRunDetection();
+  });
+
+  it("does NOT mark a recently active run as stalled", async () => {
+    const { runner, setFn } = buildRunner({ stallThresholdMs: 30 * 60 * 1000 });
+
+    const runId = "recent-run-001";
+    const issueId = "BEC-TEST-2";
+    // Only 5 minutes since last activity — well within the 30-min threshold.
+    const recentMs = Date.now() - 5 * 60 * 1000;
+
+    (runner as any).activeRuns.set(issueId, runId);
+
+    mockGetActiveWork.mockResolvedValueOnce([
+      {
+        id: runId,
+        runId,
+        issueId,
+        stage: "implement",
+        filesModified: null,
+        startedAt: new Date(recentMs - 60 * 1000),
+        updatedAt: new Date(recentMs),
+      },
+    ]);
+
+    await runner.checkForStalledRuns();
+
+    // DB update must NOT have been called.
+    expect(setFn).not.toHaveBeenCalled();
+    // Run is still active.
+    expect((runner as any).activeRuns.has(issueId)).toBe(true);
+
+    runner.stopStalledRunDetection();
+  });
+
+  it("ignores active_work entries that do not belong to this runner instance", async () => {
+    const { runner, setFn } = buildRunner({ stallThresholdMs: 30 * 60 * 1000 });
+
+    const foreignRunId = "foreign-run-999";
+    const stalePastMs = Date.now() - 45 * 60 * 1000;
+
+    // Do NOT add foreignRunId to activeRuns — simulates a different process.
+    mockGetActiveWork.mockResolvedValueOnce([
+      {
+        id: foreignRunId,
+        runId: foreignRunId,
+        issueId: "FOREIGN-1",
+        stage: "review",
+        filesModified: null,
+        startedAt: new Date(stalePastMs - 5 * 60 * 1000),
+        updatedAt: new Date(stalePastMs),
+      },
+    ]);
+
+    await runner.checkForStalledRuns();
+
+    // Must not touch a run we don't own.
+    expect(setFn).not.toHaveBeenCalled();
+
+    runner.stopStalledRunDetection();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC 3 — Termination cleans up locks, resources, and DB state
+// ---------------------------------------------------------------------------
+
+describe("BEC-214 AC3: stalled run termination cleans up resources", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("removes stalled run from activeRuns and active_work, and sets DB to failed", async () => {
+    const { runner, setFn } = buildRunner();
+
+    const runId = "cleanup-run-001";
+    const issueId = "CLEANUP-1";
+    const stalePastMs = Date.now() - 45 * 60 * 1000;
+
+    (runner as any).activeRuns.set(issueId, runId);
+
+    mockGetActiveWork.mockResolvedValueOnce([
+      {
+        id: runId,
+        runId,
+        issueId,
+        stage: "test",
+        filesModified: null,
+        startedAt: new Date(stalePastMs - 5 * 60 * 1000),
+        updatedAt: new Date(stalePastMs),
+      },
+    ]);
+
+    await runner.checkForStalledRuns();
+
+    // AC3a: in-memory slot released.
+    expect((runner as any).activeRuns.has(issueId)).toBe(false);
+
+    // AC3b: coordination row removed.
+    expect(mockRemoveActiveWork).toHaveBeenCalledWith(
+      expect.anything(),
+      runId,
+    );
+
+    // AC3c: DB updated to failed with completedAt timestamp.
+    expect(setFn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "failed",
+        completedAt: expect.any(Date),
+        errorMessage: expect.stringContaining("stalled process"),
+      }),
+    );
+
+    runner.stopStalledRunDetection();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC 5 — Integration: periodic polling via fake timers
+// ---------------------------------------------------------------------------
+
+describe("BEC-214 AC5: stall detection polling interval (integration)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("checkForStalledRuns() is called at least once per stallCheckIntervalMs", async () => {
+    vi.useFakeTimers();
+
+    const { runner } = buildRunner({ stallCheckIntervalMs: 60_000 });
+    const spy = vi
+      .spyOn(runner, "checkForStalledRuns")
+      .mockResolvedValue(undefined);
+
+    runner.startStalledRunDetection();
+
+    // No calls yet — interval hasn't fired.
+    expect(spy).not.toHaveBeenCalled();
+
+    // Advance exactly one polling interval.
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    // Advance two more intervals.
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(spy).toHaveBeenCalledTimes(3);
+
+    runner.stopStalledRunDetection();
+  });
+
+  it("startStalledRunDetection() is idempotent — second call is a no-op", async () => {
+    vi.useFakeTimers();
+
+    const { runner } = buildRunner({ stallCheckIntervalMs: 60_000 });
+    const spy = vi
+      .spyOn(runner, "checkForStalledRuns")
+      .mockResolvedValue(undefined);
+
+    runner.startStalledRunDetection();
+    runner.startStalledRunDetection(); // second call should be no-op
+
+    await vi.advanceTimersByTimeAsync(60_001);
+    // Exactly 1 call — only one interval was started.
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    runner.stopStalledRunDetection();
+  });
+
+  it("stopStalledRunDetection() halts the polling loop", async () => {
+    vi.useFakeTimers();
+
+    const { runner } = buildRunner({ stallCheckIntervalMs: 60_000 });
+    const spy = vi
+      .spyOn(runner, "checkForStalledRuns")
+      .mockResolvedValue(undefined);
+
+    runner.startStalledRunDetection();
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    runner.stopStalledRunDetection();
+
+    // After stopping, no further calls should happen.
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("simulates a stalled run: detects within one polling interval", async () => {
+    vi.useFakeTimers();
+
+    // Use a very short stall threshold (1 s) and polling interval (500 ms) so
+    // fake-timer advancement is tiny in test time.
+    const { runner, setFn } = buildRunner({
+      stallThresholdMs: 1_000,
+      stallCheckIntervalMs: 500,
     });
 
-    // checkForStalledRuns must exist as a callable method.
-    expect(typeof (runner as any).checkForStalledRuns).toBe(
-      "function",
-      "checkForStalledRuns() is not implemented on PipelineRunner",
+    const runId = "sim-stalled-run";
+    const issueId = "SIM-1";
+
+    (runner as any).activeRuns.set(issueId, runId);
+
+    // Simulate an entry whose updatedAt is already 2 seconds in the past
+    // (past the 1-second stall threshold set above).
+    mockGetActiveWork.mockResolvedValue([
+      {
+        id: runId,
+        runId,
+        issueId,
+        stage: "implement",
+        filesModified: null,
+        startedAt: new Date(Date.now() - 10_000),
+        updatedAt: new Date(Date.now() - 2_000),
+      },
+    ]);
+
+    runner.startStalledRunDetection();
+
+    // Advance past one polling interval — stall should be detected.
+    await vi.advanceTimersByTimeAsync(501);
+
+    // DB update must fire with failed status.
+    expect(setFn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "failed",
+        errorMessage: expect.stringContaining("stalled process"),
+      }),
     );
+    // Run removed from activeRuns.
+    expect((runner as any).activeRuns.has(issueId)).toBe(false);
+
+    runner.stopStalledRunDetection();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC 6 — Structured log emission (smoke test — pino logs are structured JSON)
+// ---------------------------------------------------------------------------
+
+describe("BEC-214 AC6: structured log emission for stalled runs", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
   });
 
-  /**
-   * AC 3 — structured stall-detection log.
-   *
-   * When a stalled run is detected, the log entry must include:
-   *   runId, stage, elapsedMs, errorContext
-   *
-   * No such logging exists today because `checkForStalledRuns` is absent.
-   */
-  it("detects the gap: no runner-level last-activity tracking exists", () => {
-    // PipelineRunner only tracks activeRuns: Map<issueId, runId>
-    // It does NOT store a per-run "last activity" timestamp.
-    const proto = PipelineRunner.prototype as any;
+  it("checkForStalledRuns() completes without throwing when a stalled run is found", async () => {
+    const { runner } = buildRunner();
 
-    // The absence of these properties/methods confirms the gap.
-    expect(proto.checkForStalledRuns).toBeUndefined();
-    expect(proto.startStalledRunDetection).toBeUndefined();
-    expect(proto.stopStalledRunDetection).toBeUndefined();
-  });
+    const runId = "log-run-001";
+    const issueId = "LOG-1";
+    const stalePastMs = Date.now() - 35 * 60 * 1000;
 
-  /**
-   * AC 5 — integration test: simulate a stalled run.
-   *
-   * A proper integration test would:
-   *  1. Start a run via runner.start()
-   *  2. Freeze activity updates (skip stage completion callbacks)
-   *  3. Advance fake timers past the stall timeout (30 min)
-   *  4. Call checkForStalledRuns() or wait for the periodic poll
-   *  5. Assert run DB status = 'failed' with reason 'stalled process'
-   *
-   * This cannot be written until `checkForStalledRuns()` exists.
-   * The test below is a placeholder that confirms the gap.
-   */
-  it("PLACEHOLDER: integration stall simulation cannot run — feature not implemented", () => {
-    const proto = PipelineRunner.prototype as any;
-    // Confirmed gap: no stall-detection entry points exist.
-    expect(proto.checkForStalledRuns).toBeUndefined();
-    // Once BEC-214 ships, replace this with a full integration test using vi.useFakeTimers().
+    (runner as any).activeRuns.set(issueId, runId);
+
+    mockGetActiveWork.mockResolvedValueOnce([
+      {
+        id: runId,
+        runId,
+        issueId,
+        stage: "review",
+        filesModified: null,
+        startedAt: new Date(stalePastMs - 5 * 60 * 1000),
+        updatedAt: new Date(stalePastMs),
+      },
+    ]);
+
+    // Must not throw — log emission is fire-and-forget from pino.
+    await expect(runner.checkForStalledRuns()).resolves.toBeUndefined();
+
+    runner.stopStalledRunDetection();
   });
 });

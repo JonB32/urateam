@@ -160,6 +160,7 @@ Known limitations being addressed (don't compound these):
   Both paths throw `StagePreStreamStalledError` → caught in `executeStage` catch block → `stage_runs.status = 'failed'`, run completes normally.
 - **`StageStalledError`** — mid-stream silence (after ≥1 message, no output tokens or turns) for `progressTimeoutMs` (default 30 min). See urateam#122.
 - **`StagePreStreamStalledError`** — pre-stream hang (no first message) within `firstMessageTimeoutMs` (default 5 min). See BEC-183. Exported from `executor/index.ts`.
+- **Runner-level stall detection (BEC-214):** `PipelineRunner` exposes `checkForStalledRuns()`, `startStalledRunDetection()`, and `stopStalledRunDetection()`. The polling loop fires every `stallCheckIntervalMs` (default 60 s, configured via `PipelineRunnerConfig.stallCheckIntervalMs`). When `active_work.updatedAt` has not advanced for `stallThresholdMs` (default 30 min, configured via `PipelineRunnerConfig.stallThresholdMs`), the run is cancelled and marked `status='failed'` with `errorMessage='stalled process'`. Detection starts automatically from `recoverStuckRuns()` at startup. Complements (not replaces) stream-level and PM Agent stall defences — catches orchestration-layer hangs the others cannot reach. **Recommended production value:** set `stallThresholdMs: 5_400_000` (90 min) if your implement stage routinely approaches the 60-minute wall-clock cap, to avoid false positives.
 
 ### Notifiers
 - Linear: issue comments + state transitions (In Progress → In Review → Done)
