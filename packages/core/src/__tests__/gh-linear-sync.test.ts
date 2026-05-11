@@ -507,4 +507,32 @@ describe("runGhLinearSync", () => {
     expect(result.skipped).toBe(1);
     expect(createIssue).toHaveBeenCalledTimes(2);
   });
+
+  it("write operations are dispatched in parallel (all createIssue calls initiated before any resolves)", async () => {
+    // Verify that all write promises are created before any awaited —
+    // i.e., createIssue call count reaches N atomically, not one-by-one.
+    const issues = [makeGhIssue({ number: 20 }), makeGhIssue({ number: 21 })];
+    const { client: ghClient } = makeMockGitHub(issues);
+    const { client: linClient, createIssue } = makeMockLinear([], [triageState]);
+
+    // Track call count at the moment each promise resolves.
+    const callCountAtResolve: number[] = [];
+    createIssue.mockImplementation(() => {
+      return new Promise((resolve) => {
+        // Defer resolution to the next microtask — this lets both promises be
+        // created (call count = 2) before either resolves.
+        Promise.resolve().then(() => {
+          callCountAtResolve.push(createIssue.mock.calls.length);
+          resolve({ issue: { id: "id", identifier: "BEC-X" } });
+        });
+      });
+    });
+
+    await runGhLinearSync(defaultConfig, { github: ghClient, linear: linClient });
+
+    // Both resolutions should observe call count = 2, proving parallel dispatch.
+    expect(callCountAtResolve).toHaveLength(2);
+    expect(callCountAtResolve[0]).toBe(2);
+    expect(callCountAtResolve[1]).toBe(2);
+  });
 });
