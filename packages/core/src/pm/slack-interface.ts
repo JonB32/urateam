@@ -7,6 +7,12 @@
  *
  * Outbound helpers (call from PM scheduler):
  *   notifyAssigned, notifySkipped, askForClarification, postDailySummary
+ *
+ * This file retains: types, request parsing, Slack signature verification, the
+ * notifier class, and the Hono router factory.  Command execution logic was
+ * extracted to `slack-commands.ts` (BEC-195) and bulk-create analysis to
+ * `slack-bulk.ts` (BEC-195).  Both are re-exported here for backward
+ * compatibility so existing import sites do not need to change.
  */
 
 import { Hono } from "hono";
@@ -15,9 +21,20 @@ import { sanitize } from "../executor/prompt/sanitizer.js";
 import { parseJsonObject } from "../executor/agent-stream.js";
 import { makeCallClaude, makeCallClaudeSonnet } from "./call-claude.js";
 import { postSlackMessage } from "./slack-helpers.js";
-import { createLazyLinearClient } from "./linear-helpers.js";
+import { executePmCommand } from "./slack-commands.js";
+import type { CommandExecutorDeps, PmCommand } from "./slack-commands.js";
 
 const log = createLogger({ component: "PmAgent:slack-interface" });
+
+// ---------------------------------------------------------------------------
+// Re-exports for backward compatibility
+// ---------------------------------------------------------------------------
+// Consumers that previously imported directly from slack-interface.ts continue
+// to work without changing their import statements.
+
+export { isPmPaused, setPmPaused } from "./pause-state.js";
+export { type BulkIssueSpec, analyzeBulkCreateRequest } from "./slack-bulk.js";
+export { type PmCommand, type CommandExecutorDeps, executePmCommand } from "./slack-commands.js";
 
 // ---------------------------------------------------------------------------
 // Module-level constants
@@ -34,18 +51,6 @@ const VALID_PM_COMMAND_TYPES = [
   "assign",
   "unknown",
 ] as const;
-
-/** Linear workflow state name for the Triage column. */
-const LINEAR_STATE_TRIAGE = "Triage";
-/** Linear workflow state name for the Todo column. */
-const LINEAR_STATE_TODO = "Todo";
-/** Linear label name that triggers the auto-implement pipeline. */
-const LINEAR_LABEL_AUTO_IMPLEMENT = "auto-implement";
-
-/** Valid numeric priority values accepted by Linear (1=Urgent … 4=Low). */
-const VALID_PRIORITIES = [1, 2, 3, 4] as const;
-/** Default priority used when a generated issue omits or has an invalid value. */
-const DEFAULT_PRIORITY = 3;
 
 /** Lazy singleton for the `crypto` built-in — avoids repeated dynamic import on every Slack request. */
 let _cryptoModule: typeof import("crypto") | null = null;
@@ -85,16 +90,6 @@ export interface SlackInterfaceConfig {
   releaseHandler?: (params: { text: string; userId: string }) => Promise<{ text: string; responseType: "ephemeral" | "in_channel" }>;
 }
 
-export type PmCommand =
-  | { type: "prioritize"; issueId: string }
-  | { type: "create"; title: string; description: string }
-  | { type: "bulk_create"; request: string }
-  | { type: "status" }
-  | { type: "pause" }
-  | { type: "resume" }
-  | { type: "assign"; issueId: string }
-  | { type: "unknown"; original: string };
-
 export interface AssignedNotification {
   issueId: string;
   issueTitle: string;
@@ -112,32 +107,6 @@ export interface DailySummaryEntry {
   issueId: string;
   issueTitle: string;
   status: "assigned" | "completed" | "blocked";
-}
-
-// ---------------------------------------------------------------------------
-// Shared pause state — single-process only; use Redis for multi-process
-// ---------------------------------------------------------------------------
-
-let paused = false;
-
-/**
- * Returns `true` if the PM Agent is currently paused.
- *
- * Pause is active when EITHER of the following is true (OR logic):
- * - `process.env.PM_AGENT_PAUSED === "true"` — env-var path for no-Slack incident
- *   response. Toggling requires a container restart (env vars are read at each
- *   tick invocation, not at module load time).
- * - `setPmPaused(true)` has been called via the Slack `/pm pause` command.
- *
- * The env-var takes priority: setting `PM_AGENT_PAUSED=true` keeps the agent
- * paused even if `setPmPaused(false)` is subsequently called via Slack.
- */
-export function isPmPaused(): boolean {
-  return process.env.PM_AGENT_PAUSED === "true" || paused;
-}
-
-export function setPmPaused(value: boolean): void {
-  paused = value;
 }
 
 // ---------------------------------------------------------------------------
@@ -271,241 +240,6 @@ export async function interpretNaturalLanguage(
   } catch (err) {
     log.warn({ err, message }, "failed to parse NL intent");
     return { type: "unknown", original: message };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Command executor
-// ---------------------------------------------------------------------------
-
-export interface BulkIssueSpec {
-  title: string;
-  description: string;
-  priority: number;
-  acceptanceCriteria: string[];
-}
-
-/**
- * Subset of Linear's IssueCreateInput used by this module.
- * Typed explicitly to avoid `any` and catch field-name typos at compile time.
- */
-interface LinearIssueCreateInput {
-  teamId: string;
-  title: string;
-  description?: string;
-  priority?: number;
-  stateId?: string;
-  labelIds?: string[];
-}
-
-export interface CommandExecutorDeps {
-  linearApiKey?: string;
-  teamIds?: string[];
-  callClaudeSonnet?: (prompt: string) => Promise<string>;
-}
-
-/**
- * Executes a parsed `PmCommand` against Linear and returns a human-readable
- * response string suitable for posting back to Slack.
- */
-export async function executePmCommand(
-  cmd: PmCommand,
-  deps: CommandExecutorDeps,
-): Promise<string> {
-  const { getClient: getLinear } = createLazyLinearClient(deps.linearApiKey);
-
-  /**
-   * Searches Linear for an issue by its identifier (e.g. "BEC-25") and returns
-   * the first match, or `null` when not found. Shared by prioritize + assign.
-   */
-  async function findIssueByIdentifier(linear: any, issueId: string): Promise<any | null> {
-    const results = await linear.searchIssues(issueId);
-    return results.nodes?.[0] ?? null;
-  }
-
-  switch (cmd.type) {
-    case "status": {
-      const state = isPmPaused() ? "⏸ *Paused*" : "▶️ *Running*";
-      return `PM Agent is ${state}.\nUse \`/pm pause\` or \`/pm resume\` to control autonomous assignment.`;
-    }
-
-    case "pause": {
-      setPmPaused(true);
-      log.info("PM Agent paused via Slack");
-      return "⏸ PM Agent autonomous assignment has been *paused*. Use `/pm resume` to restart.";
-    }
-
-    case "resume": {
-      setPmPaused(false);
-      log.info("PM Agent resumed via Slack");
-      return "▶️ PM Agent autonomous assignment has been *resumed*.";
-    }
-
-    case "prioritize": {
-      if (!deps.linearApiKey) {
-        return `⚠️ No Linear API key configured — cannot prioritize *${cmd.issueId}*.`;
-      }
-      try {
-        const linear = await getLinear();
-        if (!linear) return `⚠️ No Linear API key configured — cannot prioritize *${cmd.issueId}*.`;
-        const issue = await findIssueByIdentifier(linear, cmd.issueId);
-        if (!issue) return `⚠️ Issue *${cmd.issueId}* not found in Linear.`;
-        // updateIssue and createComment are independent — run in parallel
-        await Promise.all([
-          linear.updateIssue(issue.id, { priority: 1 }),
-          linear.createComment({
-            issueId: issue.id,
-            body: "🤖 **PM Agent** — Bumped to top of queue via Slack command.",
-          }),
-        ]);
-        log.info({ issueId: cmd.issueId }, "prioritized via Slack");
-        return `✅ *${cmd.issueId}* has been bumped to top priority (Urgent).`;
-      } catch (err) {
-        log.error({ err, issueId: cmd.issueId }, "prioritize failed");
-        return `❌ Failed to prioritize *${cmd.issueId}*: ${(err as Error).message}`;
-      }
-    }
-
-    case "assign": {
-      if (!deps.linearApiKey) {
-        return `⚠️ No Linear API key configured — cannot assign *${cmd.issueId}*.`;
-      }
-      try {
-        const linear = await getLinear();
-        if (!linear) return `⚠️ No Linear API key configured — cannot assign *${cmd.issueId}*.`;
-        const issue = await findIssueByIdentifier(linear, cmd.issueId);
-        if (!issue) return `⚠️ Issue *${cmd.issueId}* not found in Linear.`;
-
-        const team = await issue.team;
-        const allStates = await linear.workflowStates({
-          filter: { team: { id: { eq: team?.id } } },
-          first: 50,
-        });
-        const todoState = allStates.nodes?.find((s: any) => s.name === LINEAR_STATE_TODO);
-        if (!todoState) return `⚠️ No "${LINEAR_STATE_TODO}" state found for *${cmd.issueId}*'s team.`;
-
-        await linear.updateIssue(issue.id, { stateId: todoState.id });
-        await linear.createComment({
-          issueId: issue.id,
-          body: "🤖 **PM Agent** — Manually assigned to Todo via Slack command.",
-        });
-        log.info({ issueId: cmd.issueId }, "manually assigned to Todo via Slack");
-        return `✅ *${cmd.issueId}* has been moved to Todo.`;
-      } catch (err) {
-        log.error({ err, issueId: cmd.issueId }, "assign failed");
-        return `❌ Failed to assign *${cmd.issueId}*: ${(err as Error).message}`;
-      }
-    }
-
-    case "create": {
-      if (!deps.linearApiKey) {
-        return `⚠️ No Linear API key configured — cannot create issue.`;
-      }
-      if (!deps.teamIds || deps.teamIds.length === 0) {
-        return `⚠️ No team IDs configured — cannot create issue.`;
-      }
-      try {
-        const linear = await getLinear();
-        if (!linear) return `⚠️ No Linear API key configured — cannot create issue.`;
-        const created = await linear.createIssue({
-          teamId: deps.teamIds[0],
-          title: cmd.title,
-          description: cmd.description || undefined,
-        });
-        const issue = await created.issue;
-        const url = issue?.url ?? "";
-        log.info({ title: cmd.title, issueId: issue?.identifier }, "issue created via Slack");
-        return `✅ Created <${url}|${issue?.identifier ?? "new issue"}>: *${cmd.title}*`;
-      } catch (err) {
-        log.error({ err, title: cmd.title }, "create issue failed");
-        return `❌ Failed to create issue: ${(err as Error).message}`;
-      }
-    }
-
-    case "bulk_create": {
-      if (!deps.linearApiKey) {
-        return `⚠️ No Linear API key configured — cannot create issues.`;
-      }
-      if (!deps.teamIds || deps.teamIds.length === 0) {
-        return `⚠️ No team IDs configured — cannot create issues.`;
-      }
-      if (!deps.callClaudeSonnet) {
-        return `⚠️ Bulk create requires a Sonnet model caller — not configured.`;
-      }
-      try {
-        const specs = await analyzeBulkCreateRequest(cmd.request, deps.callClaudeSonnet);
-        if (specs.length === 0) {
-          return `🤔 Could not generate any issues from your request. Try being more specific.`;
-        }
-
-        const linear = await getLinear();
-        if (!linear) return `⚠️ No Linear API key configured — cannot create issues.`;
-
-        // Resolve the Triage state and auto-implement label IDs
-        const teamId = deps.teamIds[0];
-        const [allStatesRes, allLabelsRes] = await Promise.all([
-          linear.workflowStates({ filter: { team: { id: { eq: teamId } } }, first: 50 }),
-          linear.issueLabels({ first: 100 }),
-        ]);
-        const triageState = allStatesRes.nodes?.find((s: any) => s.name === LINEAR_STATE_TRIAGE);
-        const labelMap = new Map<string, string>();
-        for (const label of allLabelsRes.nodes ?? []) {
-          labelMap.set(label.name.toLowerCase(), label.id);
-        }
-        const autoImplementLabelId = labelMap.get(LINEAR_LABEL_AUTO_IMPLEMENT);
-
-        // Build all payloads first, then create all issues in parallel
-        const payloads: LinearIssueCreateInput[] = specs.map((spec) => {
-          const descWithCriteria =
-            spec.acceptanceCriteria.length > 0
-              ? `${spec.description}\n\n**Acceptance Criteria:**\n${spec.acceptanceCriteria.map((c) => `- [ ] ${c}`).join("\n")}`
-              : spec.description;
-
-          const payload: LinearIssueCreateInput = {
-            teamId,
-            title: spec.title,
-            description: descWithCriteria || undefined,
-            priority: spec.priority,
-          };
-          if (triageState) payload.stateId = triageState.id;
-          if (autoImplementLabelId) payload.labelIds = [autoImplementLabelId];
-          return payload;
-        });
-
-        const results = await Promise.all(payloads.map((p) => linear.createIssue(p)));
-        const issueObjects = await Promise.all(results.map((r: any) => r.issue));
-
-        const created: Array<{ identifier: string; url: string; title: string }> = [];
-        for (let i = 0; i < issueObjects.length; i++) {
-          const issue = issueObjects[i];
-          if (issue) {
-            const title = specs[i].title;
-            created.push({ identifier: issue.identifier ?? "", url: issue.url ?? "", title });
-            log.info({ issueId: issue.identifier, title }, "bulk issue created via Slack");
-          }
-        }
-
-        if (created.length === 0) {
-          return `❌ Failed to create any issues.`;
-        }
-
-        const lines = [`✅ Created ${created.length} issue${created.length === 1 ? "" : "s"}:`];
-        for (const issue of created) {
-          const link = issue.url ? `<${issue.url}|${issue.identifier}>` : `*${issue.identifier}*`;
-          lines.push(`• ${link}: *${issue.title}*`);
-        }
-        return lines.join("\n");
-      } catch (err) {
-        log.error({ err, request: cmd.request }, "bulk create failed");
-        return `❌ Failed to create issues: ${(err as Error).message}`;
-      }
-    }
-
-    case "unknown":
-      return `🤔 I didn't understand that. Try:\n• \`/pm status\`\n• \`/pm prioritize BEC-25\`\n• \`/pm create "title" "description"\`\n• \`/pm assign BEC-13\`\n• \`/pm pause\` / \`/pm resume\``;
-
-    default:
-      return `Unknown command.`;
   }
 }
 
@@ -740,81 +474,6 @@ export function createSlackInterface(config: SlackInterfaceConfig): {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Uses a capable Claude model (Sonnet) to analyze a bulk create request and
- * produce a structured list of issue specifications.
- */
-export async function analyzeBulkCreateRequest(
-  request: string,
-  callClaudeSonnet: (prompt: string) => Promise<string>,
-): Promise<BulkIssueSpec[]> {
-  const safe = sanitize(request);
-  const prompt =
-    `You are a software PM Agent. A user asked: "${safe}"\n\n` +
-    `Analyze this request and generate a list of concrete, actionable software issues to create.\n` +
-    `Each issue must have a clear title, description, priority (1=urgent, 2=high, 3=medium, 4=low), and acceptance criteria.\n\n` +
-    `Respond ONLY with a JSON array (no other text), e.g.:\n` +
-    `[\n` +
-    `  {\n` +
-    `    "title": "Issue title",\n` +
-    `    "description": "Clear description of what needs to be done",\n` +
-    `    "priority": 2,\n` +
-    `    "acceptanceCriteria": ["Criterion 1", "Criterion 2"]\n` +
-    `  }\n` +
-    `]\n\n` +
-    `Rules:\n` +
-    `- Generate between 1 and 10 issues\n` +
-    `- Each issue must be specific and actionable\n` +
-    `- Priority must be 1, 2, 3, or 4\n` +
-    `- acceptanceCriteria must be a non-empty array of strings\n` +
-    `- Respond ONLY with the JSON array, no markdown fences or explanation`;
-
-  try {
-    const raw = await callClaudeSonnet(prompt);
-    // Parse the array — look for a JSON array in the response
-    const arrayMatch = raw.match(/\[[\s\S]*\]/);
-    if (!arrayMatch) {
-      log.warn({ responsePreview: raw.slice(0, 200) }, "bulk create: no JSON array in Claude response");
-      return [];
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(arrayMatch[0]);
-    } catch {
-      log.warn({ responsePreview: raw.slice(0, 200) }, "bulk create: failed to parse JSON array");
-      return [];
-    }
-    if (!Array.isArray(parsed)) return [];
-
-    const specs: BulkIssueSpec[] = [];
-    for (const item of parsed) {
-      if (typeof item !== "object" || item === null) continue;
-      const title = typeof item.title === "string" ? item.title.trim() : "";
-      const description = typeof item.description === "string" ? item.description.trim() : "";
-      const priority =
-        typeof item.priority === "number" && (VALID_PRIORITIES as readonly number[]).includes(item.priority)
-          ? item.priority
-          : DEFAULT_PRIORITY;
-      const acceptanceCriteria = Array.isArray(item.acceptanceCriteria)
-        ? item.acceptanceCriteria.filter((c: unknown) => typeof c === "string" && c.trim().length > 0)
-        : [];
-      if (!title) continue;
-      // Cap title/description length to prevent excessively large issues
-      specs.push({
-        title: title.slice(0, 200),
-        description: description.slice(0, 5000),
-        priority,
-        acceptanceCriteria: acceptanceCriteria.slice(0, 10),
-      });
-    }
-
-    return specs.slice(0, 10);
-  } catch (err) {
-    log.warn({ err }, "bulk create: failed to analyze request");
-    return [];
-  }
-}
-
 async function postToResponseUrl(
   responseUrl: string,
   text: string,
@@ -838,4 +497,3 @@ async function processMessageAsync(
   const replyText = await executePmCommand(cmd, deps);
   await postSlackMessage(botToken, { channel, text: replyText });
 }
-
