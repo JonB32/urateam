@@ -20,6 +20,8 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 
 vi.mock("../executor/auth-check.js", () => ({
   isClaudeAuthValid: vi.fn().mockResolvedValue(true),
+  // BEC-207: executor.ts also calls resolveClaudeAuth() — mock for test isolation.
+  resolveClaudeAuth: vi.fn().mockReturnValue({ method: "session" }),
 }));
 
 vi.mock("../executor/extract-handoff.js", () => ({
