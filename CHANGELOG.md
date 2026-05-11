@@ -20,6 +20,15 @@ notes call out when a change affects only a single package.
 ### Fixed (OSS+)
 - **BEC-185** — `gh-linear-sync`: multi-label `labelFilters` now use OR semantics. Previously, all labels were joined into a single comma-separated string and passed to the GitHub REST API, which treats this as AND (intersection) — so `["bug", "enhancement"]` returned only issues carrying *both* labels (zero in practice). Fix: when `labelFilters` has more than one entry, `runGhLinearSync` calls `listIssues` once per label and unions the results, deduplicating by issue number. Single-label and empty filters are unchanged.
 
+## [0.1.45] — 2026-05-11
+
+Bumps:
+- `@urateam/core`: 0.1.30 → 0.1.31
+- `@urateam/cli`: 0.1.32 → 0.1.33
+- `@urateam/dashboard`: 0.1.30 → 0.1.31
+- `create-urateam`: 0.1.33 → 0.1.34
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
 ## [0.1.44] — 2026-05-11
 
 Bumps:
