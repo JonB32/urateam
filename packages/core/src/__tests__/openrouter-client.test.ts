@@ -58,6 +58,62 @@ describe("OpenRouterClient", () => {
     ).rejects.toThrow(/openrouter 429/);
   });
 
+  it("throws a meaningful error when response is 200 OK but choices is missing", async () => {
+    // Free-tier / community models on OpenRouter sometimes return 200 OK with
+    // an error body and no `choices` field. Without defensive parsing, the
+    // client crashes with "Cannot read properties of undefined (reading '0')"
+    // and the fanout surfaces that opaque JS error on the PR comment.
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: { message: "Rate limit exceeded for this free model", code: 429 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const { OpenRouterClient } = await import("../executor/review/openrouter-client.js");
+    const client = new OpenRouterClient({ apiKey: "k", baseUrl: "https://example.test/api/v1" });
+    await expect(
+      client.chatCompletion(
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        [{ role: "user", content: "x" }],
+        { signal: new AbortController().signal },
+      ),
+    ).rejects.toThrow(/missing choices.*Rate limit exceeded/);
+  });
+
+  it("throws a meaningful error when response has empty choices array", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ choices: [], usage: {} }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const { OpenRouterClient } = await import("../executor/review/openrouter-client.js");
+    const client = new OpenRouterClient({ apiKey: "k", baseUrl: "https://example.test/api/v1" });
+    await expect(
+      client.chatCompletion("m", [{ role: "user", content: "x" }], {
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow(/missing choices/);
+  });
+
+  it("falls back to a generic provider-error message when error.message is absent", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ something_else: "no choices, no error field" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const { OpenRouterClient } = await import("../executor/review/openrouter-client.js");
+    const client = new OpenRouterClient({ apiKey: "k", baseUrl: "https://example.test/api/v1" });
+    await expect(
+      client.chatCompletion("m", [{ role: "user", content: "x" }], {
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow(/no error message in response body/);
+  });
+
   it("propagates AbortController abort as a rejection", async () => {
     const ac = new AbortController();
     fetchMock.mockImplementation((_url, init: RequestInit) => {
