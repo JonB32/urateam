@@ -275,6 +275,10 @@ Instructions:
 - Skip build/test ONLY if every change is text-only (docs, comments, string literals with no behavior change). Otherwise run: \`${repo.buildCommand}\` then \`${repo.testCommand}\`.
 - If a step fails (build, test, push), stop and report what blocks the resolution. Do NOT spelunk for a workaround or run unrelated commands.
 - You have a tight turn budget. Plan: read diff → make N small edits → commit → push → done.
+- After making your changes, populate \`context.addressedComments\` in your HandoffArtifact: one entry per PR comment listed above. Each entry MUST have:
+    - \`commentId\`: the comment ID exactly as given in the <review-feedback> block
+    - \`response\`: ONE sentence (≤ 12 words) describing what you changed in response to this comment
+  If a comment was not actionable (e.g. a question or a duplicate), set \`response\` to a one-line explanation rather than skipping the entry.
 `.trim();
   }
 
