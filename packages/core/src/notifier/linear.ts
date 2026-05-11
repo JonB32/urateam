@@ -1,5 +1,6 @@
 import type { Notifier, PipelineRun, StageResult, PipelineResult, PipelineError } from "../types.js";
 import { createLogger } from "../logger.js";
+import { getLinearClient } from "../util/linear.js";
 
 const log = createLogger({ component: "LinearNotifier" });
 
@@ -18,19 +19,13 @@ export class LinearNotifier implements Notifier {
   private apiKey: string;
   private stateCache = new Map<string, string>();
   private issueIdCache = new Map<string, { id: string; teamId?: string }>();
-  private clientPromise: Promise<any> | null = null;
 
   constructor(config: LinearNotifierConfig) {
     this.apiKey = config.apiKey;
   }
 
   private async getClient() {
-    if (!this.clientPromise) {
-      this.clientPromise = import("@linear/sdk").then(
-        ({ LinearClient }) => new LinearClient({ apiKey: this.apiKey }),
-      );
-    }
-    return this.clientPromise;
+    return getLinearClient(this.apiKey);
   }
 
   async onPipelineStart(run: PipelineRun): Promise<void> {

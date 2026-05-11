@@ -1,6 +1,7 @@
 import type { TriageResult } from "../types.js";
 import { parseJsonObject } from "../../executor/agent-stream.js";
 import { resolveWorkflowStates } from "../linear-helpers.js";
+import { resolveIssueRelations } from "../../util/linear.js";
 import { createLogger } from "../../logger.js";
 import type { AnyDb } from "../../db/client.js";
 import { logAuditEventUnchecked, pmTriageClassifiedEvent } from "../../audit/index.js";
@@ -102,7 +103,9 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
           .map((l: string) => labelMap.get(l.toLowerCase()))
           .filter(Boolean);
 
-        const team = await issue.team;
+        // Resolve the issue's team relation (parallelised with state/labels via
+        // resolveIssueRelations for consistency; only team is needed here).
+        const { team } = await resolveIssueRelations(issue);
         const teamId = team?.id;
         const backlogStateId = teamId ? stateMap.get(`${teamId}:Backlog`) : undefined;
 

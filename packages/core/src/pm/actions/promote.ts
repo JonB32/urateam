@@ -1,6 +1,7 @@
 import type { PromoteResult, ConflictCheckResult } from "../types.js";
 import type { PipelineConfig } from "../../types.js";
 import { resolveWorkflowStates } from "../linear-helpers.js";
+import { resolveIssueRelations } from "../../util/linear.js";
 import { resolvePipeline } from "../../pipeline/router.js";
 import { createLogger } from "../../logger.js";
 import type { AnyDb } from "../../db/client.js";
@@ -102,15 +103,19 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
   for (const candidate of candidates) {
     if (promotedCount >= slotsAvailable) break;
 
-    // BEC-150: short-circuit BEFORE any per-candidate Linear API call (team,
-    // conflict-check). Only promote issues whose labels resolve to a configured
-    // pipeline; this keeps Todo from filling with items the agent would later
-    // refuse to start, and avoids wasted `await candidate.team` round-trips
-    // for filtered candidates on large Backlogs.
+    // Parallelise the labels and team relation fetches using resolveIssueRelations,
+    // replacing the previous sequential pattern (labels first, then team later).
+    // Both fetches are independent so Promise.all reduces latency by the slower of
+    // the two rather than their sum.
+    const { team, labels: labelsConnection } = await resolveIssueRelations(candidate);
+    const teamId = team?.id;
+    const labelNodes = labelsConnection?.nodes ?? [];
+    const labelNames: string[] = labelNodes.map((l: any) => l.name);
+
+    // BEC-150: filter candidates whose labels don't resolve to a configured
+    // pipeline, keeping Todo from filling with items the agent would later
+    // refuse to start.
     if (input.requirePipelineLabel) {
-      const labelsConnection = await candidate.labels?.();
-      const labelNodes = labelsConnection?.nodes ?? [];
-      const labelNames: string[] = labelNodes.map((l: any) => l.name);
       const resolved = resolvePipeline(labelNames, input.pipelineConfigs!);
       if (!resolved) {
         log.info(
@@ -156,9 +161,6 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
         continue;
       }
     }
-
-    const team = await candidate.team;
-    const teamId = team?.id;
     const todoStateId = teamId ? todoStates.get(teamId) : undefined;
 
     const conflict = await checkConflict(candidate.description ?? "");
