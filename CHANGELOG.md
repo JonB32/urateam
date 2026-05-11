@@ -17,6 +17,9 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+### Fixed (OSS+)
+- **BEC-185** — `gh-linear-sync`: multi-label `labelFilters` now use OR semantics. Previously, all labels were joined into a single comma-separated string and passed to the GitHub REST API, which treats this as AND (intersection) — so `["bug", "enhancement"]` returned only issues carrying *both* labels (zero in practice). Fix: when `labelFilters` has more than one entry, `runGhLinearSync` calls `listIssues` once per label and unions the results, deduplicating by issue number. Single-label and empty filters are unchanged.
+
 ## [0.1.44] — 2026-05-11
 
 Bumps:

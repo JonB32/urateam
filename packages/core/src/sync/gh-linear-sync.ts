@@ -144,6 +144,9 @@ export interface GhLinearSyncConfig {
   /**
    * GitHub label names to filter issues by.
    * When empty or omitted, all open issues are processed.
+   * When multiple labels are provided, **OR semantics** apply: issues matching
+   * ANY of the listed labels are included (not only those carrying all labels).
+   * Duplicates (issues with multiple matching labels) are deduplicated by number.
    * Example: `["urateam-quality-observer", "bug", "enhancement"]`
    */
   labelFilters?: string[];
@@ -303,13 +306,43 @@ export async function runGhLinearSync(
   const [owner, repo] = parts as [string, string];
 
   // Fetch open GitHub issues (filtered by labels when provided).
-  const ghIssues = await clients.github.listIssues({
-    owner,
-    repo,
-    labels: config.labelFilters?.join(","),
-    state: "open",
-    per_page: GITHUB_ISSUES_PER_PAGE,
-  });
+  // The GitHub REST API treats comma-separated labels as AND (intersection),
+  // not OR (union). To get OR semantics for multiple label filters, we call
+  // listIssues once per label and deduplicate by issue number.
+  let ghIssues: GitHubIssue[];
+  if (!config.labelFilters || config.labelFilters.length <= 1) {
+    // Single call: no filter, or exactly one label (no AND/OR ambiguity).
+    ghIssues = await clients.github.listIssues({
+      owner,
+      repo,
+      labels: config.labelFilters?.[0],
+      state: "open",
+      per_page: GITHUB_ISSUES_PER_PAGE,
+    });
+  } else {
+    // Multiple labels: call once per label to get OR semantics, then dedup.
+    const perLabelResults = await Promise.all(
+      config.labelFilters.map((label) =>
+        clients.github.listIssues({
+          owner,
+          repo,
+          labels: label,
+          state: "open",
+          per_page: GITHUB_ISSUES_PER_PAGE,
+        }),
+      ),
+    );
+    // Deduplicate by issue number (Map preserves insertion order; first occurrence wins).
+    const seen = new Map<number, GitHubIssue>();
+    for (const batch of perLabelResults) {
+      for (const issue of batch) {
+        if (!seen.has(issue.number)) {
+          seen.set(issue.number, issue);
+        }
+      }
+    }
+    ghIssues = [...seen.values()];
+  }
 
   log.info(
     { count: ghIssues.length, repo: config.githubRepo },

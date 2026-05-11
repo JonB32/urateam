@@ -61,6 +61,8 @@ Key exported functions:
 
 Config env vars: `GH_LINEAR_SYNC_GITHUB_TOKEN`, `GH_LINEAR_SYNC_GITHUB_REPO`, `GH_LINEAR_SYNC_LINEAR_API_KEY`, `GH_LINEAR_SYNC_LINEAR_TEAM_ID`, `GH_LINEAR_SYNC_LABEL_FILTERS`, `GH_LINEAR_SYNC_TRIAGE_STATE`, `GH_LINEAR_SYNC_BIDIRECTIONAL_CLOSE`, `GH_LINEAR_SYNC_DRY_RUN`
 
+`GH_LINEAR_SYNC_LABEL_FILTERS` is comma-separated (e.g. `bug,enhancement`). **OR semantics**: multiple labels → issues matching ANY of them are synced. One `listIssues` API call is made per label and results are deduplicated by issue number. (The GitHub REST API treats comma-separated labels as AND/intersection; this workaround restores the expected OR/union behavior — fixed in BEC-185.)
+
 Bidirectional close-out (GH issue closed when Linear ticket reaches Done state) is opt-in via `GH_LINEAR_SYNC_BIDIRECTIONAL_CLOSE=true`.
 
 ## Key Patterns
