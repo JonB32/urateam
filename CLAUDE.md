@@ -63,6 +63,23 @@ Config env vars: `GH_LINEAR_SYNC_GITHUB_TOKEN`, `GH_LINEAR_SYNC_GITHUB_REPO`, `G
 
 Bidirectional close-out (GH issue closed when Linear ticket reaches Done state) is opt-in via `GH_LINEAR_SYNC_BIDIRECTIONAL_CLOSE=true`.
 
+## Codebase Optimization Pass — In Flight (BEC-187 → BEC-207)
+
+A codebase-wide analysis (2026-05-11) surfaced a set of foundational improvements that are tracked in Linear and should land before substantial new feature work. Contributors touching the affected areas should coordinate with these tickets to avoid merge conflicts:
+
+- **Foundation (P1 Urgent)**: BEC-187 (DB indexes), BEC-188 (`util/env.ts` + `util/json.ts`), BEC-189 (`util/linear.ts` + Promise.all relations), BEC-190 (tighten `AnyDb` + `retry_count` schema fix + Linear SDK typing).
+- **Cleanup (P2 High)**: BEC-191 (dead code), BEC-192 (resume-payload zod), BEC-193 (Octokit memoization + parseRepoUrl hoist).
+- **File splits (P2 High, sequential)**: BEC-194 (`create-urateam/index.ts`), BEC-195 (`pm/slack-interface.ts`), BEC-196 (`release-manager/scheduler.ts`), BEC-197 (`audit/events.ts`), BEC-199 (extract feedback-pipeline from `runner.ts`).
+- **Infrastructure (P2 High)**: BEC-198 (env-validation module + `deploy/ENV_VARS.md`), BEC-200 (test gaps in runner retry-strategies + policyErr + status webhook + paused-tick).
+- **Competitive response (P2/P3)**: BEC-201 (multi-AI for implement stage), BEC-207 (`CLAUDE_CODE_OAUTH_TOKEN`), BEC-203 (Sentry + CloudWatch integrations), BEC-205 (one-command bootstrap), BEC-206 (GitLab parity + Bitbucket).
+- **Strategic / needs-design**: BEC-202 (managed-runtime tier), BEC-204 (IDE/CLI agent surface).
+
+Known limitations being addressed (don't compound these):
+- `AnyDb = any` in `db/client.ts:23` cascades into ~50 `as any` casts. Don't add new `(this.db as AnyDb)` casts; wait for BEC-190.
+- `linearClient: any` in `pm/actions/*` and `pm/linear-helpers.ts`. Use `LinearClient` from `@linear/sdk` when adding new code there.
+- 5 missing indexes on `pipeline_runs` + `pm_approvals` — landing in BEC-187. Don't add new hot-path queries that scan these tables until BEC-187 ships.
+- Sequential `await issue.team` / `await issue.state` patterns in `pm/actions/*`. New code in these files should use `Promise.all` (or wait for BEC-189's `resolveIssueRelations` helper).
+
 ## Key Patterns
 
 ### Types & Schemas
@@ -87,6 +104,15 @@ Bidirectional close-out (GH issue closed when Linear ticket reaches Done state) 
 - Transient failure recovery: auth/network/rate-limit errors classified as `"retriable"`, worktree preserved, PM Agent auto-resumes on next tick (max 3 retries)
 - Worktree auto-recovery: `createWorktree` detects both "already checked out" and "already used by worktree" errors (urateam#112), force-removes the stale worktree, runs `git worktree prune` to clear metadata (BEC-179), and retries with idempotent `-B <branch>` to guarantee the worktree HEAD is on a symbolic ref (not detached)
 - GitHub PR feedback: `/webhooks/github` receives PR review comments (`pull_request_review`, `pull_request_review_comment`) and regular PR comments (`issue_comment`), triggers `review-feedback` pipeline runs that check out the existing branch and address comments. Supports `@ateam` trigger keyword from the regular PR comment box.
+
+### Claude Authentication
+- Three supported paths (full guide in `deploy/CLAUDE_AUTH.md`):
+  1. `ANTHROPIC_API_KEY` — long-lived API key, pay-per-token. Recommended for production.
+  2. `CLAUDE_CODE_OAUTH_TOKEN` — long-lived programmatic OAuth token from `claude setup-token`. Bills against Pro/Max subscription. Recommended for subscription users on headless deploys.
+  3. Local `claude login` session — mounted credentials at `~/.config/claude/`. Convenient for local dev but **expires weekly**; not for production.
+- Precedence: `CLAUDE_CODE_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` → local session.
+- `preflightClaudeAuth` (`packages/cli/src/lib/preflight-claude-auth.ts`) gates boot on session validity. No-op when either env var is set (those have no session-lifetime semantics).
+- BEC-207 tracks adding first-class `CLAUDE_CODE_OAUTH_TOKEN` support to the executor — currently only the local CLI session path is wired up.
 
 ### Agent Execution
 - Agent SDK `query()` with per-stage MCP server + plugin resolution
