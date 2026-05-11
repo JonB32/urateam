@@ -623,3 +623,27 @@ export function reviewModelLowOutputRatioEvent(args: {
     },
   });
 }
+
+/**
+ * BEC-207: emitted by AuthMonitor when `claude auth status` reports the
+ * session has expired. Operational signal — the operator must run `claude
+ * login` or configure CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY before
+ * new pipeline runs will succeed.
+ *
+ * NOTE: this event is written via `logAuditEventUnchecked` (the bypass call
+ * site list in CLAUDE.md), because session expiry is a base-tier operational
+ * concern that any operator needs to see regardless of `audit-log` licensing.
+ */
+export function claudeAuthExpiredEvent(args: {
+  detectedAt: Date;
+}): AuditEvent {
+  return base({
+    eventType: "claude.auth_expired",
+    actor: "system",
+    actorType: "system",
+    payload: {
+      detectedAt: args.detectedAt.toISOString(),
+      hint: "Run `claude login` in the container, or switch to CLAUDE_CODE_OAUTH_TOKEN (see deploy/CLAUDE_AUTH.md)",
+    },
+  });
+}

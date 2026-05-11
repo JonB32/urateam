@@ -27,6 +27,7 @@ import { createLogger } from "../logger.js";
 import { logAuditEventUnchecked, budgetRefusedEvent, pruneAuditLog } from "../audit/index.js";
 import { pruneExpiredSessions } from "../auth/index.js";
 import { recomputeCostRollups } from "../cost/index.js";
+import { createAuthMonitor, type AuthMonitor } from "../executor/auth-monitor.js";
 
 const log = createLogger({ component: "PmAgent:scheduler" });
 
@@ -72,6 +73,18 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
   const { getClient: getLinearClient } = createLazyLinearClient(deps.linearApiKey);
   let slackNotifier: PmSlackNotifier | null = null;
   const callClaudeFn = makeCallClaude();
+
+  // BEC-207: AuthMonitor — periodic Claude session health-check (every 6h).
+  // Alerts to the PM agent's Slack channel when SLACK_ERROR_ALERTS=true.
+  // No-ops when CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY is set.
+  const authMonitor: AuthMonitor = createAuthMonitor({
+    slackBotToken: deps.slackBotToken || undefined,
+    slackErrorChannel:
+      process.env.SLACK_ERROR_ALERTS === "true"
+        ? deps.config.slackChannelId
+        : undefined,
+    db: deps.db as AnyDb,
+  });
 
   function getSlackNotifier(): PmSlackNotifier {
     if (!slackNotifier) {
@@ -522,6 +535,14 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           }
         } catch (err) {
           log.warn({ err }, "cost rollup failed");
+        }
+
+        // BEC-207: AuthMonitor — periodic Claude session health-check (every 6h).
+        // Throttled internally; fire-and-forget safe.
+        try {
+          await authMonitor.tick();
+        } catch (err) {
+          log.warn({ err }, "auth monitor tick failed");
         }
 
       log.info({

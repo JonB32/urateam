@@ -70,6 +70,11 @@ describe("audit_events immutability", () => {
       "packages/core/src/pipeline/review-providers-runner.ts",
       "packages/core/src/release-manager/scheduler.ts",
       "packages/core/src/release-manager/slack-handler.ts",
+      // BEC-207: base-tier operational signal — see auth-monitor.ts comment
+      // for the rationale on bypassing the audit-log feature gate.
+      "packages/core/src/executor/auth-monitor.ts",
+      "packages/core/src/__tests__/auth-monitor.test.ts",
+      "packages/core/src/audit/events.ts",
       "packages/core/src/repo/agent-branch-sweep-runner.ts",
       "packages/core/src/qa/github.ts",
       "packages/core/src/qa/gap.ts",

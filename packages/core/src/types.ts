@@ -471,6 +471,10 @@ export const AuditEventTypeSchema = z.enum([
   "pm.recovered_long_running",
   "budget.alert_fired", "budget.run_refused",
   "license.validation_failed", "config.loaded",
+  /** Claude CLI session credentials have expired (BEC-207). Operational
+   *  signal: new pipeline runs will fail immediately until `claude login`
+   *  is re-run or CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY is configured. */
+  "claude.auth_expired",
   "dashboard.manual_action",
   "dashboard.login", "dashboard.logout", "dashboard.login_denied",
   "policy.path_blocked", "policy.cost_exceeded",

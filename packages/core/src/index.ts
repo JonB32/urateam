@@ -17,7 +17,6 @@ export { createDb, isPostgres, sqlDateGroup, sqlDaysAgoFilter, type Db } from ".
 export { pipelineRuns, stageRuns, agentLogs, activeWork, pmApprovals } from "./db/index.js";
 export { createApp, type ServerConfig } from "./server.js";
 export { PipelineRunner, type PipelineRunnerConfig, type LinearIssue } from "./pipeline/index.js";
-export { type StopMode, requestRunStop, getStopSignal, clearStopSignal } from "./pipeline/index.js";
 export {
   formatPRCostSummary,
   type StageCostBreakdown,
@@ -62,7 +61,8 @@ export {
   runAgentBranchSweep,
   type RunAgentBranchSweepDeps,
 } from "./repo/agent-branch-sweep-runner.js";
-export { isClaudeAuthValid, resetAuthCheckCache } from "./executor/auth-check.js";
+export { isClaudeAuthValid, resetAuthCheckCache, resolveClaudeAuth, type ClaudeAuthCredentials } from "./executor/auth-check.js";
+export { createAuthMonitor, runAuthMonitorCheck, AUTH_MONITOR_INTERVAL_MS, type AuthMonitor } from "./executor/auth-monitor.js";
 export type { GitHubConfig } from "./repo/github.js";
 export { createGitHubClient } from "./repo/github.js";
 export { buildGitHubConfigFromEnv } from "./repo/github-from-env.js";

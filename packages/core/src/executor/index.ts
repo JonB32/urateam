@@ -1,4 +1,6 @@
 export { agentProfiles, getAgentProfiles, DEFAULT_AGENT_PROFILES } from "./profiles.js";
+export { resolveClaudeAuth, type ClaudeAuthCredentials } from "./auth-check.js";
+export { createAuthMonitor, runAuthMonitorCheck, AUTH_MONITOR_INTERVAL_MS, type AuthMonitor } from "./auth-monitor.js";
 export {
   checkTestQuality,
   analyzeTestFile,
