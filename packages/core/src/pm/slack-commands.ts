@@ -76,6 +76,31 @@ export interface CommandExecutorDeps {
 }
 
 // ---------------------------------------------------------------------------
+// Private validation helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns an error message string when `deps.linearApiKey` is missing or empty,
+ * or `null` when a key is present. Callers should check and return early:
+ *   const err = validateLinearApiKey(deps); if (err) return err;
+ */
+function validateLinearApiKey(deps: CommandExecutorDeps): string | null {
+  return deps.linearApiKey
+    ? null
+    : `⚠️ No Linear API key configured — please set \`linearApiKey\` in your PM Agent config.`;
+}
+
+/**
+ * Returns an error message string when `deps.teamIds` is missing or empty,
+ * or `null` when team IDs are present.
+ */
+function validateTeamIds(deps: CommandExecutorDeps): string | null {
+  return deps.teamIds && deps.teamIds.length > 0
+    ? null
+    : `⚠️ No team IDs configured — please set \`teamIds\` in your PM Agent config.`;
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -131,12 +156,11 @@ export async function executePmCommand(
     }
 
     case "prioritize": {
-      if (!deps.linearApiKey) {
-        return `⚠️ No Linear API key configured — cannot prioritize *${cmd.issueId}*.`;
-      }
+      const keyErr = validateLinearApiKey(deps);
+      if (keyErr) return keyErr;
       try {
         const linear = await getLinear();
-        if (!linear) return `⚠️ No Linear API key configured — cannot prioritize *${cmd.issueId}*.`;
+        if (!linear) return `⚠️ Linear client could not be initialised — cannot prioritize *${cmd.issueId}*.`;
         const issue = await findIssueByIdentifier(linear, cmd.issueId);
         if (!issue) return `⚠️ Issue *${cmd.issueId}* not found in Linear.`;
         // updateIssue and createComment are independent — run in parallel
@@ -156,12 +180,11 @@ export async function executePmCommand(
     }
 
     case "assign": {
-      if (!deps.linearApiKey) {
-        return `⚠️ No Linear API key configured — cannot assign *${cmd.issueId}*.`;
-      }
+      const keyErr = validateLinearApiKey(deps);
+      if (keyErr) return keyErr;
       try {
         const linear = await getLinear();
-        if (!linear) return `⚠️ No Linear API key configured — cannot assign *${cmd.issueId}*.`;
+        if (!linear) return `⚠️ Linear client could not be initialised — cannot assign *${cmd.issueId}*.`;
         const issue = await findIssueByIdentifier(linear, cmd.issueId);
         if (!issue) return `⚠️ Issue *${cmd.issueId}* not found in Linear.`;
 
@@ -187,17 +210,16 @@ export async function executePmCommand(
     }
 
     case "create": {
-      if (!deps.linearApiKey) {
-        return `⚠️ No Linear API key configured — cannot create issue.`;
-      }
-      if (!deps.teamIds || deps.teamIds.length === 0) {
-        return `⚠️ No team IDs configured — cannot create issue.`;
-      }
+      const keyErr = validateLinearApiKey(deps);
+      if (keyErr) return keyErr;
+      const teamErr = validateTeamIds(deps);
+      if (teamErr) return teamErr;
       try {
         const linear = await getLinear();
-        if (!linear) return `⚠️ No Linear API key configured — cannot create issue.`;
+        if (!linear) return `⚠️ Linear client could not be initialised — cannot create issue.`;
         const created = await linear.createIssue({
-          teamId: deps.teamIds[0],
+          // deps.teamIds is guaranteed non-empty by validateTeamIds above.
+          teamId: deps.teamIds![0],
           title: cmd.title,
           description: cmd.description || undefined,
         });
@@ -212,12 +234,10 @@ export async function executePmCommand(
     }
 
     case "bulk_create": {
-      if (!deps.linearApiKey) {
-        return `⚠️ No Linear API key configured — cannot create issues.`;
-      }
-      if (!deps.teamIds || deps.teamIds.length === 0) {
-        return `⚠️ No team IDs configured — cannot create issues.`;
-      }
+      const keyErr = validateLinearApiKey(deps);
+      if (keyErr) return keyErr;
+      const teamErr = validateTeamIds(deps);
+      if (teamErr) return teamErr;
       if (!deps.callClaudeSonnet) {
         return `⚠️ Bulk create requires a Sonnet model caller — not configured.`;
       }
@@ -228,10 +248,11 @@ export async function executePmCommand(
         }
 
         const linear = await getLinear();
-        if (!linear) return `⚠️ No Linear API key configured — cannot create issues.`;
+        if (!linear) return `⚠️ Linear client could not be initialised — cannot create issues.`;
 
-        // Resolve the Triage state and auto-implement label IDs
-        const teamId = deps.teamIds[0];
+        // Resolve the Triage state and auto-implement label IDs.
+        // deps.teamIds is guaranteed non-empty by validateTeamIds above.
+        const teamId = deps.teamIds![0];
         const [allStatesRes, allLabelsRes] = await Promise.all([
           linear.workflowStates({ filter: { team: { id: { eq: teamId } } }, first: 50 }),
           linear.issueLabels({ first: 100 }),

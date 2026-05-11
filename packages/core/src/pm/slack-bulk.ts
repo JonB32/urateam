@@ -24,6 +24,18 @@ const VALID_PRIORITIES = [1, 2, 3, 4] as const;
 /** Default priority used when a generated issue omits or has an invalid value. */
 const DEFAULT_PRIORITY = 3;
 
+/** Maximum allowed character length for an issue title. */
+const MAX_ISSUE_TITLE_LENGTH = 200;
+
+/** Maximum allowed character length for an issue description. */
+const MAX_ISSUE_DESCRIPTION_LENGTH = 5000;
+
+/** Maximum number of acceptance criteria strings per issue. */
+const MAX_ACCEPTANCE_CRITERIA_COUNT = 10;
+
+/** Maximum number of issue specs returned by a single bulk create request. */
+const MAX_BULK_ISSUE_SPECS = 10;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -110,16 +122,16 @@ export async function analyzeBulkCreateRequest(
         ? item.acceptanceCriteria.filter((c: unknown) => typeof c === "string" && c.trim().length > 0)
         : [];
       if (!title) continue;
-      // Cap title/description length to prevent excessively large issues
+      // Cap field lengths to prevent excessively large Linear issues.
       specs.push({
-        title: title.slice(0, 200),
-        description: description.slice(0, 5000),
+        title: title.slice(0, MAX_ISSUE_TITLE_LENGTH),
+        description: description.slice(0, MAX_ISSUE_DESCRIPTION_LENGTH),
         priority,
-        acceptanceCriteria: acceptanceCriteria.slice(0, 10),
+        acceptanceCriteria: acceptanceCriteria.slice(0, MAX_ACCEPTANCE_CRITERIA_COUNT),
       });
     }
 
-    return specs.slice(0, 10);
+    return specs.slice(0, MAX_BULK_ISSUE_SPECS);
   } catch (err) {
     log.warn({ err }, "bulk create: failed to analyze request");
     return [];

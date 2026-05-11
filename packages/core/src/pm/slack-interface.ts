@@ -40,7 +40,22 @@ export { type PmCommand, type CommandExecutorDeps, executePmCommand } from "./sl
 // Module-level constants
 // ---------------------------------------------------------------------------
 
-/** Valid PM command type names — kept in sync with the PmCommand union type. */
+/**
+ * Regex that matches Slack user-mention tokens like `<@U01ABC>`.
+ * Used to strip @-mentions from incoming Events API messages before NL processing.
+ */
+const SLACK_MENTION_RE = /<@[A-Z0-9]+>/g;
+
+/**
+ * All valid PM command type strings, typed as `PmCommand["type"]` via `satisfies`.
+ *
+ * Two compile-time guards keep this in sync with the `PmCommand` union type
+ * defined in `slack-commands.ts`:
+ *   1. `satisfies readonly PmCommandType[]` — prevents invalid entries being added.
+ *   2. `_CmdExhaustive` below — reports a type error when a new `PmCommand` variant
+ *      is added without also updating this array.
+ */
+type PmCommandType = PmCommand["type"];
 const VALID_PM_COMMAND_TYPES = [
   "prioritize",
   "create",
@@ -50,7 +65,16 @@ const VALID_PM_COMMAND_TYPES = [
   "resume",
   "assign",
   "unknown",
-] as const;
+] as const satisfies readonly PmCommandType[];
+
+// Compile-time exhaustiveness guard: TypeScript reports an error on the next line
+// when a new `PmCommand` variant is added to `slack-commands.ts` without also
+// adding it to `VALID_PM_COMMAND_TYPES` above.  The conditional type resolves to
+// `true` when the array is complete and `false` otherwise; assigning `true` to a
+// `false`-typed slot triggers "Type 'boolean' is not assignable to type 'false'".
+const _cmdExhaustiveCheck: [Exclude<PmCommandType, (typeof VALID_PM_COMMAND_TYPES)[number]>] extends [never]
+  ? true
+  : false = true;
 
 /** Lazy singleton for the `crypto` built-in — avoids repeated dynamic import on every Slack request. */
 let _cryptoModule: typeof import("crypto") | null = null;
@@ -262,7 +286,7 @@ export class SlackInterfaceNotifier {
     const text =
       `🤖 *PM Agent assigned* ${urlPart}: ${n.issueTitle}\n` +
       `*Reasoning:* ${n.reasoning}`;
-    await this.postMessage({ channel: this.channelId, blocks: [{ type: "section", text: { type: "mrkdwn", text } }] });
+    await this.postMarkdownMessage(text);
   }
 
   /** Called when PM Agent skips/deprioritizes an issue. */
@@ -270,13 +294,13 @@ export class SlackInterfaceNotifier {
     const text =
       `⏭ *PM Agent skipped* *${n.issueId}*: ${n.issueTitle}\n` +
       `*Reason:* ${n.reasoning}`;
-    await this.postMessage({ channel: this.channelId, blocks: [{ type: "section", text: { type: "mrkdwn", text } }] });
+    await this.postMarkdownMessage(text);
   }
 
   /** Ask a human for input when priority is ambiguous. */
   async askForClarification(question: string): Promise<void> {
     const text = `❓ *PM Agent needs your input:*\n${question}`;
-    await this.postMessage({ channel: this.channelId, blocks: [{ type: "section", text: { type: "mrkdwn", text } }] });
+    await this.postMarkdownMessage(text);
   }
 
   /** Post a daily summary of assigned, completed, and blocked issues. */
@@ -307,6 +331,18 @@ export class SlackInterfaceNotifier {
     await this.postMessage({
       channel: this.channelId,
       blocks: [{ type: "section", text: { type: "mrkdwn", text: lines.join("\n") } }],
+    });
+  }
+
+  /**
+   * Posts a single Slack Block Kit section containing mrkdwn-formatted `text`
+   * to the configured channel. All three simple notification methods delegate
+   * here to avoid repeating the identical blocks structure.
+   */
+  private async postMarkdownMessage(text: string): Promise<void> {
+    await this.postMessage({
+      channel: this.channelId,
+      blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
     });
   }
 
@@ -453,7 +489,7 @@ export function createSlackInterface(config: SlackInterfaceConfig): {
           return c.json({ ok: true });
         }
 
-        const messageText: string = (event.text ?? "").replace(/<@[A-Z0-9]+>/g, "").trim();
+        const messageText: string = (event.text ?? "").replace(SLACK_MENTION_RE, "").trim();
         if (!messageText) return c.json({ ok: true });
 
         log.info({ messageText }, "received Slack message event");
