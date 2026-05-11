@@ -1,6 +1,5 @@
 import type { Notifier, PipelineRun, StageResult, PipelineResult, PipelineError } from "../types.js";
 import { createLogger } from "../logger.js";
-import { getLinearClient } from "../util/linear.js";
 
 const log = createLogger({ component: "LinearNotifier" });
 
@@ -19,13 +18,19 @@ export class LinearNotifier implements Notifier {
   private apiKey: string;
   private stateCache = new Map<string, string>();
   private issueIdCache = new Map<string, { id: string; teamId?: string }>();
+  private clientPromise: Promise<any> | null = null;
 
   constructor(config: LinearNotifierConfig) {
     this.apiKey = config.apiKey;
   }
 
   private async getClient() {
-    return getLinearClient(this.apiKey);
+    if (!this.clientPromise) {
+      this.clientPromise = import("@linear/sdk").then(
+        ({ LinearClient }) => new LinearClient({ apiKey: this.apiKey }),
+      );
+    }
+    return this.clientPromise;
   }
 
   async onPipelineStart(run: PipelineRun): Promise<void> {
@@ -108,6 +113,16 @@ export class LinearNotifier implements Notifier {
       `Usage: ${usedTokens.toLocaleString()} / ${maxTokens.toLocaleString()} tokens (${pct}%)\n` +
       `The run will be aborted if the budget is exceeded.`
     );
+  }
+
+  async onPRMerged(run: PipelineRun): Promise<void> {
+    await Promise.all([
+      this.postComment(run.issueId,
+        `🤖 **Agent Run #${run.id.slice(0, 8)}** — PR Merged ✅\n\n` +
+        `The PR has been merged. Closing this ticket.`
+      ),
+      this.transitionState(run.issueId, LINEAR_STATES.DONE),
+    ]);
   }
 
   async onPipelineFailed(run: PipelineRun, error: PipelineError): Promise<void> {

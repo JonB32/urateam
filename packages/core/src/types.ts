@@ -445,6 +445,13 @@ export interface Notifier {
   onTokenBudgetAlert?(run: PipelineRun, usedTokens: number, maxTokens: number): Promise<void>;
   /** Called by sendDailyTokenSummary() with aggregated usage for a given date. */
   onDailyTokenSummary?(summary: DailyTokenSummary): Promise<void>;
+  /**
+   * BEC-186: called when a PR is merged externally — either by a human via
+   * the GitHub UI or by GitHub's "auto-merge when ready" feature — after
+   * the pipeline has already completed. Implementations should transition
+   * the Linear issue to Done.
+   */
+  onPRMerged?(run: PipelineRun): Promise<void>;
 }
 
 // --- Sandbox Config ---
