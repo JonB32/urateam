@@ -157,7 +157,7 @@ export class OpenRouterAgent implements AgentProvider {
       cacheReadInputTokens: 0,
       // One-shot: single turn.
       turns: 1,
-      providerName: "openrouter",
+      providerName: this.providerId,
       modelId,
     };
   }

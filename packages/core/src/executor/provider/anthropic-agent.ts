@@ -119,7 +119,7 @@ export class AnthropicAgentSDK implements AgentProvider {
       cacheCreationInputTokens: streamResult.cacheCreationInputTokens,
       cacheReadInputTokens: streamResult.cacheReadInputTokens,
       turns: streamResult.turns,
-      providerName: "anthropic-sdk",
+      providerName: this.providerId,
       modelId: effectiveModel ?? "claude-sonnet-4-6",
     };
   }
