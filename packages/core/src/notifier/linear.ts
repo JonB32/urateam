@@ -115,6 +115,16 @@ export class LinearNotifier implements Notifier {
     );
   }
 
+  async onPRMerged(run: PipelineRun): Promise<void> {
+    await Promise.all([
+      this.postComment(run.issueId,
+        `🤖 **Agent Run #${run.id.slice(0, 8)}** — PR Merged ✅\n\n` +
+        `The PR has been merged. Closing this ticket.`
+      ),
+      this.transitionState(run.issueId, LINEAR_STATES.DONE),
+    ]);
+  }
+
   async onPipelineFailed(run: PipelineRun, error: PipelineError): Promise<void> {
     await Promise.all([
       this.postComment(run.issueId,

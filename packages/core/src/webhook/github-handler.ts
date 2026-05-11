@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { pipelineRuns } from "../db/schema.js";
 import type { AnyDb } from "../db/client.js";
 import type { PipelineRunner } from "../pipeline/runner.js";
-import type { PipelineConfig, RepoConfig } from "../types.js";
+import type { Notifier, PipelineConfig, RepoConfig } from "../types.js";
 import { createLogger } from "../logger.js";
 import { createGitHubClient } from "../repo/github.js";
 import type { GitHubConfig } from "../repo/github.js";
@@ -45,6 +45,12 @@ export interface GitHubWebhookHandlerConfig {
    * requiredStatusChecks, etc.).  When not provided, automerge events are skipped.
    */
   github?: GitHubConfig;
+  /**
+   * Notifier instance. When provided, `onPRMerged` is called when a PR is
+   * merged externally (human merge or GitHub's auto-merge-when-ready), which
+   * transitions the Linear issue to Done.
+   */
+  notifier?: Notifier;
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +255,75 @@ async function handleAutoMergeEvent(
 }
 
 // ---------------------------------------------------------------------------
+// PR merged event handler — transitions Linear to Done when a PR is merged
+// externally (human merge or GitHub's "auto-merge when ready").
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle `pull_request.closed` events where `merged === true`.
+ *
+ * Looks up the pipeline run by PR URL, marks `auto_merged = true` in the DB,
+ * and calls `notifier.onPRMerged()` to transition the Linear issue to Done.
+ * Idempotent: if the run is already marked merged, no further action is taken.
+ */
+async function handlePRMergedEvent(
+  payload: Record<string, any>,
+  config: GitHubWebhookHandlerConfig,
+): Promise<void> {
+  const pr = payload.pull_request;
+  const prUrl: string = pr?.html_url ?? "";
+  const prBranch: string = pr?.head?.ref ?? "";
+
+  if (!prUrl) {
+    log.warn({ payload }, "pr-merged: no PR URL in payload — skipping");
+    return;
+  }
+
+  const db = config.db;
+  let originalRun: (typeof pipelineRuns.$inferSelect) | undefined;
+
+  // Look up pipeline run by PR URL (primary)
+  const byUrl = await db.select().from(pipelineRuns).where(eq(pipelineRuns.prUrl, prUrl)).limit(1);
+  if (byUrl.length > 0) originalRun = byUrl[0];
+
+  // Fallback: look up by branch name for agent-created branches
+  if (!originalRun && prBranch?.startsWith("agent/")) {
+    const byBranch = await db
+      .select()
+      .from(pipelineRuns)
+      .where(eq(pipelineRuns.branch, prBranch))
+      .limit(1);
+    if (byBranch.length > 0) originalRun = byBranch[0];
+  }
+
+  if (!originalRun) {
+    log.debug({ prUrl }, "pr-merged: no pipeline run found for PR — skipping");
+    return;
+  }
+
+  // Idempotency: skip if already marked as merged
+  if (originalRun.autoMerged) {
+    log.debug({ runId: originalRun.id }, "pr-merged: run already marked merged — skipping");
+    return;
+  }
+
+  // Update DB to reflect the human/external merge
+  await db
+    .update(pipelineRuns)
+    .set({ autoMerged: true, autoMergeReason: "merged via GitHub" })
+    .where(eq(pipelineRuns.id, originalRun.id));
+
+  log.info({ runId: originalRun.id, prUrl }, "pr-merged: updated pipeline run auto_merged=true");
+
+  // Transition Linear issue to Done
+  if (config.notifier?.onPRMerged) {
+    await config.notifier.onPRMerged(originalRun).catch((err) =>
+      log.error({ err, runId: originalRun!.id }, "pr-merged: notifier.onPRMerged() failed"),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Handler factory
 // ---------------------------------------------------------------------------
 
@@ -297,7 +372,13 @@ export function createGitHubWebhookHandler(
       return c.json({ ok: true, action: "automerge-check-triggered" });
     }
 
-    // 3b. Handle PR review, inline review comment, and issue comment events
+    // 3b. PR merged externally (human merge or GitHub auto-merge-when-ready)
+    if (event === "pull_request" && action === "closed" && payload.pull_request?.merged === true) {
+      await handlePRMergedEvent(payload, config);
+      return c.json({ ok: true, action: "pr-merged" });
+    }
+
+    // 3c. Handle PR review, inline review comment, and issue comment events
     if (
       event !== "pull_request_review" &&
       event !== "pull_request_review_comment" &&

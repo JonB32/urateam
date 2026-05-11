@@ -17,6 +17,9 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+### Fixed (OSS+)
+- **BEC-186** — Linear issues whose PRs were merged manually (or via GitHub's "auto-merge when ready") stayed "In Review" indefinitely because no webhook handler fired after the pipeline completed. Added a `pull_request.closed` handler that fires when `merged: true`, looks up the pipeline run by PR URL, marks `auto_merged = true` in the DB, and calls the new `notifier.onPRMerged()` hook (implemented in `LinearNotifier`) which posts a brief comment and transitions the Linear issue to Done. The handler is idempotent — replayed deliveries are no-ops when the run is already marked merged. The notifier is wired into `createGitHubWebhookHandler` via the existing `ServerConfig.githubWebhookSecret` path. A new optional `onPRMerged?(run: PipelineRun): Promise<void>` method has been added to the `Notifier` interface and implemented in both `LinearNotifier` and `CompositeNotifier`.
+
 ## [0.1.44] — 2026-05-11
 
 Bumps:

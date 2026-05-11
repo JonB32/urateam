@@ -120,6 +120,7 @@ export async function createApp(config: ServerConfig) {
       repoConfigs: config.repoConfigs,
       db: db as any,
       github: config.github,
+      notifier,
     });
     app.route("/", githubWebhookApp);
   }

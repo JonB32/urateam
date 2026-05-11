@@ -1,22 +1,16 @@
 /**
- * BEC-186 Reproduction Test
+ * BEC-186: pull_request.closed + merged=true must transition Linear to Done.
  *
- * Confirms the bug: pull_request.closed with merged=true is silently skipped
- * by the GitHub webhook handler, so Linear issues stay "In Review" forever
- * after a human merges a PR.
+ * When a human (or GitHub's "auto-merge when ready") merges a PR after the
+ * pipeline has already completed, the pipeline's `onPipelineComplete` has
+ * already fired and will not re-fire.  Without an explicit handler for
+ * `pull_request.closed+merged`, the Linear ticket stays "In Review" forever.
  *
- * Expected behaviour (after fix):
- *   - Handler should detect action=closed + merged=true
- *   - Look up pipeline run by pr_url
- *   - Update auto_merged=true in DB
- *   - Call notifier.onPRMerged() (new method) → Linear transitions to Done
- *
- * Current behaviour (bug):
- *   - pull_request.closed falls through both routing branches:
- *     1. Not in automerge branch (action not in ["labeled","synchronize","opened"])
- *     2. Not a review/comment event
- *   - Handler returns { ok: true, skipped: "unhandled event type" }
- *   - DB is not updated, Linear stays In Review
+ * Fix implemented in `webhook/github-handler.ts`:
+ *   - A new routing branch catches `pull_request.closed` + `merged: true`
+ *   - Looks up the pipeline run by pr_url
+ *   - Marks `auto_merged = true` in the DB
+ *   - Calls `notifier.onPRMerged?.(run)` → LinearNotifier transitions to Done
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -97,6 +91,16 @@ function makeMockRunner() {
   };
 }
 
+function makeMockNotifier() {
+  return {
+    onPipelineStart: vi.fn().mockResolvedValue(undefined),
+    onStageComplete: vi.fn().mockResolvedValue(undefined),
+    onPipelineComplete: vi.fn().mockResolvedValue(undefined),
+    onPipelineFailed: vi.fn().mockResolvedValue(undefined),
+    onPRMerged: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
 function buildConfig(
   overrides: Partial<GitHubWebhookHandlerConfig> = {},
 ): GitHubWebhookHandlerConfig {
@@ -150,10 +154,10 @@ async function postWebhook(
 }
 
 // ---------------------------------------------------------------------------
-// BEC-186 reproduction tests
+// BEC-186 tests — verifying the fix
 // ---------------------------------------------------------------------------
 
-describe("BEC-186: pull_request.closed + merged=true (no Done transition)", () => {
+describe("BEC-186: pull_request.closed + merged=true → Linear Done transition", () => {
   let runner: ReturnType<typeof makeMockRunner>;
 
   beforeEach(() => {
@@ -161,10 +165,9 @@ describe("BEC-186: pull_request.closed + merged=true (no Done transition)", () =
     runner = makeMockRunner();
   });
 
-  it("BUG CONFIRMED: pull_request.closed+merged skipped as unhandled event type", async () => {
-    // This test proves the current broken behaviour:
-    // A valid pull_request.closed+merged=true webhook returns skipped="unhandled event type"
-    // because neither routing branch catches action="closed".
+  it("pull_request.closed+merged=true is handled (not skipped)", async () => {
+    // The core fix: action="closed"+merged=true must NOT fall through to
+    // the "unhandled event type" branch.
     const db = makeMockDb(mockRun);
     const app = createGitHubWebhookHandler(buildConfig({ runner: runner as any, db: db as any }));
 
@@ -173,53 +176,104 @@ describe("BEC-186: pull_request.closed + merged=true (no Done transition)", () =
     expect(res.status).toBe(200);
     const json = await res.json();
 
-    // THE BUG: the handler skips the event instead of processing it
-    expect(json.skipped).toBe("unhandled event type");
-
-    // Consequence 1: DB is never updated — auto_merged stays null
-    expect(db._updateMock).not.toHaveBeenCalled();
-
-    // Consequence 2: no Linear transition to Done can occur
-    // (notifier.onPRMerged does not exist, and no existing callback fires)
-    expect(runner.startFeedback).not.toHaveBeenCalled();
-  });
-
-  it("BUG CONFIRMED: pull_request.closed without merged=false is also silently skipped", async () => {
-    // Verify the negative case is also correctly ignored (no regression risk).
-    // PR closed without merge should NOT transition Linear to Done.
-    // Currently this is silently skipped (which is the correct final outcome).
-    const db = makeMockDb(mockRun);
-    const app = createGitHubWebhookHandler(buildConfig({ runner: runner as any, db: db as any }));
-
-    const res = await postWebhook(
-      app,
-      makePRClosedMergedPayload({ pull_request: { ...makePRClosedMergedPayload().pull_request, merged: false } }),
-      "pull_request",
-    );
-
-    expect(res.status).toBe(200);
-    const json = await res.json();
-    // Also skipped — fine for the closed-without-merge case.
-    expect(json.skipped).toBeDefined();
-  });
-
-  it("EXPECTED (post-fix): pull_request.closed+merged=true should NOT be skipped", async () => {
-    // This test documents what the correct behavior SHOULD be after the fix.
-    // Currently it fails because json.skipped is set.
-    // After implementing the fix, this test should pass.
-    const db = makeMockDb(mockRun);
-    const app = createGitHubWebhookHandler(buildConfig({ runner: runner as any, db: db as any }));
-
-    const res = await postWebhook(app, makePRClosedMergedPayload(), "pull_request");
-
-    expect(res.status).toBe(200);
-    const json = await res.json();
-
-    // After fix: should NOT have skipped
-    // This assertion FAILS today, confirming the feature gap.
     expect(json).not.toHaveProperty("skipped");
     expect(json.ok).toBe(true);
-    // And DB should be updated
+    expect(json.action).toBe("pr-merged");
+  });
+
+  it("DB is updated with auto_merged=true on PR merge", async () => {
+    const db = makeMockDb(mockRun);
+    const app = createGitHubWebhookHandler(buildConfig({ runner: runner as any, db: db as any }));
+
+    await postWebhook(app, makePRClosedMergedPayload(), "pull_request");
+
+    expect(db._updateMock).toHaveBeenCalled();
+  });
+
+  it("notifier.onPRMerged is called when notifier is provided", async () => {
+    const db = makeMockDb(mockRun);
+    const notifier = makeMockNotifier();
+    const app = createGitHubWebhookHandler(
+      buildConfig({ runner: runner as any, db: db as any, notifier: notifier as any }),
+    );
+
+    await postWebhook(app, makePRClosedMergedPayload(), "pull_request");
+
+    expect(notifier.onPRMerged).toHaveBeenCalledOnce();
+    expect(notifier.onPRMerged).toHaveBeenCalledWith(expect.objectContaining({ id: "run-bec186" }));
+  });
+
+  it("notifier.onPRMerged is NOT called when no pipeline run is found", async () => {
+    // PR from a non-agent source — no DB row matches
+    const db = makeMockDb(null);
+    const notifier = makeMockNotifier();
+    const app = createGitHubWebhookHandler(
+      buildConfig({ runner: runner as any, db: db as any, notifier: notifier as any }),
+    );
+
+    const res = await postWebhook(app, makePRClosedMergedPayload(), "pull_request");
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    // Still returns ok: true, action: "pr-merged" (handler ran, just found no run)
+    expect(json.ok).toBe(true);
+    expect(notifier.onPRMerged).not.toHaveBeenCalled();
+  });
+
+  it("idempotency: already-merged run is not re-processed", async () => {
+    // If auto_merged is already true, skip the update and notifier call
+    const alreadyMergedRun = { ...mockRun, autoMerged: true };
+    const db = makeMockDb(alreadyMergedRun as any);
+    const notifier = makeMockNotifier();
+    const app = createGitHubWebhookHandler(
+      buildConfig({ runner: runner as any, db: db as any, notifier: notifier as any }),
+    );
+
+    await postWebhook(app, makePRClosedMergedPayload(), "pull_request");
+
+    expect(db._updateMock).not.toHaveBeenCalled();
+    expect(notifier.onPRMerged).not.toHaveBeenCalled();
+  });
+
+  it("pull_request.closed WITHOUT merged=true is skipped (no Done transition)", async () => {
+    // PR closed without merge (e.g. closed manually) must NOT trigger Done transition.
+    const db = makeMockDb(mockRun);
+    const notifier = makeMockNotifier();
+    const payload = {
+      ...makePRClosedMergedPayload(),
+      pull_request: {
+        ...makePRClosedMergedPayload().pull_request,
+        merged: false,
+      },
+    };
+    const app = createGitHubWebhookHandler(
+      buildConfig({ runner: runner as any, db: db as any, notifier: notifier as any }),
+    );
+
+    const res = await postWebhook(app, payload, "pull_request");
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    // Falls through to "unhandled event type" — correct outcome
+    expect(json.skipped).toBeDefined();
+    expect(db._updateMock).not.toHaveBeenCalled();
+    expect(notifier.onPRMerged).not.toHaveBeenCalled();
+  });
+
+  it("works when notifier is not configured (no crash)", async () => {
+    // Notifier is optional — handler must not throw when absent
+    const db = makeMockDb(mockRun);
+    const app = createGitHubWebhookHandler(
+      buildConfig({ runner: runner as any, db: db as any /* no notifier */ }),
+    );
+
+    const res = await postWebhook(app, makePRClosedMergedPayload(), "pull_request");
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.ok).toBe(true);
+    expect(json.action).toBe("pr-merged");
+    // DB still updated even without notifier
     expect(db._updateMock).toHaveBeenCalled();
   });
 });
