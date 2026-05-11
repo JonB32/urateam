@@ -21,7 +21,7 @@ import type { TechStackProfile } from "../repo/tech-stack.js";
 import type { DevcontainerSession } from "../repo/devcontainer.js";
 import { createLogger } from "../logger.js";
 import { consumeAgentStream, StagePreStreamStalledError, type StreamMessage } from "./agent-stream.js";
-import { isClaudeAuthValid } from "./auth-check.js";
+import { isClaudeAuthValid, resolveClaudeAuth } from "./auth-check.js";
 
 /**
  * BEC-183: wall-clock stage timeouts. Independent of the in-stream watchdog
@@ -158,8 +158,14 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
   let cacheReadInputTokens = 0;
 
   try {
+    // Resolve auth method before any SDK call (BEC-207). Logs which path is
+    // active (oauth-token / api-key / session) alongside the run context.
+    const claudeAuth = resolveClaudeAuth();
+    log.info({ authMethod: claudeAuth.method }, "Claude auth method resolved");
+
     // Pre-flight auth check — fail fast with a clear message rather than
-    // burning tokens on a doomed run.
+    // burning tokens on a doomed run. Short-circuits to true for env-var
+    // auth paths (CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY).
     if (!(await isClaudeAuthValid())) {
       throw new Error(
         "Claude auth credentials are invalid or expired. Run: docker compose exec <service> claude login",

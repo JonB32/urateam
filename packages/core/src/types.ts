@@ -467,6 +467,7 @@ export const AuditEventTypeSchema = z.enum([
   "slack.post_failed",
   "qa.run_triggered", "qa.run_completed", "qa.gap_issue_filed",
   "review.fanout_fallback_used", "review.model_low_output_ratio",
+  "claude.auth_expired",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 

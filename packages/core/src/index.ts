@@ -61,7 +61,8 @@ export {
   runAgentBranchSweep,
   type RunAgentBranchSweepDeps,
 } from "./repo/agent-branch-sweep-runner.js";
-export { isClaudeAuthValid, resetAuthCheckCache } from "./executor/auth-check.js";
+export { isClaudeAuthValid, resetAuthCheckCache, resolveClaudeAuth, type ClaudeAuthCredentials } from "./executor/auth-check.js";
+export { createAuthMonitor, runAuthMonitorCheck, AUTH_MONITOR_INTERVAL_MS, type AuthMonitor } from "./executor/auth-monitor.js";
 export type { GitHubConfig } from "./repo/github.js";
 export { createGitHubClient } from "./repo/github.js";
 export { buildGitHubConfigFromEnv } from "./repo/github-from-env.js";

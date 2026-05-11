@@ -56,6 +56,13 @@ export interface ScaffoldOptions {
   linearWebhookSecret?: string;
   /** Anthropic auth — set this for headless / API-key path; omit for `claude login`. */
   anthropicApiKey?: string;
+  /**
+   * Long-lived OAuth token produced by `claude setup-token`.
+   * Bills against a Claude Pro/Max subscription. Takes precedence over
+   * `anthropicApiKey` in the precedence order: CLAUDE_CODE_OAUTH_TOKEN →
+   * ANTHROPIC_API_KEY → mounted session.
+   */
+  claudeOauthToken?: string;
   /** Pro license JWT. If omitted, the scaffolded sidecar runs in OSS mode. */
   licenseKey?: string;
   /** Dashboard basic-auth username (default "admin"). */
@@ -223,6 +230,7 @@ function buildEnv(
     domain: string;
     caddyEmail: string;
     anthropicApiKey: string;
+    claudeOauthToken: string;
     licenseKey: string;
     dashboardUser: string;
     dashboardPassword: string;
@@ -265,12 +273,25 @@ function buildEnv(
   push(`REPO_TEAM_ID=${options.linearTeamId}`);
   blank();
 
-  push("# === Anthropic auth ===");
+  push("# === Anthropic auth (choose ONE — see deploy/CLAUDE_AUTH.md) ===");
+  push("# Recommended for subscription users: CLAUDE_CODE_OAUTH_TOKEN");
+  push("#   1. Run `claude setup-token` on any machine with the Claude Code CLI installed");
+  push("#   2. Paste the resulting sk-ant-oat-... token below (long-lived, no weekly expiry)");
+  if (options.claudeOauthToken) {
+    push(`CLAUDE_CODE_OAUTH_TOKEN=${options.claudeOauthToken}`);
+  } else {
+    push("# CLAUDE_CODE_OAUTH_TOKEN=  # sk-ant-oat-... (from `claude setup-token`)");
+  }
+  push("");
+  push("# Alternative: ANTHROPIC_API_KEY (pay-per-token, long-lived, from console.anthropic.com)");
   if (options.anthropicApiKey) {
     push(`ANTHROPIC_API_KEY=${options.anthropicApiKey}`);
   } else {
-    push("# ANTHROPIC_API_KEY=  # blank → run `docker compose exec agent claude login` after deploy");
+    push("# ANTHROPIC_API_KEY=  # sk-ant-api03-... (from https://console.anthropic.com/)");
   }
+  push("");
+  push("# Legacy fallback: run `docker compose exec agent claude login` after deploy");
+  push("# (interactive session — expires ~weekly; not recommended for production)");
   blank();
 
   push("# === Pro license (blank = OSS tier) ===");
@@ -554,10 +575,13 @@ export function scaffold(options: ScaffoldOptions): ScaffoldResult {
           "PM_AGENT_* + SLACK_* lines in .env to enable it.",
       );
     }
-    if (!options.anthropicApiKey) {
+    if (!options.claudeOauthToken && !options.anthropicApiKey) {
       todos.push(
-        "Anthropic auth — run `docker compose exec agent claude login` after the stack is up " +
-          "(or set ANTHROPIC_API_KEY in .env for headless API auth).",
+        "Anthropic auth — recommended: run `claude setup-token` and set CLAUDE_CODE_OAUTH_TOKEN " +
+          "in .env (long-lived, no weekly expiry). " +
+          "Alternative: set ANTHROPIC_API_KEY (pay-per-token). " +
+          "Legacy fallback: `docker compose exec agent claude login` after deploy (expires ~weekly). " +
+          "See deploy/CLAUDE_AUTH.md for details.",
       );
     }
     todos.push(
@@ -595,6 +619,7 @@ export function scaffold(options: ScaffoldOptions): ScaffoldResult {
       domain: options.domain ?? "",
       caddyEmail: options.caddyEmail ?? "",
       anthropicApiKey: options.anthropicApiKey ?? "",
+      claudeOauthToken: options.claudeOauthToken ?? "",
       licenseKey: options.licenseKey ?? "",
       dashboardUser: options.dashboardUser ?? "admin",
       dashboardPassword,
@@ -752,20 +777,39 @@ async function main() {
       : { domain: undefined, caddyEmail: undefined, dashboardBasePath: undefined };
 
   // --- Stage 4: Anthropic auth choice ---
+  // BEC-207: CLAUDE_CODE_OAUTH_TOKEN is now the recommended path for
+  // subscription users — long-lived, no weekly expiry, no volume mounts.
+  // Prompt order: oauth-token → api-key → legacy cli session.
+  console.log(
+    "\n  Anthropic auth — urateam needs credentials to call Claude.\n" +
+    "  Recommended for subscription users: CLAUDE_CODE_OAUTH_TOKEN\n" +
+    "    → Run `claude setup-token` once to generate a long-lived programmatic\n" +
+    "      token (sk-ant-oat-...). No weekly re-auth, no volume mounts needed.\n" +
+    "  See deploy/CLAUDE_AUTH.md for all options.\n",
+  );
   const stage4 = await prompts([
     {
       type: "select",
       name: "anthropicAuth",
       message: "Anthropic auth method:",
       choices: [
-        { title: "Claude Code CLI (`claude login` after deploy)", value: "cli" },
-        { title: "API key (set ANTHROPIC_API_KEY now)", value: "apiKey" },
+        {
+          title: "OAuth token (CLAUDE_CODE_OAUTH_TOKEN — run `claude setup-token`, long-lived)",
+          value: "oauthToken",
+        },
+        { title: "API key (ANTHROPIC_API_KEY — pay-per-token, from console.anthropic.com)", value: "apiKey" },
+        { title: "Claude Code CLI (`claude login` after deploy — expires ~weekly, legacy)", value: "cli" },
       ],
     },
     {
-      type: (prev) => (prev === "apiKey" ? "password" : null),
+      type: (prev) => (prev === "oauthToken" ? "password" : null),
+      name: "claudeOauthToken",
+      message: "CLAUDE_CODE_OAUTH_TOKEN (paste the sk-ant-oat-... token from `claude setup-token`):",
+    },
+    {
+      type: (prev, values) => (values.anthropicAuth === "apiKey" ? "password" : null),
       name: "anthropicApiKey",
-      message: "ANTHROPIC_API_KEY:",
+      message: "ANTHROPIC_API_KEY (sk-ant-api03-...):",
     },
   ]);
 
@@ -1016,7 +1060,8 @@ async function main() {
     domain: stage3.domain,
     caddyEmail: stage3.caddyEmail,
     dashboardBasePath: normalizeBasePath(stage3.dashboardBasePath),
-    anthropicApiKey: stage4.anthropicApiKey,
+    claudeOauthToken: stage4.claudeOauthToken || undefined,
+    anthropicApiKey: stage4.anthropicApiKey || undefined,
     licenseKey: stage5.licenseKey,
     pmAgent,
     githubWebhookSecret: stage6.githubWebhookSecret || undefined,
@@ -1082,8 +1127,13 @@ async function main() {
   }
   if (stage2.deployMode === "production") {
     console.log("    docker compose up -d --build");
-    if (stage4.anthropicAuth === "cli") {
-      console.log("    docker compose exec agent claude login    # device-flow auth");
+    if (stage4.anthropicAuth === "oauthToken") {
+      console.log("    # CLAUDE_CODE_OAUTH_TOKEN is already in .env — no further auth step needed");
+    } else if (stage4.anthropicAuth === "apiKey") {
+      console.log("    # ANTHROPIC_API_KEY is already in .env — no further auth step needed");
+    } else {
+      console.log("    docker compose exec agent claude login    # device-flow auth (expires ~weekly)");
+      console.log("    # Tip: switch to CLAUDE_CODE_OAUTH_TOKEN to avoid weekly re-auth (see deploy/CLAUDE_AUTH.md)");
     }
     console.log("    docker compose exec agent gh auth login   # device-flow auth");
     console.log("");

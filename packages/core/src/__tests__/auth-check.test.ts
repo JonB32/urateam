@@ -25,13 +25,35 @@ function simulateFailure() {
 }
 
 describe("isClaudeAuthValid", () => {
+  // BEC-207: save/restore env vars so the new short-circuit (which returns
+  // true immediately when CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY is set)
+  // doesn't interfere with these subprocess-path tests.
+  let savedOauthToken: string | undefined;
+  let savedApiKey: string | undefined;
+
   beforeEach(() => {
     resetAuthCheckCache();
     mockExecFile.mockReset();
+    // Clear env vars so tests exercise the subprocess (mounted-session) path.
+    savedOauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    savedApiKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    delete process.env.ANTHROPIC_API_KEY;
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    // Restore env vars.
+    if (savedOauthToken === undefined) {
+      delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    } else {
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = savedOauthToken;
+    }
+    if (savedApiKey === undefined) {
+      delete process.env.ANTHROPIC_API_KEY;
+    } else {
+      process.env.ANTHROPIC_API_KEY = savedApiKey;
+    }
   });
 
   it("returns true when claude auth status succeeds", async () => {

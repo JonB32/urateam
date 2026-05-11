@@ -109,12 +109,15 @@ Known limitations being addressed (don't compound these):
 
 ### Claude Authentication
 - Three supported paths (full guide in `deploy/CLAUDE_AUTH.md`):
-  1. `ANTHROPIC_API_KEY` — long-lived API key, pay-per-token. Recommended for production.
-  2. `CLAUDE_CODE_OAUTH_TOKEN` — long-lived programmatic OAuth token from `claude setup-token`. Bills against Pro/Max subscription. Recommended for subscription users on headless deploys.
+  1. `CLAUDE_CODE_OAUTH_TOKEN` — long-lived programmatic OAuth token from `claude setup-token`. Bills against Pro/Max subscription. **Recommended for subscription users on headless/production deploys.** No weekly expiry, no volume mount needed.
+  2. `ANTHROPIC_API_KEY` — long-lived API key, pay-per-token. Recommended for production (API account).
   3. Local `claude login` session — mounted credentials at `~/.config/claude/`. Convenient for local dev but **expires weekly**; not for production.
 - Precedence: `CLAUDE_CODE_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` → local session.
-- `preflightClaudeAuth` (`packages/cli/src/lib/preflight-claude-auth.ts`) gates boot on session validity. No-op when either env var is set (those have no session-lifetime semantics).
-- BEC-207 tracks adding first-class `CLAUDE_CODE_OAUTH_TOKEN` support to the executor — currently only the local CLI session path is wired up.
+- `resolveClaudeAuth()` in `packages/core/src/executor/auth-check.ts` determines the active auth method; called by `executeStage()` before any Agent SDK invocation. Returns a `ClaudeAuthCredentials` object with `method: "oauth-token" | "api-key" | "session"`.
+- `preflightClaudeAuth` (`packages/cli/src/lib/preflight-claude-auth.ts`) gates boot on session validity. **No-op (no subprocess) when either env var is set** — those paths have no session-lifetime semantics.
+- `isClaudeAuthValid()` also short-circuits to `true` when either env var is set, so the per-stage pre-flight in `executor.ts` is a no-op for env-var paths.
+- **AuthMonitor** (`packages/core/src/executor/auth-monitor.ts`) — periodic defence-in-depth for operators on the mounted-session path. Runs every 6 hours via the PM scheduler tick. Sends a Slack alert to `PM_AGENT_SLACK_CHANNEL_ID` (when `SLACK_ERROR_ALERTS=true`) and logs a `claude.auth_expired` audit event on detected expiry. No-ops when `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` is set.
+- Environment variable documentation: `CLAUDE_CODE_OAUTH_TOKEN` is the primary auth method for subscription users. Generate once with `claude setup-token`; paste into `.env`. Long-lived — no weekly re-auth cycle unlike the mounted session.
 
 ### Agent Execution
 - Agent SDK `query()` with per-stage MCP server + plugin resolution

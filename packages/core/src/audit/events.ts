@@ -577,3 +577,23 @@ export function reviewModelLowOutputRatioEvent(args: {
     },
   });
 }
+
+/**
+ * Emitted by AuthMonitor (BEC-207) when the mounted `claude` CLI session
+ * fails the periodic `claude auth status` health-check. Only emitted on the
+ * mounted-session path — env-var paths (CLAUDE_CODE_OAUTH_TOKEN /
+ * ANTHROPIC_API_KEY) skip validation entirely and never emit this event.
+ */
+export function claudeAuthExpiredEvent(args: {
+  detectedAt: Date;
+}): AuditEvent {
+  return base({
+    eventType: "claude.auth_expired",
+    actor: "system",
+    actorType: "system",
+    payload: {
+      detectedAt: args.detectedAt.toISOString(),
+      hint: "Run `claude login` in the container, or switch to CLAUDE_CODE_OAUTH_TOKEN (see deploy/CLAUDE_AUTH.md)",
+    },
+  });
+}

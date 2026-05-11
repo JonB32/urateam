@@ -73,6 +73,7 @@ describe("audit_events immutability", () => {
       "packages/core/src/repo/agent-branch-sweep-runner.ts",
       "packages/core/src/qa/github.ts",
       "packages/core/src/qa/gap.ts",
+      "packages/core/src/executor/auth-monitor.ts",
       "packages/core/src/__tests__/audit-immutability.test.ts",
     ];
 
