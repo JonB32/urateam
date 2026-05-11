@@ -131,6 +131,12 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
   CREATE INDEX IF NOT EXISTS idx_agent_logs_stage_run_id ON agent_logs(stage_run_id);
   CREATE INDEX IF NOT EXISTS idx_pipeline_runs_issue_id ON pipeline_runs(issue_id);
   CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status);
+  -- BEC-187: hot-path indexes kept in sync with db/migrations/sqlite + postgres
+  -- so fresh installs and existing deployments converge on the same schema.
+  CREATE INDEX IF NOT EXISTS idx_pipeline_runs_pr_url ON pipeline_runs(pr_url);
+  CREATE INDEX IF NOT EXISTS idx_pipeline_runs_branch ON pipeline_runs(branch);
+  CREATE INDEX IF NOT EXISTS idx_pipeline_runs_started_at ON pipeline_runs(started_at);
+  CREATE INDEX IF NOT EXISTS idx_pipeline_runs_completed_at ON pipeline_runs(completed_at);
 
   CREATE TABLE IF NOT EXISTS pm_approvals (
     id TEXT PRIMARY KEY,
@@ -144,6 +150,8 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
   );
 
   CREATE INDEX IF NOT EXISTS idx_pm_approvals_status ON pm_approvals(status);
+  -- BEC-187: hot-path index — kept in sync with migration files.
+  CREATE INDEX IF NOT EXISTS idx_pm_approvals_issue_id ON pm_approvals(issue_id);
 
   CREATE TABLE IF NOT EXISTS active_work (
     id TEXT PRIMARY KEY,
