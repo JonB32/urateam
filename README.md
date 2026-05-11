@@ -10,6 +10,8 @@ cd my-project
 ura dev
 ```
 
+You'll need a Claude credential. The three supported paths (and which to pick) are documented in [`deploy/CLAUDE_AUTH.md`](deploy/CLAUDE_AUTH.md). For production, use `ANTHROPIC_API_KEY` (pay-per-token) or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` (Pro/Max subscription) — both are long-lived. Avoid mounting the local `claude login` session credentials in production; that path expires weekly.
+
 ## Packages
 
 | Package | Description |
