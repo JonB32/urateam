@@ -897,6 +897,7 @@ export class PipelineRunner {
           techStack,
           devcontainerSession,
           stageModels: config.stageModels,
+          stageProviders: config.stageProviders,
         });
 
         // BEC-134: track the most recent review stage_run id so fanout
@@ -995,6 +996,7 @@ export class PipelineRunner {
               devcontainerSession,
               ralphContext,
               stageModels: config.stageModels,
+              stageProviders: config.stageProviders,
             });
 
             // Accumulate each RALPH iteration's tokens
@@ -1049,6 +1051,7 @@ export class PipelineRunner {
                 techStack,
                 devcontainerSession,
                 stageModels: config.stageModels,
+                stageProviders: config.stageProviders,
               });
               if (result.status === "completed") break;
             } else if (config.retry.strategy === "escalate") {
@@ -1147,6 +1150,7 @@ export class PipelineRunner {
                   techStack,
                   devcontainerSession,
                   stageModels: config.stageModels,
+                  stageProviders: config.stageProviders,
                 });
                 if (result.status === "completed" && result.handoffArtifact) {
                   const retryValidation = await validateHandoff(
@@ -1310,6 +1314,7 @@ export class PipelineRunner {
               techStack,
               devcontainerSession,
               stageModels: config.stageModels,
+              stageProviders: config.stageProviders,
             });
 
             // BEC-134: track latest review stage_run id for fanout persistence.
@@ -1556,6 +1561,7 @@ export class PipelineRunner {
             devcontainerSession,
             ralphContext: deepReviewContext,
             stageModels: config.stageModels,
+            stageProviders: config.stageProviders,
           });
 
           run.totalInputTokens += drImplementResult.inputTokens;
@@ -1598,6 +1604,7 @@ export class PipelineRunner {
             techStack,
             devcontainerSession,
             stageModels: config.stageModels,
+            stageProviders: config.stageProviders,
           });
 
           // BEC-134: refresh latest review stage_run id for any subsequent
@@ -1812,6 +1819,7 @@ export class PipelineRunner {
               devcontainerSession,
               mergeConflictContext: { defaultBranch: repoConfig.defaultBranch },
               stageModels: config.stageModels,
+              stageProviders: config.stageProviders,
             });
 
             run.totalInputTokens += resolveResult.inputTokens;
@@ -2833,6 +2841,7 @@ export class PipelineRunner {
           devcontainerSession,
           reviewFeedback: stageReviewFeedback,
           stageModels: config.stageModels,
+          stageProviders: config.stageProviders,
         });
 
         run.totalInputTokens += result.inputTokens;

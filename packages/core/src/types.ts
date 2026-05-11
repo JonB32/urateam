@@ -80,6 +80,14 @@ export const PipelineConfigSchema = z.object({
    *  Invalid model strings are passed through as-is (let the SDK error, no local validation).
    *  Example: { implement: "claude-opus-4-6", test: "claude-haiku-4-5" } */
   stageModels: z.record(z.string(), z.string()).optional(),
+  /**
+   * Per-stage provider overrides (BEC-201). Keys are stage names; values are provider IDs.
+   * Supported values: "anthropic-sdk" (default), "openrouter".
+   * Only the implement stage currently supports non-Anthropic providers.
+   * The IMPLEMENT_PROVIDER environment variable takes precedence over this config field.
+   * Example: { implement: "openrouter" }
+   */
+  stageProviders: z.record(z.string(), z.string()).optional(),
   /** Fail the pipeline run if the agent did not commit its work and auto-commit was triggered.
    *  When false (default), auto-commit is a silent safety net and the run continues normally.
    *  When true, triggering auto-commit is treated as a pipeline error so the issue surfaces immediately. */

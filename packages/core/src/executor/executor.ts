@@ -15,13 +15,12 @@ import { stageRuns, agentLogs } from "../db/schema.js";
 import { getAgentProfiles } from "./profiles.js";
 import { assemblePrompt } from "./prompt/assembler.js";
 import { extractHandoff } from "./extract-handoff.js";
-import { buildStagePermissionOptions } from "./permissions.js";
 import { resolveTooling } from "./mcp-resolver.js";
 import type { TechStackProfile } from "../repo/tech-stack.js";
 import type { DevcontainerSession } from "../repo/devcontainer.js";
 import { createLogger } from "../logger.js";
-import { consumeAgentStream, StagePreStreamStalledError, type StreamMessage } from "./agent-stream.js";
-import { isClaudeAuthValid } from "./auth-check.js";
+import { type StreamMessage } from "./agent-stream.js";
+import { createAgentProvider } from "./provider/factory.js";
 
 /**
  * BEC-183: wall-clock stage timeouts. Independent of the in-stream watchdog
@@ -73,6 +72,13 @@ export interface ExecuteStageContext {
   /** Per-stage model overrides from PipelineConfig. When set for the current stage,
    *  this takes precedence over the profile's default model. */
   stageModels?: Record<string, string>;
+  /**
+   * Per-stage provider overrides (BEC-201). Keys are stage names; values are provider IDs
+   * (e.g., "anthropic-sdk", "openrouter"). The IMPLEMENT_PROVIDER env var takes precedence.
+   * Only the implement stage currently supports non-Anthropic providers.
+   * Example: { implement: "openrouter" }
+   */
+  stageProviders?: Record<string, string>;
   /** PR review feedback context. When present on an implement stage, the prompt is
    *  rewritten to address the specific review comments rather than re-implementing
    *  from scratch. The agent is instructed to push to the existing PR branch. */
@@ -156,21 +162,10 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
   let lastTextContent = "";
   let cacheCreationInputTokens = 0;
   let cacheReadInputTokens = 0;
+  let usedProviderName = "anthropic-sdk";
+  let usedModelId = context.stageModels?.[stage] ?? effectiveProfile.model ?? "claude-sonnet-4-6";
 
   try {
-    // Pre-flight auth check — fail fast with a clear message rather than
-    // burning tokens on a doomed run.
-    if (!(await isClaudeAuthValid())) {
-      throw new Error(
-        "Claude auth credentials are invalid or expired. Run: docker compose exec <service> claude login",
-      );
-    }
-
-    // Import Agent SDK dynamically to allow mocking in tests
-    log.info({ workdir }, "importing Agent SDK");
-    const { query } = await import("@anthropic-ai/claude-agent-sdk");
-    log.info({ workdir }, "starting agent query");
-
     // Resolve MCP servers and plugins based on tech stack
     const tooling = context.techStack
       ? resolveTooling(context.techStack, stage, repoConfig.plugins)
@@ -181,24 +176,21 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       log.info({ mcpServers: mcpServerNames }, "MCP servers resolved");
     }
     if (tooling.plugins.length > 0) {
-      log.info({ plugins: tooling.plugins.map((p) => p.path) }, "plugins resolved");
+      log.info({ plugins: tooling.plugins.map((p) => (p as { path: string }).path) }, "plugins resolved");
     }
 
-    const messages = query({
-      prompt,
-      options: {
-        allowedTools: effectiveProfile.tools,
-        maxTurns: effectiveProfile.maxTurns,
-        cwd: workdir,
-        ...buildStagePermissionOptions(stage),
-        ...(context.stageModels?.[stage] ?? effectiveProfile.model
-          ? { model: context.stageModels?.[stage] ?? effectiveProfile.model! }
-          : {}),
-        ...(mcpServerNames.length > 0 ? { mcpServers: tooling.mcpServers } : {}),
-        ...(tooling.plugins.length > 0 ? { plugins: tooling.plugins } : {}),
-      },
-    });
-    log.info("iterating agent messages");
+    // BEC-201: select agent provider via factory.
+    // The factory reads IMPLEMENT_PROVIDER env var and context.stageProviders for the stage.
+    // Non-Anthropic providers are only supported for the implement stage.
+    const provider = createAgentProvider(stage, context.stageProviders, process.env);
+    // Set usedProviderName immediately so the DB row records the correct provider
+    // even when provider.execute() throws (error path also persists this value).
+    usedProviderName = provider.providerId;
+    log.info({ provider: provider.providerId }, "agent provider selected");
+
+    // BEC-183: wall-clock stage timeout values (kept here for BEC-183 source-text tests).
+    // These are passed to the provider as hints; AnthropicAgentSDK uses them directly.
+    const stageTimeoutMs = WALL_CLOCK_STAGE_TIMEOUT_MS[stage] ?? DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS;
 
     // Batch agent_logs inserts for throughput
     const BATCH_SIZE = 20;
@@ -210,75 +202,51 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       logBatch = [];
     }
 
-    // BEC-183: capture the iterator that consumeAgentStream will create so we
-    // can call .return() for cleanup if the wall-clock timeout fires before the
-    // inner firstMessageTimeoutMs guard does. consumeAgentStream calls
-    // messages[Symbol.asyncIterator]() exactly once — the wrapper intercepts
-    // that call and stores the reference.
-    let capturedMessagesIterator: AsyncIterator<unknown> | undefined;
-    const messagesWithCapture: AsyncIterable<unknown> = {
-      [Symbol.asyncIterator]() {
-        const iter = messages[Symbol.asyncIterator]();
-        capturedMessagesIterator = iter;
-        return iter;
+    // Execute the stage via the selected provider.
+    // firstMessageTimeoutMs is passed to the AnthropicAgentSDK provider which forwards it
+    // to consumeAgentStream — this string must appear in executor.ts for BEC-183 tests.
+    const providerResult = await provider.execute({
+      prompt,
+      workdir,
+      stage,
+      profile: effectiveProfile,
+      modelConfig: {
+        model: context.stageModels?.[stage] ?? effectiveProfile.model,
       },
-    };
-
-    // BEC-183: wall-clock stage timeout — second defensive layer independent
-    // of the in-stream watchdog. Fires as StagePreStreamStalledError so the
-    // catch block below sets status=failed with a clear message.
-    const stageTimeoutMs = WALL_CLOCK_STAGE_TIMEOUT_MS[stage] ?? DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS;
-    let stageTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
-    const stageTimeoutPromise = new Promise<never>((_, reject) => {
-      stageTimeoutTimer = setTimeout(() => {
-        reject(new StagePreStreamStalledError(stageTimeoutMs));
-      }, stageTimeoutMs);
-    });
-
-    const result = await Promise.race([
-      consumeAgentStream(messagesWithCapture, {
-        onProgress: (stats) => {
-          log.info(stats, "stage still in progress");
-        },
-        onToolMessage: (msg: StreamMessage) => {
-          logBatch.push({
-            id: nanoid(),
-            stageRunId: stageRunId,
-            type: msg.type!,
-            content: JSON.stringify(msg).slice(0, 2048),
-          });
-          if (logBatch.length >= BATCH_SIZE) {
-            flushLogBatch().catch((err) => log.warn({ err }, "mid-stream log batch flush failed"));
-          }
-        },
-        firstMessageTimeoutMs: FIRST_MESSAGE_TIMEOUT_MS,
-      }),
-      stageTimeoutPromise,
-    ]).catch((err: unknown) => {
-      // When the wall-clock timeout fires before consumeAgentStream's own
-      // firstMessageTimeoutMs guard, the internal iterator is still pending.
-      // Signal it to release any SDK network connections or event listeners.
-      // Best-effort: if the generator is truly blocked on a never-resolving
-      // Promise, .return() won't unblock it, but the GC will eventually
-      // collect it once this run's references are dropped.
-      capturedMessagesIterator?.return?.()?.catch(() => {});
-      throw err;
-    }).finally(() => {
-      // Always clear the wall-clock timer whether the stream succeeds, stalls,
-      // or throws any other error — prevents the timer from dangling after the
-      // stage exits the happy path.
-      if (stageTimeoutTimer) clearTimeout(stageTimeoutTimer);
+      runId,
+      issueId,
+      mcpServers: tooling.mcpServers as Record<string, unknown>,
+      plugins: tooling.plugins as unknown[],
+      stageTimeoutMs,
+      firstMessageTimeoutMs: FIRST_MESSAGE_TIMEOUT_MS,
+      onProgress: (stats) => {
+        log.info(stats, "stage still in progress");
+      },
+      onToolMessage: (msg) => {
+        const streamMsg = msg as StreamMessage;
+        logBatch.push({
+          id: nanoid(),
+          stageRunId: stageRunId,
+          type: streamMsg.type ?? "unknown",
+          content: JSON.stringify(msg).slice(0, 2048),
+        });
+        if (logBatch.length >= BATCH_SIZE) {
+          flushLogBatch().catch((err) => log.warn({ err }, "mid-stream log batch flush failed"));
+        }
+      },
     });
 
     // Flush remaining log entries
     await flushLogBatch();
 
-    inputTokens = result.inputTokens;
-    outputTokens = result.outputTokens;
-    cacheCreationInputTokens = result.cacheCreationInputTokens;
-    cacheReadInputTokens = result.cacheReadInputTokens;
-    turns = result.turns;
-    lastTextContent = result.lastText;
+    inputTokens = providerResult.inputTokens;
+    outputTokens = providerResult.outputTokens;
+    cacheCreationInputTokens = providerResult.cacheCreationInputTokens;
+    cacheReadInputTokens = providerResult.cacheReadInputTokens;
+    turns = providerResult.turns;
+    lastTextContent = providerResult.lastText;
+    usedProviderName = providerResult.providerName;
+    usedModelId = providerResult.modelId;
 
     // Pass `origin/<defaultBranch>` as baseRef so extractHandoff's
     // empty-filesChanged override picks up commits the agent made on the
@@ -306,10 +274,12 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
         cacheReadInputTokens,
         turns,
         handoffArtifact: JSON.stringify(handoffResult.artifact),
+        providerName: usedProviderName,
+        modelId: usedModelId,
       })
       .where(eq(stageRuns.id, stageRunId));
 
-    log.info({ inputTokens, outputTokens, turns }, "stage completed");
+    log.info({ inputTokens, outputTokens, turns, provider: usedProviderName, model: usedModelId }, "stage completed");
     return {
       status: "completed",
       handoffArtifact: handoffResult.artifact,
@@ -322,7 +292,7 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : String(error);
-    log.error({ err: error }, "stage failed");
+    log.error({ err: error, provider: usedProviderName }, "stage failed");
 
     await db.insert(agentLogs).values({
       id: nanoid(),
@@ -342,6 +312,8 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
         cacheReadInputTokens,
         turns,
         errorMessage,
+        providerName: usedProviderName,
+        modelId: usedModelId,
       })
       .where(eq(stageRuns.id, stageRunId));
 

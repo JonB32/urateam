@@ -29,6 +29,7 @@ pnpm monorepo with 4 packages:
 - Shared helpers: `consumeAgentStream`, `parseJsonBlock`, `gitExecSafe`, `failPipeline`
 - Agent SDK stream messages: `type="assistant"` with text in `message.message` (no-tool sessions) or `message.content` (tool sessions) — `consumeAgentStream` handles both
 - **Pre-stream stall (BEC-183):** `consumeAgentStream` throws `StagePreStreamStalledError` if no message arrives within `firstMessageTimeoutMs` (default 5 min). `executor.ts` adds a second wall-clock cap via `Promise.race` (`WALL_CLOCK_STAGE_TIMEOUT_MS`: 60 min for implement, 30 min for others). Both paths result in `stage_runs.status = 'failed'`.
+- **Multi-AI provider support (BEC-201):** `executor/provider/` contains the `AgentProvider` interface + `AnthropicAgentSDK` (default) and `OpenRouterAgent` implementations. Provider selected via `createAgentProvider(stage, stageProviders, env)` factory. Provider selection: `IMPLEMENT_PROVIDER` env var > `pipelineConfig.stageProviders[stage]` > `"anthropic-sdk"`. OpenRouter requires `OPENROUTER_API_KEY`; model via `stageModels.implement` or `IMPLEMENT_OPENROUTER_MODEL`. `stage_runs.provider_name` + `stage_runs.model_id` track provider/model used.
 - **Linear SDK lazy relations:** All relation fields (`.team`, `.state`, `.project`) are Promise-like — always `await` them. `.labels` is a **method** — call `await issue.labels()`. Sync access returns `undefined` silently.
 - **PR body generation**: `generatePRDescription()` in `pipeline/pr-description.ts` builds markdown body for all auto-generated PRs
 

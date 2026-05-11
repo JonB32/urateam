@@ -21,3 +21,14 @@ export {
   type DeepReviewFinding,
   type DeepReviewResult,
 } from "./deep-review.js";
+// BEC-201: multi-AI provider abstraction
+export {
+  type AgentProvider,
+  type AgentExecuteParams,
+  type AgentExecuteResult,
+  type ModelConfig,
+  type ProviderId,
+  AnthropicAgentSDK,
+  OpenRouterAgent,
+  createAgentProvider,
+} from "./provider/index.js";

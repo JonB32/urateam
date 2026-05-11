@@ -63,6 +63,9 @@ const MIGRATION_COLUMNS: MigrationColumn[] = [
     sqliteType: "TEXT NOT NULL DEFAULT 'viewer'",
     pgType: "TEXT NOT NULL DEFAULT 'viewer'",
   },
+  // BEC-201: multi-AI provider tracking per stage run
+  { table: "stage_runs", column: "provider_name", sqliteType: "TEXT", pgType: "TEXT" },
+  { table: "stage_runs", column: "model_id", sqliteType: "TEXT", pgType: "TEXT" },
 ];
 
 /**
@@ -116,7 +119,9 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
     output_tokens INTEGER NOT NULL DEFAULT 0,
     turns INTEGER NOT NULL DEFAULT 0,
     handoff_artifact TEXT,
-    error_message TEXT
+    error_message TEXT,
+    provider_name TEXT,
+    model_id TEXT
   );
 
   CREATE TABLE IF NOT EXISTS agent_logs (

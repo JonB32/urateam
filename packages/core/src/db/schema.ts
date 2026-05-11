@@ -95,6 +95,10 @@ export const stageRuns = sqliteTable("stage_runs", {
   turns: integer("turns").notNull().default(0),
   handoffArtifact: text("handoff_artifact"),
   errorMessage: text("error_message"),
+  /** BEC-201: AI provider used for this stage (e.g., "anthropic-sdk", "openrouter"). */
+  providerName: text("provider_name"),
+  /** BEC-201: Model ID used for this stage (e.g., "claude-sonnet-4-6", "openai/gpt-4o"). */
+  modelId: text("model_id"),
 });
 
 export const agentLogs = sqliteTable("agent_logs", {
