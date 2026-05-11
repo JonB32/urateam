@@ -144,6 +144,9 @@ export interface GhLinearSyncConfig {
   /**
    * GitHub label names to filter issues by.
    * When empty or omitted, all open issues are processed.
+   * When multiple labels are provided, **OR semantics** apply: issues matching
+   * ANY of the listed labels are included (not only those carrying all labels).
+   * Duplicates (issues with multiple matching labels) are deduplicated by number.
    * Example: `["urateam-quality-observer", "bug", "enhancement"]`
    */
   labelFilters?: string[];
@@ -259,7 +262,8 @@ export async function createLinearTicketForGhIssue(
  * The operation is **idempotent**: calling it multiple times for the same
  * GitHub issue will not create duplicate Linear tickets.
  *
- * Linear lookups are parallelised with `Promise.all` to minimise wall-clock
+ * Linear lookups and write operations (ticket creation, issue close) are both
+ * parallelised with `Promise.all` / `Promise.allSettled` to minimise wall-clock
  * time when processing many issues.
  */
 export async function runGhLinearSync(
@@ -303,13 +307,43 @@ export async function runGhLinearSync(
   const [owner, repo] = parts as [string, string];
 
   // Fetch open GitHub issues (filtered by labels when provided).
-  const ghIssues = await clients.github.listIssues({
-    owner,
-    repo,
-    labels: config.labelFilters?.join(","),
-    state: "open",
-    per_page: GITHUB_ISSUES_PER_PAGE,
-  });
+  // The GitHub REST API treats comma-separated labels as AND (intersection),
+  // not OR (union). To get OR semantics for multiple label filters, we call
+  // listIssues once per label and deduplicate by issue number.
+  let ghIssues: GitHubIssue[];
+  if (!config.labelFilters || config.labelFilters.length <= 1) {
+    // Single call: no filter, or exactly one label (no AND/OR ambiguity).
+    ghIssues = await clients.github.listIssues({
+      owner,
+      repo,
+      labels: config.labelFilters?.[0],
+      state: "open",
+      per_page: GITHUB_ISSUES_PER_PAGE,
+    });
+  } else {
+    // Multiple labels: call once per label to get OR semantics, then dedup.
+    const perLabelResults = await Promise.all(
+      config.labelFilters.map((label) =>
+        clients.github.listIssues({
+          owner,
+          repo,
+          labels: label,
+          state: "open",
+          per_page: GITHUB_ISSUES_PER_PAGE,
+        }),
+      ),
+    );
+    // Deduplicate by issue number (Map preserves insertion order; first occurrence wins).
+    const seen = new Map<number, GitHubIssue>();
+    for (const batch of perLabelResults) {
+      for (const issue of batch) {
+        if (!seen.has(issue.number)) {
+          seen.set(issue.number, issue);
+        }
+      }
+    }
+    ghIssues = [...seen.values()];
+  }
 
   log.info(
     { count: ghIssues.length, repo: config.githubRepo },
@@ -334,72 +368,118 @@ export async function runGhLinearSync(
     ),
   );
 
+  // Count all issues as processed up front.
+  result.processed = ghIssues.length;
+
+  // Classify each issue and accumulate synchronous counts (skips, dry-runs).
+  // Async write operations (API calls) are collected into pendingWrites so
+  // they can be dispatched in parallel below, reducing O(N × RTT) to O(RTT).
+  const pendingWrites: Array<{
+    ghIssue: GitHubIssue;
+    action: "create" | "close";
+    promise: Promise<void>;
+  }> = [];
+
   for (let i = 0; i < ghIssues.length; i++) {
     const ghIssue = ghIssues[i]!;
     const existing = existingTickets[i] ?? null;
-    result.processed++;
 
-    try {
-      if (existing) {
-        log.info(
-          { ghNumber: ghIssue.number, linearId: existing.identifier },
-          "GH issue already synced to Linear — skipping",
-        );
-        result.skipped++;
+    if (existing) {
+      log.info(
+        { ghNumber: ghIssue.number, linearId: existing.identifier },
+        "GH issue already synced to Linear — skipping",
+      );
+      result.skipped++;
 
-        // Bidirectional close: close GH issue if Linear ticket is Done.
-        if (config.bidirectionalClose) {
-          const isDone =
-            COMPLETED_STATE_TYPES.has(existing.state.type ?? "") ||
-            COMPLETED_STATE_NAMES.has(existing.state.name?.toLowerCase() ?? "");
+      // Bidirectional close: close GH issue if Linear ticket is Done.
+      if (config.bidirectionalClose) {
+        const isDone =
+          COMPLETED_STATE_TYPES.has(existing.state.type ?? "") ||
+          COMPLETED_STATE_NAMES.has(existing.state.name?.toLowerCase() ?? "");
 
-          if (isDone) {
-            if (!config.dryRun) {
-              await clients.github.closeIssue({
-                owner,
-                repo,
-                issue_number: ghIssue.number,
-              });
-            }
+        if (isDone) {
+          if (config.dryRun) {
             log.info(
               {
                 ghNumber: ghIssue.number,
                 linearId: existing.identifier,
-                dryRun: config.dryRun ?? false,
+                dryRun: true,
               },
               "closed GH issue (Linear ticket is Done)",
             );
             result.closed++;
+          } else {
+            pendingWrites.push({
+              ghIssue,
+              action: "close",
+              promise: clients.github
+                .closeIssue({ owner, repo, issue_number: ghIssue.number })
+                .then(() => {
+                  log.info(
+                    {
+                      ghNumber: ghIssue.number,
+                      linearId: existing.identifier,
+                      dryRun: false,
+                    },
+                    "closed GH issue (Linear ticket is Done)",
+                  );
+                }),
+            });
           }
         }
+      }
+    } else {
+      // Create a new Linear ticket for this GitHub issue.
+      if (config.dryRun) {
+        log.info(
+          {
+            ghNumber: ghIssue.number,
+            title: ghIssue.title,
+            dryRun: true,
+          },
+          "[dry-run] would create Linear ticket",
+        );
+        result.created++;
       } else {
-        // Create a new Linear ticket for this GitHub issue.
-        if (!config.dryRun) {
-          const created = await createLinearTicketForGhIssue(
+        pendingWrites.push({
+          ghIssue,
+          action: "create",
+          promise: createLinearTicketForGhIssue(
             clients.linear,
             ghIssue,
             config.linearTeamId,
             triageState.id,
-          );
-          log.info(
-            { ghNumber: ghIssue.number, linearId: created.identifier },
-            "created Linear ticket for GH issue",
-          );
-        } else {
-          log.info(
-            {
-              ghNumber: ghIssue.number,
-              title: ghIssue.title,
-              dryRun: true,
-            },
-            "[dry-run] would create Linear ticket",
-          );
-        }
-        result.created++;
+          ).then((created) => {
+            log.info(
+              { ghNumber: ghIssue.number, linearId: created.identifier },
+              "created Linear ticket for GH issue",
+            );
+          }),
+        });
       }
-    } catch (err) {
-      const msg = getErrorMessage(err);
-      log.error({ err, ghNumber: ghIssue.number }, "failed to sync GH issue");
+    }
+  }
+
+  // Execute all write operations in parallel, collecting results without
+  // short-circuiting on individual failures (Promise.allSettled).
+  const writeResults = await Promise.allSettled(
+    pendingWrites.map((w) => w.promise),
+  );
+
+  // Tally write results: increment counters for successes, collect errors.
+  for (let i = 0; i < writeResults.length; i++) {
+    const writeResult = writeResults[i]!;
+    const { ghIssue, action } = pendingWrites[i]!;
+
+    if (writeResult.status === "fulfilled") {
+      if (action === "create") result.created++;
+      else result.closed++;
+    } else {
+      const msg = getErrorMessage(writeResult.reason);
+      log.error(
+        { err: writeResult.reason, ghNumber: ghIssue.number },
+        "failed to sync GH issue",
+      );
       result.errors.push(`GH#${ghIssue.number}: ${msg}`);
     }
   }

@@ -417,7 +417,7 @@ describe("runGhLinearSync", () => {
     expect(result.errors[0]).toContain("API rate limit");
   });
 
-  it("passes label filters to GitHub listIssues", async () => {
+  it("calls listIssues once per label for multi-label filters (OR semantics)", async () => {
     const { client: ghClient } = makeMockGitHub([]);
     const { client: linClient } = makeMockLinear([], [triageState]);
 
@@ -426,8 +426,54 @@ describe("runGhLinearSync", () => {
       { github: ghClient, linear: linClient },
     );
 
+    // One call per label, not a single comma-joined call (which would be AND semantics)
+    expect(ghClient.listIssues).toHaveBeenCalledTimes(2);
     expect(ghClient.listIssues).toHaveBeenCalledWith(
-      expect.objectContaining({ labels: "urateam-quality-observer,bug" }),
+      expect.objectContaining({ labels: "urateam-quality-observer" }),
+    );
+    expect(ghClient.listIssues).toHaveBeenCalledWith(
+      expect.objectContaining({ labels: "bug" }),
+    );
+  });
+
+  it("deduplicates issues that match multiple label filters", async () => {
+    // Issue #3 carries both "bug" and "enhancement" labels — must appear only once.
+    const bugIssue = makeGhIssue({ number: 1, title: "A bug", labels: [{ name: "bug" }] });
+    const enhIssue = makeGhIssue({ number: 2, title: "An enhancement", labels: [{ name: "enhancement" }] });
+    const bothIssue = makeGhIssue({ number: 3, title: "Both", labels: [{ name: "bug" }, { name: "enhancement" }] });
+
+    // Simulate GitHub AND semantics: return only issues that have the requested label
+    const listIssues = vi.fn().mockImplementation(async ({ labels }: { labels?: string }) => {
+      if (labels === "bug") return [bugIssue, bothIssue];
+      if (labels === "enhancement") return [enhIssue, bothIssue];
+      return [];
+    });
+    const ghClient = { listIssues, closeIssue: vi.fn() } as unknown as GitHubSyncClient;
+    const { client: linClient, createIssue } = makeMockLinear([], [triageState]);
+
+    const result = await runGhLinearSync(
+      { ...defaultConfig, labelFilters: ["bug", "enhancement"] },
+      { github: ghClient, linear: linClient },
+    );
+
+    // 3 unique issues (not 4 = 2+2), createIssue called exactly 3 times
+    expect(result.processed).toBe(3);
+    expect(result.created).toBe(3);
+    expect(createIssue).toHaveBeenCalledTimes(3);
+  });
+
+  it("single-label filter still makes one listIssues call", async () => {
+    const { client: ghClient } = makeMockGitHub([]);
+    const { client: linClient } = makeMockLinear([], [triageState]);
+
+    await runGhLinearSync(
+      { ...defaultConfig, labelFilters: ["bug"] },
+      { github: ghClient, linear: linClient },
+    );
+
+    expect(ghClient.listIssues).toHaveBeenCalledTimes(1);
+    expect(ghClient.listIssues).toHaveBeenCalledWith(
+      expect.objectContaining({ labels: "bug" }),
     );
   });
 
@@ -460,5 +506,33 @@ describe("runGhLinearSync", () => {
     expect(result.created).toBe(2);
     expect(result.skipped).toBe(1);
     expect(createIssue).toHaveBeenCalledTimes(2);
+  });
+
+  it("write operations are dispatched in parallel (all createIssue calls initiated before any resolves)", async () => {
+    // Verify that all write promises are created before any awaited —
+    // i.e., createIssue call count reaches N atomically, not one-by-one.
+    const issues = [makeGhIssue({ number: 20 }), makeGhIssue({ number: 21 })];
+    const { client: ghClient } = makeMockGitHub(issues);
+    const { client: linClient, createIssue } = makeMockLinear([], [triageState]);
+
+    // Track call count at the moment each promise resolves.
+    const callCountAtResolve: number[] = [];
+    createIssue.mockImplementation(() => {
+      return new Promise((resolve) => {
+        // Defer resolution to the next microtask — this lets both promises be
+        // created (call count = 2) before either resolves.
+        Promise.resolve().then(() => {
+          callCountAtResolve.push(createIssue.mock.calls.length);
+          resolve({ issue: { id: "id", identifier: "BEC-X" } });
+        });
+      });
+    });
+
+    await runGhLinearSync(defaultConfig, { github: ghClient, linear: linClient });
+
+    // Both resolutions should observe call count = 2, proving parallel dispatch.
+    expect(callCountAtResolve).toHaveLength(2);
+    expect(callCountAtResolve[0]).toBe(2);
+    expect(callCountAtResolve[1]).toBe(2);
   });
 });
