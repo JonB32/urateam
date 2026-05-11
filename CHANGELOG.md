@@ -20,6 +20,15 @@ notes call out when a change affects only a single package.
 ### Added (OSS+)
 - **PR change-summary comment for review-feedback runs** — after a successful PR-trigger pipeline run (review-feedback `runType`), the bot posts a "🤖 Addressed PR feedback" comment with the HandoffArtifact summary, per-comment responses linking each triggering PR review comment to what was changed for it, files modified, and a run-link footer. Always-on (no env flag) — a review-feedback run only exists because a human asked for changes. Renderer falls back gracefully when the agent does not populate `context.addressedComments`. Best-effort posting — `addPRComment` failures log at level 40 and never fail pipeline completion. Run link respects `URATEAM_DASHBOARD_URL` (omits the link when unset).
 
+## [0.1.44] — 2026-05-11
+
+Bumps:
+- `@urateam/core`: 0.1.29 → 0.1.30
+- `@urateam/cli`: 0.1.31 → 0.1.32
+- `@urateam/dashboard`: 0.1.29 → 0.1.30
+- `create-urateam`: 0.1.32 → 0.1.33
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
 ## [0.1.43] — 2026-05-10
 
 Bumps:
