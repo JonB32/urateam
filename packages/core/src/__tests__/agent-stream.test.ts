@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { consumeAgentStream, StageStalledError } from "../executor/agent-stream.js";
+import {
+  consumeAgentStream,
+  StageStalledError,
+  StageCancelledError,
+} from "../executor/agent-stream.js";
 
 async function* fromArray(items: Array<unknown>): AsyncIterable<unknown> {
   for (const item of items) yield item;
@@ -97,5 +101,46 @@ describe("consumeAgentStream — stall watchdog (urateam#122)", () => {
     await expect(
       consumeAgentStream(zombieStream(), { progressTimeoutMs: 200 }),
     ).rejects.toBeInstanceOf(StageStalledError);
+  });
+});
+
+describe("consumeAgentStream — operator abort", () => {
+  it("throws StageCancelledError when the AbortController fires mid-stream", async () => {
+    const controller = new AbortController();
+    // Stream that emits one message, then waits forever. The abort below fires
+    // while the second .next() is pending so we hit the abort branch of the
+    // race instead of the stall branch.
+    async function* slow(): AsyncIterable<unknown> {
+      yield { type: "assistant", content: [{ type: "text", text: "first" }], usage: { output_tokens: 5 } };
+      await new Promise(() => {});
+    }
+    setTimeout(() => controller.abort(), 50);
+    await expect(
+      consumeAgentStream(slow(), {
+        abortSignal: controller.signal,
+        progressTimeoutMs: 60_000,
+      }),
+    ).rejects.toBeInstanceOf(StageCancelledError);
+  });
+
+  it("throws StageCancelledError immediately when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    async function* never(): AsyncIterable<unknown> {
+      await new Promise(() => {});
+    }
+    await expect(
+      consumeAgentStream(never(), { abortSignal: controller.signal }),
+    ).rejects.toBeInstanceOf(StageCancelledError);
+  });
+
+  it("ignores the abort signal once the stream completes normally", async () => {
+    const controller = new AbortController();
+    async function* fast(): AsyncIterable<unknown> {
+      yield { type: "assistant", content: [{ type: "text", text: "done" }], usage: { output_tokens: 5 } };
+    }
+    const result = await consumeAgentStream(fast(), { abortSignal: controller.signal });
+    controller.abort(); // post-hoc, should not throw or matter
+    expect(result.lastText).toBe("done");
   });
 });

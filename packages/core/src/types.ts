@@ -325,9 +325,18 @@ export interface TokenBudget {
 }
 
 // --- Run Status ---
-export type PipelineRunStatus = "queued" | "running" | "completed" | "failed" | "aborted" | "paused";
-export type StageRunStatus = "running" | "completed" | "failed" | "skipped";
-export type AgentLogType = "tool_call" | "tool_result" | "message" | "error";
+export type PipelineRunStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "aborted"
+  | "paused"
+  /** Operator-initiated stop (cancel/graceful via dashboard, Slack, or CLI).
+   *  Distinct from "aborted" (system-initiated, e.g. token budget). */
+  | "cancelled";
+export type StageRunStatus = "running" | "completed" | "failed" | "skipped" | "cancelled";
+export type AgentLogType = "tool_call" | "tool_result" | "message" | "error" | "cancelled";
 
 // --- Sanitized Issue ---
 export interface SanitizedIssue {
@@ -342,7 +351,7 @@ export interface SanitizedIssue {
 
 // --- Stage Result ---
 export interface StageResult {
-  status: "completed" | "failed";
+  status: "completed" | "failed" | "cancelled";
   handoffArtifact?: HandoffArtifact;
   /** True when the agent produced a valid structured handoff JSON block.
    *  NOTE: not persisted to DB yet — runtime-only. Add a column if needed for dashboards/queries. */
@@ -450,6 +459,10 @@ export interface SandboxConfig {
 export const AuditEventTypeSchema = z.enum([
   "run.started", "run.completed", "run.failed",
   "run.auto_merged", "run.auto_merge_skipped",
+  /** Operator-initiated stop of a single run (mode: "cancel" | "graceful"). */
+  "run.cancelled",
+  /** Operator-initiated container-wide halt (pause PM + cancel all in-flight). */
+  "system.halted",
   "pm.approval_requested", "pm.approval_resolved",
   "pm.issue_promoted", "pm.issue_deprioritized", "pm.issue_cancelled",
   "pm.triage_classified",
@@ -473,6 +486,8 @@ export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 export const AuditActorTypeSchema = z.enum([
   "system", "pm-agent", "webhook", "dashboard-user", "cli",
   "release-manager",
+  /** Slack-initiated action (slash command or DM/@mention). */
+  "slack",
 ]);
 export type AuditActorType = z.infer<typeof AuditActorTypeSchema>;
 

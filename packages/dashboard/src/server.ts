@@ -30,6 +30,19 @@ export interface DashboardConfig {
   db: Db;
   pipelineConfigs: Record<string, PipelineConfig>;
   repoConfigs: Record<string, RepoConfig>;
+  /**
+   * Optional reference to the pipeline runner. Wires the stop/halt buttons
+   * (and the audit-logged routes behind them) to the live in-process runner.
+   * When absent (e.g. read-only dashboard deployments), the buttons render
+   * only if the user has the right role but the POST handlers respond 500
+   * with "Runner not configured" — visible failure rather than silent no-op.
+   */
+  runner?: {
+    resume: (runOrIssueId: string) => Promise<void>;
+    start: (...args: any[]) => Promise<void>;
+    requestStop?: (runId: string, mode: "cancel" | "graceful") => { issueId: string | null; mode: "cancel" | "graceful" };
+    haltAll?: () => { cancelledRunIds: string[] };
+  };
   /** Optional costs config for the Cost & ROI dashboard (enterprise). */
   costs?: CostsConfig;
   auth?: { username: string; password: string };
@@ -137,9 +150,14 @@ export function createDashboard(config: DashboardConfig): Hono {
     // a logout.
     const path = c.req.path;
     const csrfExempt = csrfExemptPaths.has(path);
+    // /cli/* endpoints carry their own shared-secret auth (X-Ura-Cli-Token)
+    // and are not browser-reachable forms — CSRF doesn't apply. The token
+    // check inside the /cli/* router rejects unauthenticated requests.
+    const isCliPath = path.startsWith(`${csrfExemptBase}/cli/`);
     if (
       ["POST", "PUT", "DELETE", "PATCH"].includes(method) &&
-      !csrfExempt
+      !csrfExempt &&
+      !isCliPath
     ) {
       // Require HX-Request header on HTMX-driven state-changing endpoints
       if (!c.req.header("HX-Request")) {
@@ -205,13 +223,17 @@ export function createDashboard(config: DashboardConfig): Hono {
       createSsoMiddleware({ db: config.db, sso: config.sso!, basePath }),
     );
   } else if (config.auth?.username && config.auth?.password) {
-    app.use(
-      "*",
-      basicAuth({
-        username: config.auth.username,
-        password: config.auth.password,
-      }),
-    );
+    // Skip basic auth for /cli/* — those routes guard themselves with the
+    // X-Ura-Cli-Token shared secret. Without this skip, the CLI would have
+    // to know DASHBOARD_PASSWORD on top of URATEAM_CLI_TOKEN.
+    const cliPrefix = `${basePath}/cli/`;
+    app.use("*", async (c, next) => {
+      if (c.req.path.startsWith(cliPrefix)) return next();
+      return basicAuth({
+        username: config.auth!.username,
+        password: config.auth!.password,
+      })(c, next);
+    });
     // BEC-156: synthesize an admin user after basicAuth verifies credentials.
     // Without this, the RBAC middleware (`requirePermission`) on Enterprise
     // tier looks for c.user — which only the SSO middleware sets — and 401's
@@ -238,7 +260,12 @@ export function createDashboard(config: DashboardConfig): Hono {
       await next();
     });
   } else {
-    app.use("*", async (c) => {
+    const cliPrefix = `${basePath}/cli/`;
+    app.use("*", async (c, next) => {
+      // Even with no dashboard auth configured, /cli/* must still be reachable
+      // (its own token check enforces access). Without this carve-out the
+      // 503 here would shadow the CLI control plane.
+      if (c.req.path.startsWith(cliPrefix)) return next();
       return c.text(
         "Dashboard authentication is required but not configured. " +
           "Set DASHBOARD_USER and DASHBOARD_PASSWORD environment variables and restart.",
@@ -277,7 +304,11 @@ export function createDashboard(config: DashboardConfig): Hono {
   // Mount each sub-router at the basePath prefix. basePath also continues to
   // get passed INTO each router so layout() emits correct hrefs — the two
   // concerns (mount vs. link generation) are separate but share the value.
-  const runsRouter = createRunsRouter(config.db, basePath);
+  const runsRouter = createRunsRouter({
+    db: config.db,
+    runner: config.runner,
+    basePath,
+  });
   app.route(mountPrefix, runsRouter);
 
   const tokensRouter = createTokensRouter(config.db, basePath);

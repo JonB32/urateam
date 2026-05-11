@@ -277,6 +277,12 @@ export const startCommand = new Command("start")
       auth: dashboardAuth,
       sso: ssoBootstrap?.sso,
       workos: ssoBootstrap?.workos,
+      runner: {
+        resume: runner.resume.bind(runner),
+        start: runner.start.bind(runner) as (...args: any[]) => Promise<void>,
+        requestStop: runner.requestStop.bind(runner),
+        haltAll: runner.haltAll.bind(runner),
+      },
     });
     if (ssoBootstrap) {
       console.log(`SSO: enabled (WorkOS client ${ssoBootstrap.sso.workosClientId})`);

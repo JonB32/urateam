@@ -23,6 +23,8 @@ import { checkRequirements, buildRalphContext } from "../executor/ralph.js";
 import { computeEffectiveRalphIterations } from "./runner-ralph-helpers.js";
 import { checkTestQuality } from "../executor/test-quality.js";
 import { buildDeepReviewContext } from "../executor/deep-review.js";
+import { getStopSignal, requestStop, clearStopSignal, type StopMode } from "./control-signals.js";
+import { setPmPaused } from "../pm/pause-state.js";
 import { runReviewProviders } from "./review-providers-runner.js";
 import { postFanoutCommentsToPR } from "../executor/review/post-fanout-comments.js";
 import type { ReviewModelRun } from "../executor/review/review-provider.js";
@@ -476,6 +478,101 @@ export class PipelineRunner {
     this.activeRuns.delete(issueId);
   }
 
+  /**
+   * Operator-initiated stop for a single run, addressed by runId.
+   *
+   * - `"cancel"` aborts the active Agent SDK stream immediately. The current
+   *   stage exits with `status: "cancelled"`; the pipeline marks the run
+   *   `cancelled` and returns without creating a PR.
+   * - `"graceful"` lets the current stage complete, then skips remaining
+   *   stages. Slower than cancel but leaves the worktree consistent.
+   *
+   * Idempotent. Returns the issueId resolved from the active map (or null if
+   * the runId isn't currently active). The caller is responsible for emitting
+   * the audit event since it knows the actor.
+   */
+  requestStop(runId: string, mode: StopMode): { issueId: string | null; mode: StopMode } {
+    let issueId: string | null = null;
+    for (const [iss, rid] of this.activeRuns) {
+      if (rid === runId) {
+        issueId = iss;
+        break;
+      }
+    }
+    const effective = requestStop(runId, mode);
+    return { issueId, mode: effective };
+  }
+
+  /**
+   * Halt the whole container's autonomous work:
+   *  1. Pauses the PM Agent (BEC-170 mechanism) so no new runs get promoted.
+   *  2. Sends a `"cancel"` signal to every active pipeline + feedback run.
+   *
+   * Returns the set of run ids that were cancelled — the caller emits the
+   * audit event. Reversible: PM Agent can be unpaused via `/pm resume` and
+   * individual runs can be re-triggered via the retry button. Cancelled runs
+   * stay cancelled.
+   */
+  haltAll(): { cancelledRunIds: string[] } {
+    setPmPaused(true);
+    const cancelled = new Set<string>();
+    for (const runId of this.activeRuns.values()) {
+      requestStop(runId, "cancel");
+      cancelled.add(runId);
+    }
+    for (const runId of this.activeFeedbackRuns.values()) {
+      requestStop(runId, "cancel");
+      cancelled.add(runId);
+    }
+    log.info(
+      { count: cancelled.size, runIds: [...cancelled] },
+      "haltAll: PM paused and cancel signals sent to active runs",
+    );
+    return { cancelledRunIds: [...cancelled] };
+  }
+
+  /**
+   * Mark a run as cancelled in the DB and clean up bookkeeping. Shared by the
+   * pre-stage graceful path and the mid-stream cancel path.
+   *
+   * For feedback-pipeline runs, pass `feedbackPrUrl` so the per-PR rate-limit
+   * slot is freed immediately rather than waiting on the queue's `finally`
+   * block. The queue's `finally` still fires (idempotent — Map.delete on a
+   * missing key is a no-op), this just shortens the window during which a new
+   * feedback comment on the same PR is rejected as "already active".
+   */
+  markRunCancelled(
+    db: AnyDb,
+    runId: string,
+    run: PipelineRun,
+    mode: StopMode,
+    feedbackPrUrl?: string,
+  ): Promise<void> {
+    return this.markRunCancelledImpl(db, runId, run, mode, feedbackPrUrl);
+  }
+
+  private async markRunCancelledImpl(
+    db: AnyDb,
+    runId: string,
+    run: PipelineRun,
+    mode: StopMode,
+    feedbackPrUrl?: string,
+  ): Promise<void> {
+    await removeActiveWork(db, runId);
+    await db
+      .update(pipelineRuns)
+      .set({
+        status: "cancelled",
+        errorMessage: `cancelled by operator (${mode})`,
+        completedAt: new Date(),
+      })
+      .where(eq(pipelineRuns.id, runId));
+    run.status = "cancelled";
+    this.activeRuns.delete(run.issueId);
+    if (feedbackPrUrl) this.activeFeedbackRuns.delete(feedbackPrUrl);
+    clearStopSignal(runId);
+  }
+
   isActive(issueId: string): boolean {
     return this.activeRuns.has(issueId);
   }
@@ -519,6 +616,7 @@ export class PipelineRunner {
       checkTokenBudget: this.checkTokenBudget.bind(this),
       failPipeline: this.failPipeline.bind(this),
       injectAgentConfig: this.injectAgentConfig.bind(this),
+      markRunCancelled: this.markRunCancelled.bind(this),
       activeFeedbackRuns: this.activeFeedbackRuns,
       queue: this.queue,
       buildPipelineRun: this.buildPipelineRun.bind(this),
@@ -726,6 +824,20 @@ export class PipelineRunner {
         lastStageIndex = config.stages.indexOf(stage);
         runLog.info({ stage: stageType }, "executing stage");
 
+        // Operator stop check (graceful path) — fires between stages so the
+        // previous stage's work is preserved. The "cancel" path is interrupted
+        // mid-stream by the executor's AbortController and surfaces below as
+        // result.status === "cancelled".
+        const preStageStopSignal = getStopSignal(runId);
+        if (preStageStopSignal) {
+          runLog.info(
+            { stage: stageType, mode: preStageStopSignal },
+            "pipeline stop requested — aborting remaining stages",
+          );
+          await this.markRunCancelled(db, runId, run, preStageStopSignal);
+          return;
+        }
+
         if (stageType === "await-approval") {
           // Save the full resume context so resume() can re-attach the worktree
           // and continue from the next stage with the correct handoff artifact.
@@ -791,6 +903,17 @@ export class PipelineRunner {
           devcontainerSession,
           stageModels: config.stageModels,
         });
+
+        // Operator stop check (cancel path) — the AbortController inside the
+        // executor surfaces as result.status === "cancelled". Don't try to use
+        // the (possibly partial) handoff; exit immediately like the pre-stage
+        // graceful check above.
+        if (result.status === "cancelled") {
+          const mode = getStopSignal(runId) ?? "cancel";
+          runLog.info({ stage: stageType, mode }, "stage cancelled by operator — aborting pipeline");
+          await this.markRunCancelled(db, runId, run, mode);
+          return;
+        }
 
         // BEC-134: track the most recent review stage_run id so fanout
         // persistence can reuse it.

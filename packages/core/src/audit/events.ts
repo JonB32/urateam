@@ -88,6 +88,52 @@ export function pmAgentBranchSweptEvent(args: {
   });
 }
 
+/**
+ * Operator-initiated single-run stop. `mode` records whether the stage was
+ * interrupted mid-stream ("cancel") or allowed to finish before skipping the
+ * rest of the pipeline ("graceful").
+ */
+export function runCancelledEvent(args: {
+  runId: string;
+  issueId: string;
+  actor: string;
+  actorType: "dashboard-user" | "cli" | "slack" | "system";
+  mode: "cancel" | "graceful";
+  reason?: string;
+}): AuditEvent {
+  return base({
+    eventType: "run.cancelled",
+    actor: args.actor,
+    actorType: args.actorType,
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: { mode: args.mode, reason: args.reason },
+  });
+}
+
+/**
+ * Operator-initiated container-wide halt. Records the count of in-flight runs
+ * that were cancelled at halt time (each individual cancel also emits its own
+ * `run.cancelled` event with the same actor).
+ */
+export function systemHaltedEvent(args: {
+  actor: string;
+  actorType: "dashboard-user" | "cli" | "slack" | "system";
+  cancelledRunIds: string[];
+  reason?: string;
+}): AuditEvent {
+  return base({
+    eventType: "system.halted",
+    actor: args.actor,
+    actorType: args.actorType,
+    payload: {
+      cancelledRunIds: args.cancelledRunIds,
+      cancelledCount: args.cancelledRunIds.length,
+      reason: args.reason,
+    },
+  });
+}
+
 export function pmTriageClassifiedEvent(args: {
   issueId: string;
   label: string;

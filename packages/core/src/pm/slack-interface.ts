@@ -20,7 +20,7 @@ import { createLogger } from "../logger.js";
 import { sanitize } from "../executor/prompt/sanitizer.js";
 import { parseJsonObject } from "../executor/agent-stream.js";
 import { makeCallClaude, makeCallClaudeSonnet } from "./call-claude.js";
-import { postSlackMessage } from "./slack-helpers.js";
+import { postSlackMessage, reactToSlackMessage } from "./slack-helpers.js";
 import { executePmCommand } from "./slack-commands.js";
 import type { CommandExecutorDeps, PmCommand } from "./slack-commands.js";
 
@@ -64,6 +64,9 @@ const VALID_PM_COMMAND_TYPES = [
   "pause",
   "resume",
   "assign",
+  "cancel",
+  "stop",
+  "halt",
   "unknown",
 ] as const satisfies readonly PmCommandType[];
 
@@ -112,6 +115,17 @@ export interface SlackInterfaceConfig {
   callClaudeSonnet?: (prompt: string) => Promise<string>;
   /** BEC-135: optional handler for /release subcommands. */
   releaseHandler?: (params: { text: string; userId: string }) => Promise<{ text: string; responseType: "ephemeral" | "in_channel" }>;
+  /**
+   * Live runner reference. Required for the `cancel`/`stop`/`halt` Slack
+   * commands. When absent, those commands report a clear configuration error
+   * instead of silently no-op'ing.
+   */
+  runner?: {
+    requestStop?: (runId: string, mode: "cancel" | "graceful") => { issueId: string | null; mode: "cancel" | "graceful" };
+    haltAll?: () => { cancelledRunIds: string[] };
+  };
+  /** DB handle for audit-event writes from stop/halt commands. */
+  db?: any;
 }
 
 export interface AssignedNotification {
@@ -233,6 +247,15 @@ export function parsePmCommand(text: string): PmCommand {
   if (/^status$/i.test(trimmed)) return { type: "status" };
   if (/^pause$/i.test(trimmed)) return { type: "pause" };
   if (/^resume$/i.test(trimmed)) return { type: "resume" };
+  if (/^halt$/i.test(trimmed)) return { type: "halt" };
+
+  // `cancel <runId>` and `stop <runId>` — runId is a nanoid (URL-safe chars,
+  // 8+ in practice). Not validated against the DB here; the executor reports
+  // "not found" for invalid ids so the operator sees a clear failure.
+  const cancelMatch = trimmed.match(/^cancel\s+([A-Za-z0-9_-]{6,})$/i);
+  if (cancelMatch) return { type: "cancel", runId: cancelMatch[1] };
+  const stopMatch = trimmed.match(/^stop\s+([A-Za-z0-9_-]{6,})$/i);
+  if (stopMatch) return { type: "stop", runId: stopMatch[1] };
 
   return { type: "unknown", original: text };
 }
@@ -250,7 +273,7 @@ export async function interpretNaturalLanguage(
   callClaude: (prompt: string) => Promise<string>,
 ): Promise<PmCommand> {
   const safe = sanitize(message);
-  const prompt = `You are a PM Agent assistant. The following Slack message was sent to you:\n\n"${safe}"\n\nClassify it as exactly ONE of these JSON responses (no other text):\n{"type":"prioritize","issueId":"<id>"}\n{"type":"create","title":"<t>","description":"<d>"}\n{"type":"bulk_create","request":"<original request>"}\n{"type":"status"}\n{"type":"pause"}\n{"type":"resume"}\n{"type":"assign","issueId":"<id>"}\n{"type":"unknown","original":"${safe}"}\n\nRules:\n- Issue IDs look like BEC-25, ENG-42, etc.\n- "more urgent" / "higher priority" → prioritize\n- "add", "open a ticket", "create" → create (single issue with clear title)\n- "create issues for", "find gaps and create", "generate issues", "analyze and create multiple", "create tickets for all" → bulk_create (multiple issues from analysis)\n- "what's running", "show queue" → status\n- "stop", "pause" → pause\n- "start again", "unpause", "resume" → resume\n- "move to todo", "assign" → assign\n- Use bulk_create when the request implies analysis or generating multiple issues, not a single specific issue\n\nRespond ONLY with the JSON object.`;
+  const prompt = `You are a PM Agent assistant. The following Slack message was sent to you:\n\n"${safe}"\n\nClassify it as exactly ONE of these JSON responses (no other text):\n{"type":"prioritize","issueId":"<id>"}\n{"type":"create","title":"<t>","description":"<d>"}\n{"type":"bulk_create","request":"<original request>"}\n{"type":"status"}\n{"type":"pause"}\n{"type":"resume"}\n{"type":"assign","issueId":"<id>"}\n{"type":"cancel","runId":"<runId>"}\n{"type":"stop","runId":"<runId>"}\n{"type":"halt"}\n{"type":"unknown","original":"${safe}"}\n\nRules:\n- Issue IDs look like BEC-25, ENG-42, etc. Run IDs are longer alphanumeric (nanoid).\n- "more urgent" / "higher priority" → prioritize\n- "add", "open a ticket", "create" → create (single issue with clear title)\n- "create issues for", "find gaps and create", "generate issues", "analyze and create multiple", "create tickets for all" → bulk_create (multiple issues from analysis)\n- "what's running", "show queue" → status\n- "pause the agent" / "stop assigning" → pause\n- "start again", "unpause", "resume" → resume\n- "move to todo", "assign" → assign\n- "cancel run <id>", "kill run <id>", "abort run <id>" → cancel (mid-stream interrupt)\n- "stop run <id>", "graceful stop <id>", "wind down run <id>" → stop (finish current stage, then quit)\n- "halt everything", "stop everything", "emergency stop", "pause all and cancel" → halt\n- Use bulk_create when the request implies analysis or generating multiple issues, not a single specific issue\n- Treat \`pause\` (single-word, no runId) as the PM-agent pause, NOT halt. Halt is the explicit "halt the whole container" intent.\n\nRespond ONLY with the JSON object.`;
 
   try {
     const raw = await callClaude(prompt);
@@ -376,11 +399,18 @@ export function createSlackInterface(config: SlackInterfaceConfig): {
 
   const callClaude = config.callClaude ?? makeCallClaude();
   const callClaudeSonnet = config.callClaudeSonnet ?? makeCallClaudeSonnet();
-  const executorDeps: CommandExecutorDeps = {
+  const baseExecutorDeps: CommandExecutorDeps = {
     linearApiKey: config.linearApiKey,
     teamIds: config.teamIds,
     callClaudeSonnet,
+    runner: config.runner,
+    db: config.db,
   };
+  // Per-request deps thread the Slack user id through for audit attribution.
+  const withSlackUser = (slackUserId: string): CommandExecutorDeps => ({
+    ...baseExecutorDeps,
+    slackUserId,
+  });
 
   // Helper: verify Slack signature and return 401 on failure
   async function checkSignature(c: any): Promise<string | null> {
@@ -427,24 +457,46 @@ export function createSlackInterface(config: SlackInterfaceConfig): {
       return c.json({ response_type: r.responseType, text: r.text });
     }
 
-    // Default: /pm path (preserves existing behavior).
-    let cmd = parsePmCommand(commandText);
+    // Default: /pm path. When a response_url is present (the normal case in
+    // production), ack immediately with a :thinking_face: line and post the
+    // real reply asynchronously — this lets slow commands (bulk_create,
+    // anything that hits Linear/Sonnet) take their time without tripping
+    // Slack's 3s slash-command timeout. When no response_url is available
+    // (rare; only legacy/non-production callers), fall back to the
+    // synchronous path so the operator still sees a result.
+    if (responseUrl) {
+      void (async () => {
+        try {
+          let cmd = parsePmCommand(commandText);
+          if (cmd.type === "unknown" && commandText.length > 0) {
+            cmd = await interpretNaturalLanguage(commandText, callClaude);
+          }
+          const replyText = await executePmCommand(cmd, withSlackUser(userId));
+          await postToResponseUrl(responseUrl, replyText);
+        } catch (err) {
+          log.error({ err }, "async slash command processing failed");
+          try {
+            await postToResponseUrl(
+              responseUrl,
+              ":warning: Something went wrong while processing that command. Check the urateam logs.",
+            );
+          } catch {
+            // already logged above
+          }
+        }
+      })();
+      return c.json({
+        response_type: "ephemeral",
+        text: ":thinking_face: Working on it…",
+      });
+    }
 
-    // Fall back to NL interpretation if command is unknown
+    // No response_url — process synchronously.
+    let cmd = parsePmCommand(commandText);
     if (cmd.type === "unknown" && commandText.length > 0) {
       cmd = await interpretNaturalLanguage(commandText, callClaude);
     }
-
-    const replyText = await executePmCommand(cmd, executorDeps);
-
-    // If a response_url is provided, post back asynchronously
-    if (responseUrl) {
-      postToResponseUrl(responseUrl, replyText).catch((err) =>
-        log.error({ err }, "failed to post to Slack response_url"),
-      );
-    }
-
-    // Immediate acknowledgement (required within 3s)
+    const replyText = await executePmCommand(cmd, withSlackUser(userId));
     return c.json({ response_type: "ephemeral", text: replyText });
   });
 
@@ -494,9 +546,27 @@ export function createSlackInterface(config: SlackInterfaceConfig): {
 
         log.info({ messageText }, "received Slack message event");
 
-        // Process asynchronously — acknowledge immediately
-        processMessageAsync(messageText, event.channel ?? config.channelId, config.botToken, callClaude, executorDeps)
-          .catch((err) => log.error({ err }, "async message processing failed"));
+        // UX: react with :thinking_face: immediately so the user sees the bot
+        // picked up the mention. processMessageAsync swaps it for
+        // :white_check_mark: on success or :warning: on failure. The reaction
+        // is best-effort — failure logs but never blocks the actual work.
+        const channelForReact = event.channel ?? config.channelId;
+        const ts = typeof event.ts === "string" ? event.ts : null;
+        if (ts) {
+          void reactToSlackMessage(config.botToken, channelForReact, ts, "thinking_face");
+        }
+
+        // Process asynchronously — acknowledge immediately. Use the Slack
+        // event's user id for audit attribution (mentions in the PM channel).
+        const eventUserId = typeof event.user === "string" ? event.user : "";
+        processMessageAsync(
+          messageText,
+          channelForReact,
+          config.botToken,
+          callClaude,
+          withSlackUser(eventUserId),
+          ts,
+        ).catch((err) => log.error({ err }, "async message processing failed"));
       }
     }
 
@@ -528,8 +598,52 @@ async function processMessageAsync(
   botToken: string,
   callClaude: (prompt: string) => Promise<string>,
   deps: CommandExecutorDeps,
+  /** Optional message ts so reactions can be swapped after processing completes. */
+  ts: string | null = null,
 ): Promise<void> {
-  const cmd = await interpretNaturalLanguage(text, callClaude);
-  const replyText = await executePmCommand(cmd, deps);
-  await postSlackMessage(botToken, { channel, text: replyText });
+  let success = false;
+  try {
+    const cmd = await interpretNaturalLanguage(text, callClaude);
+    const replyText = await executePmCommand(cmd, deps);
+    await postSlackMessage(botToken, { channel, text: replyText });
+    success = true;
+  } finally {
+    if (ts) {
+      // Best-effort reaction swap. Removing :thinking_face: is non-fatal: if
+      // the remove fails (e.g. someone manually removed it), the add still
+      // runs — the user just sees one more reaction than expected.
+      void removeReaction(botToken, channel, ts, "thinking_face");
+      void reactToSlackMessage(
+        botToken,
+        channel,
+        ts,
+        success ? "white_check_mark" : "warning",
+      );
+    }
+  }
 }
+
+async function removeReaction(
+  botToken: string,
+  channel: string,
+  ts: string,
+  emoji: string,
+): Promise<void> {
+  try {
+    const resp = await fetch("https://slack.com/api/reactions.remove", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${botToken}`,
+      },
+      body: JSON.stringify({ channel, timestamp: ts, name: emoji }),
+    });
+    const data = (await resp.json()) as any;
+    if (!data?.ok && data?.error !== "no_reaction") {
+      log.info({ error: data?.error, channel, ts, emoji }, "Slack reactions.remove returned ok:false");
+    }
+  } catch (err) {
+    log.info({ err, channel, ts, emoji }, "Slack reactions.remove failed (non-fatal)");
+  }
+}
+

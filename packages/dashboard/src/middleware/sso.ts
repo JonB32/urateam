@@ -30,12 +30,17 @@ export function createSsoMiddleware(
   const basePath = (deps.basePath ?? "").replace(/\/+$/, "");
   const authPrefix = `${basePath}/auth/`;
   const webhookPrefix = `${basePath}/webhooks/`;
+  // /cli/* endpoints use a shared-secret token check inside the route handler
+  // rather than session-cookie auth; skipping SSO here lets `ura stop`/`ura
+  // halt` work without a logged-in user.
+  const cliPrefix = `${basePath}/cli/`;
   const loginPath = `${basePath}/auth/login`;
 
   return async (c, next) => {
     const path = c.req.path;
     if (path.startsWith(authPrefix)) return next();
     if (path.startsWith(webhookPrefix)) return next();
+    if (path.startsWith(cliPrefix)) return next();
 
     const cookie = getCookie(c, deps.sso.cookieName);
     if (!cookie) {
