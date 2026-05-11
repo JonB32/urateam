@@ -24,6 +24,7 @@ pnpm monorepo with 4 packages:
 - Agent prompts built via sanitizer -> templates -> assembler pipeline
 - DB: Drizzle ORM, unified schema in `db/schema.ts` with `crossTimestamp` custom type — single schema for SQLite (dev) and Postgres (prod). `_setSchemaDriver()` called by `createDb()`. Drizzle `gte()`/`lt()` operators work natively on both drivers.
 - File-based migrations in `db/migrations/{sqlite,postgres}/` — run automatically on startup via `runMigrationsPostgres()` / `runMigrationsSqlite()` called from `createDb()`
+- **Indexed columns (BEC-187):** `migrations/sqlite/013_missing_indexes.sql` and `migrations/postgres/014_missing_indexes.sql` add: `pipeline_runs.pr_url` (webhook PR-URL lookup), `pipeline_runs.branch` (webhook branch lookup), `pipeline_runs.started_at` + `pipeline_runs.completed_at` (PM tick/budget range scans at 60s cadence), `pm_approvals.issue_id` (batchFetchPendingApprovals).
 - Tests: Vitest, unit tests in `__tests__/`, integration tests in `__tests__/integration/`
 - Structured logging: pino via `createLogger()` — never use `console.log/error`
 - Shared helpers: `consumeAgentStream`, `parseJsonBlock`, `gitExecSafe`, `failPipeline`

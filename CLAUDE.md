@@ -79,7 +79,6 @@ A codebase-wide analysis (2026-05-11) surfaced a set of foundational improvement
 Known limitations being addressed (don't compound these):
 - `AnyDb = any` in `db/client.ts:23` cascades into ~50 `as any` casts. Don't add new `(this.db as AnyDb)` casts; wait for BEC-190.
 - `linearClient: any` in `pm/actions/*` and `pm/linear-helpers.ts`. Use `LinearClient` from `@linear/sdk` when adding new code there.
-- 5 missing indexes on `pipeline_runs` + `pm_approvals` — landing in BEC-187. Don't add new hot-path queries that scan these tables until BEC-187 ships.
 - Sequential `await issue.team` / `await issue.state` patterns in `pm/actions/*`. New code in these files should use `Promise.all` (or wait for BEC-189's `resolveIssueRelations` helper).
 
 ## Key Patterns
@@ -175,6 +174,12 @@ Known limitations being addressed (don't compound these):
 - **Migrations:** `MIGRATION_COLUMNS` array in `client.ts` generates driver-appropriate ALTER TABLE statements. `getCreateTablesDDL(driver)` generates CREATE TABLE with correct types per driver. File-based migrations in `db/migrations/` run automatically on startup via `runMigrationsPostgres()` / `runMigrationsSqlite()` called from `createDb()`.
 - Webhook dedup uses `webhookDedup` table with DB-backed storage (survives restarts). Falls back to in-memory when no DB provided.
 - **Postgres SQL helpers:** `sqlDateGroup(db, col)` formats timestamps as 'YYYY-MM-DD'. `sqlDaysAgoFilter(db, col, days)` filters recent rows. Both are driver-aware (no `isPostgres()` branching needed in application code).
+- **Indexed columns (BEC-187):** Hot-path columns have explicit indexes applied by `migrations/sqlite/013_missing_indexes.sql` and `migrations/postgres/014_missing_indexes.sql`:
+  - `pipeline_runs.pr_url` (`idx_pipeline_runs_pr_url`) — webhook handler looks up runs by PR URL on every `check_suite`, `pull_request`, and `pull_request_review` event.
+  - `pipeline_runs.branch` (`idx_pipeline_runs_branch`) — webhook handler looks up runs by branch name on push/CI events.
+  - `pipeline_runs.started_at` (`idx_pipeline_runs_started_at`) — PM tick range queries (60s cadence) in `pm/actions/db-queries.ts`, `pm/budget.ts`, `audit/reader.ts`, `cost/csv.ts`, and `runner.ts`.
+  - `pipeline_runs.completed_at` (`idx_pipeline_runs_completed_at`) — active-run detection and cost rollup window queries.
+  - `pm_approvals.issue_id` (`idx_pm_approvals_issue_id`) — `batchFetchPendingApprovals` in `approval-helpers.ts` queries by issue ID on every PM tick.
 
 ### Git Operations
 - `gitExec()` — throwing, with structured logging and timeout
