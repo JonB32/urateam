@@ -1,6 +1,7 @@
 import type { PromoteResult, ConflictCheckResult } from "../types.js";
 import type { PipelineConfig } from "../../types.js";
 import { resolveWorkflowStates } from "../linear-helpers.js";
+import { resolveIssueRelations } from "../../util/linear.js";
 import { resolvePipeline } from "../../pipeline/router.js";
 import { createLogger } from "../../logger.js";
 import type { AnyDb } from "../../db/client.js";
@@ -99,18 +100,27 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
 
   let promotedCount = 0;
 
-  for (const candidate of candidates) {
-    if (promotedCount >= slotsAvailable) break;
+  // Pre-fetch all candidate relations in parallel before entering the loop.
+  // Each candidate's team/labels are independent, so a single Promise.all
+  // reduces wall-clock time from O(N × RTT) to O(RTT) for the batch.
+  const allCandidateRelations = await Promise.all(
+    candidates.map((c: any) => resolveIssueRelations(c)),
+  );
 
-    // BEC-150: short-circuit BEFORE any per-candidate Linear API call (team,
-    // conflict-check). Only promote issues whose labels resolve to a configured
-    // pipeline; this keeps Todo from filling with items the agent would later
-    // refuse to start, and avoids wasted `await candidate.team` round-trips
-    // for filtered candidates on large Backlogs.
+  for (let i = 0; i < candidates.length; i++) {
+    if (promotedCount >= slotsAvailable) break;
+    const candidate = candidates[i]!;
+
+    // Both team and labels were fetched concurrently above via Promise.all.
+    const { team, labels: labelsConnection } = allCandidateRelations[i]!;
+    const teamId = team?.id;
+    const labelNodes = labelsConnection?.nodes ?? [];
+    const labelNames: string[] = labelNodes.map((l: any) => l.name);
+
+    // BEC-150: filter candidates whose labels don't resolve to a configured
+    // pipeline, keeping Todo from filling with items the agent would later
+    // refuse to start.
     if (input.requirePipelineLabel) {
-      const labelsConnection = await candidate.labels?.();
-      const labelNodes = labelsConnection?.nodes ?? [];
-      const labelNames: string[] = labelNodes.map((l: any) => l.name);
       const resolved = resolvePipeline(labelNames, input.pipelineConfigs!);
       if (!resolved) {
         log.info(
@@ -156,9 +166,6 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
         continue;
       }
     }
-
-    const team = await candidate.team;
-    const teamId = team?.id;
     const todoStateId = teamId ? todoStates.get(teamId) : undefined;
 
     const conflict = await checkConflict(candidate.description ?? "");
