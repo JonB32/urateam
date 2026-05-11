@@ -607,7 +607,78 @@ describe("PR Automerge — GitHub webhook event handling", () => {
   });
 
   // ---------------------------------------------------------------------------
-  // 10. Branch protection prevents merge (405)
+  // 10. status event with agent/ branch → triggers automerge (BEC-200)
+  // ---------------------------------------------------------------------------
+  it("triggers automerge on status event with agent/ branch via branch lookup", async () => {
+    const prBranch = "agent/BEC-200-status-test";
+    const prUrl = "https://github.com/test/repo/pull/99";
+
+    // Seed a completed pipeline run for this branch
+    await db.insert(pipelineRuns).values({
+      id: "run-status-bec200",
+      issueId: "BEC-200-ST",
+      issueTitle: "Status Event Test",
+      pipelineKey: "auto-implement",
+      repoUrl: "https://github.com/test/repo.git",
+      branch: prBranch,
+      status: "completed",
+      prUrl,
+      startedAt: new Date(),
+    });
+
+    // Mock PR list lookup by branch (used when prNumber is 0)
+    mockPullsList.mockResolvedValue({
+      data: [
+        {
+          number: 99,
+          html_url: prUrl,
+          head: { ref: prBranch, sha: "deadbeef" },
+        },
+      ],
+    });
+
+    const pipelineConfig = makeAutoMergePipelineConfig();
+    const app = new Hono();
+    app.route(
+      "/",
+      createGitHubWebhookHandler({
+        webhookSecret: WEBHOOK_SECRET,
+        runner: {} as any,
+        pipelineConfigs: { "auto-implement": pipelineConfig },
+        repoConfigs: {},
+        db: db as any,
+        github: GITHUB_CONFIG,
+      }),
+    );
+
+    // GitHub status event — branches array contains the agent branch
+    const statusPayload = {
+      state: "success",
+      branches: [{ name: prBranch }],
+      repository: { name: "repo", owner: { login: "test" } },
+    };
+
+    const { status } = await postGitHubWebhook(app, "status", statusPayload);
+
+    expect(status).toBe(200);
+
+    // Automerge flow fired: merge API was called
+    expect(mockMergePR).toHaveBeenCalledWith(
+      expect.objectContaining({
+        owner: "test",
+        repo: "repo",
+        pull_number: 99,
+        merge_method: "squash",
+      }),
+    );
+
+    // DB row updated
+    const rows = await db.select().from(pipelineRuns).where();
+    expect(rows[0].autoMerged).toBeTruthy();
+  });
+
+  // ---------------------------------------------------------------------------
+  // 11. Branch protection prevents merge (405)
   // ---------------------------------------------------------------------------
   it("handles branch protection preventing merge gracefully", async () => {
     mockMergePR.mockRejectedValue(Object.assign(new Error("Required status check failed"), { status: 405 }));

@@ -165,4 +165,91 @@ describe("PmScheduler.tick", () => {
       expect.any(Number),
     );
   });
+
+  // ─── BEC-200: paused-tick behavior ────────────────────────────────────────
+
+  it("paused-tick: skips promote (and other paused-guarded actions) when PM_AGENT_PAUSED=true", async () => {
+    const prev = process.env.PM_AGENT_PAUSED;
+    process.env.PM_AGENT_PAUSED = "true";
+
+    try {
+      const scheduler = makeScheduler();
+      await scheduler.tick();
+
+      // Promote must be suppressed when paused
+      expect(mockActions.promoteReadyIssues).not.toHaveBeenCalled();
+
+      // postDigest must receive tick.paused = true
+      expect(mockActions.postDigest).toHaveBeenCalledWith(
+        expect.objectContaining({ paused: true }),
+        expect.any(Number),
+      );
+    } finally {
+      // Restore env regardless of test outcome
+      if (prev === undefined) {
+        delete process.env.PM_AGENT_PAUSED;
+      } else {
+        process.env.PM_AGENT_PAUSED = prev;
+      }
+    }
+  });
+
+  it("paused-tick: triage and resolveApprovals still run when paused (only promote/start-todo/deprioritize/cancel are skipped)", async () => {
+    const prev = process.env.PM_AGENT_PAUSED;
+    process.env.PM_AGENT_PAUSED = "true";
+
+    try {
+      const scheduler = makeScheduler();
+      await scheduler.tick();
+
+      // Non-paused-guarded actions still run
+      expect(mockActions.triageNewIssues).toHaveBeenCalled();
+      expect(mockActions.resolveApprovals).toHaveBeenCalled();
+    } finally {
+      if (prev === undefined) {
+        delete process.env.PM_AGENT_PAUSED;
+      } else {
+        process.env.PM_AGENT_PAUSED = prev;
+      }
+    }
+  });
+
+  // ─── BEC-200: budgetEvaluate failure catch ─────────────────────────────────
+
+  it("budgetEvaluate failure: zero-state evaluation substituted on exception, tick continues", async () => {
+    mockActions.evaluateBudget.mockRejectedValue(new Error("budget service crashed"));
+
+    const scheduler = makeScheduler();
+    await scheduler.tick();
+
+    // Tick must complete — errors array includes the budget error
+    expect(mockActions.postDigest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errors: expect.arrayContaining([expect.stringContaining("budget")]),
+      }),
+      expect.any(Number),
+    );
+
+    // Downstream actions (triage, promote) still ran despite budget failure
+    // (zero-state evaluation: promoteBlocked=false, so promote is not blocked)
+    expect(mockActions.triageNewIssues).toHaveBeenCalled();
+    expect(mockActions.promoteReadyIssues).toHaveBeenCalled();
+  });
+
+  it("budgetEvaluate failure: budgetGuard falls back to safe zero-state (promoteBlocked=false)", async () => {
+    mockActions.evaluateBudget.mockRejectedValue(new Error("budget DB timeout"));
+
+    const scheduler = makeScheduler();
+    await scheduler.tick();
+
+    // postDigest receives a budgetGuard with promoteBlocked=false (zero-state fallback)
+    expect(mockActions.postDigest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        budgetGuard: expect.objectContaining({
+          promoteBlocked: false,
+        }),
+      }),
+      expect.any(Number),
+    );
+  });
 });
