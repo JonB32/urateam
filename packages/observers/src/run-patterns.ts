@@ -20,8 +20,14 @@ export interface LoopingFinding {
   totalTurns: number;
 }
 
-/** Minimum turn count that triggers a looping-deep-review alert. */
-export const LOOP_TURN_THRESHOLD = 50;
+/**
+ * Minimum turn count that triggers a looping-deep-review alert.
+ *
+ * BEC-213: reduced from 50 to 15 so that the 33-turn incident run
+ * (7HaVmAKKn4gluPgv9T9pm) — and any future run that exceeds the
+ * MAX_REVIEW_TURNS pipeline cap — is immediately flagged by the observer.
+ */
+export const LOOP_TURN_THRESHOLD = 15;
 
 /**
  * Returns a finding for any run with > LOOP_TURN_THRESHOLD turns, EXCEPT

@@ -91,7 +91,8 @@ describe("findLoopingDeepReviews", () => {
         id: "run-low-turns",
         status: "failed",
         pr_url: null,
-        total_turns: 20,
+        // LOOP_TURN_THRESHOLD is 15 (lowered from 50 in BEC-213); use 10 to stay below it.
+        total_turns: 10,
       },
     ];
 

@@ -23,6 +23,13 @@ export {
   type LockAdapter,
 } from "./distributed-lock.js";
 export { isTransientError } from "./error-classifier.js";
+export {
+  isConverged,
+  fingerprintFinding,
+  buildMisalignmentReport,
+  MAX_REVIEW_TURNS,
+  type CycleRecord,
+} from "./convergence-checker.js";
 export { generatePRDescription, type PRDescriptionOptions } from "./pr-description.js";
 export {
   checkAutoMergeEligibility,

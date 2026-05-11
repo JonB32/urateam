@@ -31,6 +31,12 @@ import type { ReviewModelRun } from "../executor/review/review-provider.js";
 import { extractHandoff } from "../executor/extract-handoff.js";
 import { DEFAULT_AGENT_CLAUDE_MD } from "../executor/agent-config.js";
 import { generatePRDescription } from "./pr-description.js";
+import {
+  isConverged,
+  buildMisalignmentReport,
+  MAX_REVIEW_TURNS,
+  type CycleRecord,
+} from "./convergence-checker.js";
 import { maybePostChangeSummary } from "./pr-change-summary.js";
 import { access, writeFile, appendFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -1283,6 +1289,15 @@ export class PipelineRunner {
         }
       }
 
+      // BEC-213: shared convergence guard across the review-fix loop AND the
+      // deep-review loop.  Incremented after each review+implement cycle in
+      // either loop.  Terminates the loops when (a) findings match the previous
+      // cycle (content-based, not count-only), (b) findings are empty, or
+      // (c) the counter reaches maxReviewTurns.  Diagnostic report is logged on (c).
+      const maxReviewTurns = config.maxReviewTurns ?? MAX_REVIEW_TURNS;
+      let reviewTurns = 0;
+      const reviewCycles: CycleRecord[] = [];
+
       // Review-fix loop: if the last configured stage is "review" and it found
       // blocking issues, re-run the pipeline's own stages (implement, test, review)
       // to fix them. WARNING: This compounds with RALPH loops — worst case is
@@ -1298,6 +1313,11 @@ export class PipelineRunner {
         const fixStages = config.stages.filter(
           (s) => s === "implement" || s === "test" || s === "review",
         ) as StageType[];
+
+        // Seed previous findings with the current blocking set so the first
+        // cycle can detect stagnation if the implement stage makes no progress.
+        let rfPreviousBlockingFindings: ReviewFinding[] =
+          handoff?.context?.reviewFindings?.filter((f) => f.severity === "blocking") ?? [];
 
         for (let rfIteration = 1; rfIteration <= reviewFixIterations; rfIteration++) {
           const blockingCount = handoff!.context.reviewFindings!.filter(
@@ -1438,6 +1458,34 @@ export class PipelineRunner {
             break;
           }
 
+          // BEC-213: record this cycle for diagnostic logging and increment the
+          // shared reviewTurns counter.
+          const rfCurrentBlockingFindings =
+            handoff?.context?.reviewFindings?.filter((f) => f.severity === "blocking") ?? [];
+          reviewCycles.push({ pass: reviewTurns + 1, findings: rfCurrentBlockingFindings });
+          reviewTurns++;
+
+          // Convergence check: if blocking findings are identical to the previous
+          // cycle (same content, not just same count) the implement stage is not
+          // making progress — terminate early to avoid burning tokens on a stalled loop.
+          if (isConverged(rfCurrentBlockingFindings, rfPreviousBlockingFindings)) {
+            runLog.warn(
+              { rfIteration, blockingFindings: rfCurrentBlockingFindings.length, reviewTurns },
+              "review-fix loop: findings unchanged from previous cycle — converged (no progress), stopping early",
+            );
+            break;
+          }
+          rfPreviousBlockingFindings = rfCurrentBlockingFindings;
+
+          // Hard cap on total review+implement cycles (shared with deep-review loop).
+          if (reviewTurns >= maxReviewTurns) {
+            runLog.warn(
+              { rfIteration, reviewTurns, maxReviewTurns, report: buildMisalignmentReport(reviewCycles) },
+              "review-fix loop: maxReviewTurns reached — terminating loop, PR will be draft",
+            );
+            break;
+          }
+
           if (rfIteration === reviewFixIterations) {
             runLog.warn(
               { rfIteration, blockingFindings: handoff?.context?.reviewFindings?.filter((f) => f.severity === "blocking").length },
@@ -1465,11 +1513,25 @@ export class PipelineRunner {
         // Cap deep review iterations against maxReviewPasses
         const passLimit = Math.min(deepReviewPasses, maxDeepReviewPasses);
 
-        let previousFindingsCount = Infinity;
+        // BEC-213: track previous findings by content (not just count) so we can
+        // detect true convergence even when the same number of different findings
+        // appear across cycles.
+        let previousDrFindings: ReviewFinding[] = [];
 
         for (let drPass = 1; drPass <= passLimit; drPass++) {
           if (!handoff) {
             runLog.info({ drPass }, "deep review: no handoff available, skipping");
+            break;
+          }
+
+          // Hard cap guard: if the shared reviewTurns counter (accumulated across
+          // the review-fix loop and this loop) has already hit maxReviewTurns,
+          // stop before running another expensive review+implement cycle.
+          if (reviewTurns >= maxReviewTurns) {
+            runLog.warn(
+              { drPass, reviewTurns, maxReviewTurns, report: buildMisalignmentReport(reviewCycles) },
+              "deep review: maxReviewTurns reached before starting pass — terminating loop",
+            );
             break;
           }
 
@@ -1516,23 +1578,31 @@ export class PipelineRunner {
 
           const findingsCount = deepResult.findings.length;
           runLog.info(
-            { drPass, findings: findingsCount, previousFindings: previousFindingsCount },
+            { drPass, findings: findingsCount, previousFindings: previousDrFindings.length },
             "deep review: sub-agents complete",
           );
 
-          // Convergence: stop when no findings or count didn't change
+          // Convergence (a): no findings → nothing left to fix.
           if (findingsCount === 0) {
             runLog.info({ drPass }, "deep review: no findings — converged");
             break;
           }
-          if (findingsCount >= previousFindingsCount) {
-            runLog.info(
-              { drPass, findingsCount, previousFindingsCount },
-              "deep review: findings count did not decrease — stopping to prevent loop",
+
+          // Convergence (b): BEC-213 — content-based check replaces the old
+          // count-only guard.  Two cycles with the same number of DIFFERENT
+          // findings would pass the old `findingsCount >= previousFindingsCount`
+          // test and terminate early even though the loop hadn't converged.
+          // isConverged() compares fingerprints (file+line+category+description).
+          if (isConverged(deepResult.findings, previousDrFindings)) {
+            runLog.warn(
+              { drPass, findingsCount, reviewTurns },
+              "deep review: findings identical to previous cycle — converged (no progress), stopping",
             );
             break;
           }
-          previousFindingsCount = findingsCount;
+          // Update for next iteration's convergence check (happens at the BOTTOM
+          // of the loop, after implement+review, before the next review-providers call).
+          previousDrFindings = deepResult.findings;
 
           // Re-run implement stage with deep review context. The agentic
           // review provider already converts DeepReviewFinding -> ReviewFinding
@@ -1656,6 +1726,22 @@ export class PipelineRunner {
                 reviewFindings: [...existingFindings, ...deepResult.findings],
               },
             };
+          }
+
+          // BEC-213: record this cycle and increment the shared counter.
+          // Convergence (c) — hard cap: if we've now exhausted maxReviewTurns,
+          // log a diagnostic report and terminate.  The check at the TOP of the
+          // next loop iteration provides an additional guard, but we also check
+          // here (bottom) so the log fires promptly after the last cycle.
+          reviewCycles.push({ pass: reviewTurns + 1, findings: deepResult.findings });
+          reviewTurns++;
+
+          if (reviewTurns >= maxReviewTurns) {
+            runLog.warn(
+              { drPass, reviewTurns, maxReviewTurns, report: buildMisalignmentReport(reviewCycles) },
+              "deep review: maxReviewTurns reached — terminating loop, PR will be draft if findings remain",
+            );
+            break;
           }
         }
       }

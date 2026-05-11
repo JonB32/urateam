@@ -49,6 +49,13 @@ export const PipelineConfigSchema = z.object({
   deepReviewPasses: z.number().int().min(0).max(5).optional(),
   /** Hard cap on deep review passes. Prevents infinite loops. Default: 3. */
   maxDeepReviewPasses: z.number().int().min(1).max(10).optional(),
+  /**
+   * Maximum total review+implement cycles across both the review-fix loop and
+   * deep-review loop.  When this cap is reached the loops terminate and a
+   * detailed misalignment report is logged to aid diagnosis.  Default: 15.
+   * Must be significantly lower than 33 (BEC-213 incident value).
+   */
+  maxReviewTurns: z.number().int().min(1).max(50).optional(),
   /** Auto-merge PRs when changes are trivial. Default: false (opt-in). */
   autoMerge: z.boolean().optional(),
   /** Max diff lines for auto-merge eligibility. Default: 200. */
