@@ -69,6 +69,8 @@ describe("audit_events immutability", () => {
       "packages/core/src/pm/actions/recover-stuck.ts",
       "packages/core/src/pipeline/review-providers-runner.ts",
       "packages/core/src/release-manager/scheduler.ts",
+      "packages/core/src/release-manager/release-tick.ts",
+      "packages/core/src/release-manager/release-helpers.ts",
       "packages/core/src/release-manager/slack-handler.ts",
       "packages/core/src/repo/agent-branch-sweep-runner.ts",
       "packages/core/src/qa/github.ts",

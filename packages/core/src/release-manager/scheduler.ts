@@ -9,8 +9,9 @@
  *   - scheduler.ts      : cron factory + public surface (this file)
  *   - release-tick.ts   : tick() orchestration — QA trigger logic, approval gate,
  *                         version bump, Git tag, cron rescheduling state
- *   - release-helpers.ts: persistence helpers — Slack dedup, persistDecision,
- *                         consumeApprovalRow
+ *   - release-helpers.ts: persistence + QA helpers — Slack dedup, persistDecision,
+ *                         consumeApprovalRow, getMaxAttemptCountForReason,
+ *                         tryFileQaGapIssue, MAX_QA_RETRY_ATTEMPTS
  */
 import type { Octokit } from "@octokit/rest";
 import type { LinearClient } from "@linear/sdk";

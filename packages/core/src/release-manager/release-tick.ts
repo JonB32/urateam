@@ -15,11 +15,9 @@
  *   - tick              — execute a single release-manager decision cycle
  */
 import { randomUUID } from "node:crypto";
-import { and, eq, max } from "drizzle-orm";
 import type { Octokit } from "@octokit/rest";
 import type { LinearClient } from "@linear/sdk";
 import type { AnyDb } from "../db/client.js";
-import { releaseDecisions } from "../db/schema.js";
 import { createLogger } from "../logger.js";
 import { logAuditEventUnchecked } from "../audit/writer.js";
 import {
@@ -35,15 +33,27 @@ import { bumpFromConfigAndCommits } from "./versioning.js";
 import { createTagAndRelease, parseRepoFromUrl } from "./github.js";
 import type { ReleaseManagerConfig } from "./types.js";
 import { triggerWorkflow, pollWorkflowRun, workflowFileExists } from "../qa/github.js";
-import { fileGapIssue, markGapResolved } from "../qa/gap.js";
+import { markGapResolved } from "../qa/gap.js";
 import {
   maybePostSlack,
   persistDecision,
   consumeApprovalRow,
+  getMaxAttemptCountForReason,
+  tryFileQaGapIssue,
+  MAX_QA_RETRY_ATTEMPTS,
 } from "./release-helpers.js";
 import type { SlackPoster, SlackDedupState } from "./release-helpers.js";
 
 const log = createLogger({ component: "ReleaseManager:scheduler" });
+
+/**
+ * Maximum number of completed QA run IDs to track in the dedup set before
+ * evicting stale entries. Once this threshold is reached the set is cleared;
+ * a cleared entry may produce a single duplicate `qa.run_completed` audit
+ * event, which is acceptable (far better than unbounded memory growth in
+ * long-running deployments).
+ */
+const MAX_AUDITED_RUN_IDS = 10_000;
 
 /**
  * Mutable per-instance state that persists across tick invocations.
@@ -64,6 +74,10 @@ export interface TickMutableState {
    * Set of QA workflow run IDs whose completion has already been audited.
    * Prevents duplicate `qa.run_completed` audit events when the same run ID
    * appears across multiple ticks.
+   *
+   * Bounded to `MAX_AUDITED_RUN_IDS` entries — evicted (cleared) when the
+   * threshold is exceeded to prevent unbounded memory growth in long-running
+   * deployments.
    */
   auditedCompletedRunIds: Set<number>;
   /**
@@ -221,22 +235,26 @@ export async function tick(ctx: TickContext): Promise<void> {
     if (state.qaRun && state.qaRun.runSha === state.headSha) {
       try {
         const polled = await pollWorkflowRun({ octokit, owner, repo, runId: state.qaRun.runId });
-        if (polled.kind === "completed" && !mutableState.auditedCompletedRunIds.has(state.qaRun.runId)) {
+        if (polled.kind === "completed") {
           runConclusion = polled.conclusion;
-          mutableState.auditedCompletedRunIds.add(state.qaRun.runId);
-          // Emit qa.run_completed audit on first observation of completion.
-          void logAuditEventUnchecked(
-            db,
-            qaRunCompletedEvent({
-              repoUrl, branch,
-              runId: state.qaRun.runId,
-              conclusion: polled.conclusion as any,
-              durationMs: polled.durationMs,
-            }),
-          );
-        } else if (polled.kind === "completed") {
-          runConclusion = polled.conclusion;
-          // Already audited this runId on a prior tick; skip emit.
+          if (!mutableState.auditedCompletedRunIds.has(state.qaRun.runId)) {
+            // Evict stale entries when the set has grown too large.
+            if (mutableState.auditedCompletedRunIds.size >= MAX_AUDITED_RUN_IDS) {
+              mutableState.auditedCompletedRunIds.clear();
+            }
+            mutableState.auditedCompletedRunIds.add(state.qaRun.runId);
+            // Emit qa.run_completed audit on first observation of completion.
+            void logAuditEventUnchecked(
+              db,
+              qaRunCompletedEvent({
+                repoUrl, branch,
+                runId: state.qaRun.runId,
+                conclusion: polled.conclusion as any,
+                durationMs: polled.durationMs,
+              }),
+            );
+          }
+          // When already in the set: runConclusion is still set above; audit skipped.
         }
       } catch (err) {
         log.warn({ err }, "qa pollWorkflowRun failed — treating as still running");
@@ -263,20 +281,12 @@ export async function tick(ctx: TickContext): Promise<void> {
     let finalReason = result.reason;
 
     if (result.qaActionNeeded?.reason === "qa_needs_trigger") {
-      // Look up the highest attempt count across all qa_needs_trigger rows for this branch.
-      // Using MAX instead of ORDER BY + LIMIT 1 to be stable when multiple rows share the same decidedAt.
-      const prevAttempts = await (db as any)
-        .select({ maxAttempts: max(releaseDecisions.attemptCount) })
-        .from(releaseDecisions)
-        .where(
-          and(
-            eq(releaseDecisions.repoUrl, repoUrl),
-            eq(releaseDecisions.branch, branch),
-            eq(releaseDecisions.reason, "qa_needs_trigger"),
-            eq(releaseDecisions.qaRunSha, state.headSha),
-          ),
-        );
-      attemptCount = ((prevAttempts?.[0]?.maxAttempts as number) ?? 0);
+      // Look up the highest attempt count across all qa_needs_trigger rows for this
+      // (branch, sha) pair. Using MAX instead of ORDER BY + LIMIT 1 to be stable
+      // when multiple rows share the same decidedAt timestamp.
+      attemptCount = await getMaxAttemptCountForReason(
+        db, repoUrl, branch, "qa_needs_trigger", state.headSha,
+      );
 
       const { owner, repo } = parseRepoFromUrl(repoUrl);
       const dispatch = await triggerWorkflow({
@@ -293,34 +303,13 @@ export async function tick(ctx: TickContext): Promise<void> {
         // Workflow disappeared between state cache and dispatch — drop into gap-issue path.
         finalReason = "qa_no_workflow";
         if (linear) {
-          const gapResult = await fileGapIssue({
-            db,
-            linear,
-            repoUrl,
-            branch,
+          const gapResult = await tryFileQaGapIssue({
+            db, linear, repoUrl, branch,
             workflowPath: config.triggers.qaCheck!.workflow,
             linearTeamId: config.triggers.qaCheck!.linearTeamId,
           });
-          if (gapResult.kind === "linear_error") {
-            const prevGapAttempts = await (db as any)
-              .select({ attemptCount: max(releaseDecisions.attemptCount) })
-              .from(releaseDecisions)
-              .where(
-                and(
-                  eq(releaseDecisions.repoUrl, repoUrl),
-                  eq(releaseDecisions.branch, branch),
-                  eq(releaseDecisions.reason, "qa_no_workflow"),
-                ),
-              );
-            const gapAttemptCount = ((prevGapAttempts?.[0]?.attemptCount as number) ?? 0) + 1;
-            if (gapAttemptCount >= 3) {
-              finalReason = "qa_gap_file_error";
-              attemptCount = gapAttemptCount;
-            } else {
-              attemptCount = gapAttemptCount;
-            }
-            log.error({ err: gapResult.message, repoUrl, branch }, "fileGapIssue failed; will retry");
-          }
+          finalReason = gapResult.finalReason;
+          attemptCount = gapResult.attemptCount;
         } else {
           log.error({ repoUrl, branch }, "qaCheck requires Linear client but none configured — skipping gap-issue file");
         }
@@ -338,40 +327,19 @@ export async function tick(ctx: TickContext): Promise<void> {
         // Tag with qaRunSha so the per-SHA retry counter query can find these rows.
         qaRunSha = state.headSha;
         attemptCount += 1;
-        if (attemptCount >= 3) {
+        if (attemptCount >= MAX_QA_RETRY_ATTEMPTS) {
           finalReason = "qa_dispatch_error";
         }
       }
     } else if (result.qaActionNeeded?.reason === "qa_no_workflow") {
       if (linear) {
-        const gapResult = await fileGapIssue({
-          db,
-          linear,
-          repoUrl,
-          branch,
+        const gapResult = await tryFileQaGapIssue({
+          db, linear, repoUrl, branch,
           workflowPath: config.triggers.qaCheck!.workflow,
           linearTeamId: config.triggers.qaCheck!.linearTeamId,
         });
-        if (gapResult.kind === "linear_error") {
-          const prevGapAttempts = await (db as any)
-            .select({ attemptCount: max(releaseDecisions.attemptCount) })
-            .from(releaseDecisions)
-            .where(
-              and(
-                eq(releaseDecisions.repoUrl, repoUrl),
-                eq(releaseDecisions.branch, branch),
-                eq(releaseDecisions.reason, "qa_no_workflow"),
-              ),
-            );
-          const gapAttemptCount = ((prevGapAttempts?.[0]?.attemptCount as number) ?? 0) + 1;
-          if (gapAttemptCount >= 3) {
-            finalReason = "qa_gap_file_error";
-            attemptCount = gapAttemptCount;
-          } else {
-            attemptCount = gapAttemptCount;
-          }
-          log.error({ err: gapResult.message, repoUrl, branch }, "fileGapIssue failed; will retry");
-        }
+        finalReason = gapResult.finalReason;
+        attemptCount = gapResult.attemptCount;
       } else {
         log.error({ repoUrl, branch }, "qaCheck requires Linear client but none configured — skipping gap-issue file");
       }
