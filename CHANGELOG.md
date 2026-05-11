@@ -17,9 +17,23 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
-### Fixed (OSS+)
-- **BEC-185** — `gh-linear-sync`: multi-label `labelFilters` now use OR semantics. Previously, all labels were joined into a single comma-separated string and passed to the GitHub REST API, which treats this as AND (intersection) — so `["bug", "enhancement"]` returned only issues carrying *both* labels (zero in practice). Fix: when `labelFilters` has more than one entry, `runGhLinearSync` calls `listIssues` once per label and unions the results, deduplicating by issue number. Single-label and empty filters are unchanged.
+## [0.1.45] — 2026-05-11
 
+Bumps:
+- `@urateam/core`: 0.1.30 → 0.1.31
+- `@urateam/cli`: 0.1.32 → 0.1.33
+- `@urateam/dashboard`: 0.1.30 → 0.1.31
+- `create-urateam`: 0.1.33 → 0.1.34
+
+### Fixed (OSS+)
+- **OpenRouter fanout: defend against missing `choices` in 200 OK responses** ([#249](https://github.com/JonB32/urateam/pull/249)) — free-tier and community providers (observed: `nvidia/nemotron-3-super-120b-a12b:free`) sometimes return 200 OK with an error body and no `choices` field. The client's optional chaining only protected `[0]?.message` but not `choices` itself, so accessing `json.choices[0]` threw `TypeError: Cannot read properties of undefined (reading '0')`. The fanout caught it but surfaced the opaque JS error on the per-model PR comment. Now defensively validates `choices` is a non-empty array and throws a meaningful error including the provider's `error.message` when present.
+- **BEC-185** ([#247](https://github.com/JonB32/urateam/pull/247)) — `gh-linear-sync`: multi-label `labelFilters` now use OR semantics. Previously, all labels were joined into a single comma-separated string and passed to the GitHub REST API, which treats this as AND (intersection) — so `["bug", "enhancement"]` returned only issues carrying *both* labels (zero in practice). Fix: when `labelFilters` has more than one entry, `runGhLinearSync` calls `listIssues` once per label and unions the results, deduplicating by issue number. Single-label and empty filters are unchanged.
+
+### Docs (OSS+)
+- **`deploy/CLAUDE_AUTH.md`** ([#248](https://github.com/JonB32/urateam/pull/248)) — new guide covering the three Claude auth paths (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` via `claude setup-token`, and the local CLI session) with a recommendation matrix. Surfaces the long-lived programmatic OAuth token flow that we weren't previously documenting.
+- **CLAUDE.md additions** — new Claude Authentication subsection + new "Codebase Optimization Pass — In Flight" section enumerating BEC-187..207 and listing known limitations contributors should not compound.
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
 ## [0.1.44] — 2026-05-11
 
 Bumps:
