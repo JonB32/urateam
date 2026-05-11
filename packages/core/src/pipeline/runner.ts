@@ -9,7 +9,6 @@ import type {
   DailyTokenSummary,
   PipelineRunStatus,
   ReviewFinding,
-  ReviewFeedbackContext,
 } from "../types.js";
 import type { Db, AnyDb } from "../db/client.js";
 import { pipelineRuns, stageRuns, reviewModelRuns } from "../db/schema.js";
@@ -55,7 +54,6 @@ import {
   getChangedFiles,
   checkDuplicateBranch,
   branchName,
-  createWorktreeFromRemote,
   pruneWorktreesInRepoDirs,
 } from "../repo/git.js";
 import {
@@ -63,7 +61,6 @@ import {
   createGitHubClient,
   createPR,
   prHasCommentStartingWith,
-  rerequestPRReview,
   type GitHubConfig,
 } from "../repo/github.js";
 import {
@@ -100,41 +97,18 @@ import { evaluatePolicyGates } from "../policy/evaluate.js";
 import { buildReviewerRequest, verifyApprovalsReceived } from "../policy/index.js";
 import { logAuditEvent, policyReviewersRequestedEvent, reviewFanoutFallbackUsedEvent } from "../audit/index.js";
 import { matchesAnyPattern } from "../util/glob.js";
+import {
+  startFeedbackPipeline,
+  type FeedbackStartContext,
+} from "./feedback-pipeline.js";
+
+// Re-export from extracted module so existing callers (including tests) still
+// find buildReviewFeedbackContext at pipeline/runner.js without changing their
+// import paths.
+export { buildReviewFeedbackContext } from "./feedback-pipeline.js";
 
 // Module-level logger (no runId yet — used for pre-run messages)
 const log = createLogger({ component: "PipelineRunner" });
-
-/**
- * Map webhook-shaped `ReviewFeedbackComment[]` (the wire format we receive
- * from GitHub) into the `ReviewFeedbackContext` that the implement template
- * expects when handling PR review feedback.
- *
- * Routes the implement stage into the dedicated review-feedback prompt path
- * (templates.ts:233-253) — "address review comments on existing branch, push
- * to same branch, do NOT create a new PR" — instead of falling through to
- * the standard "create branch and implement issue from scratch" prompt.
- *
- * `createdAt` is not captured by the GitHub webhook handler today, so the
- * mapped comments use an empty string. The template only renders this for
- * display; an empty value is harmless.
- */
-export function buildReviewFeedbackContext(
-  prUrl: string,
-  prBranch: string,
-  comments: ReviewFeedbackComment[],
-): ReviewFeedbackContext {
-  return {
-    prUrl,
-    prBranch,
-    comments: comments.map((c) => ({
-      author: c.author,
-      body: c.body,
-      file: c.filePath,
-      line: c.lineNumber,
-      createdAt: "",
-    })),
-  };
-}
 
 export interface PipelineRunnerConfig {
   db: Db;
@@ -514,11 +488,9 @@ export class PipelineRunner {
   /**
    * Start a review-feedback pipeline run triggered by a PR review comment.
    *
-   * Unlike start(), this method:
-   *  - Does NOT create a new branch — it checks out the existing PR branch.
-   *  - Skips triage and reproduce stages, entering directly at implement.
-   *  - Does NOT create a new PR — it pushes to the same branch.
-   *  - Optionally re-requests review after pushing.
+   * Thin wrapper — all orchestration logic (rate-limiting, DB insert, queue
+   * management) and execution are delegated to feedback-pipeline.ts.
+   * See startFeedbackPipeline() for full documentation.
    */
   async startFeedback(params: {
     issue: LinearIssue;
@@ -533,104 +505,25 @@ export class PipelineRunner {
     feedbackComments: ReviewFeedbackComment[];
     rerequestReview?: boolean;
   }): Promise<void> {
-    const {
-      issue,
-      pipelineKey,
-      pipelineConfig,
-      repoConfig,
-      sanitizedIssue,
-      branch,
-      prUrl,
-      prNumber,
-      parentRunId,
-      feedbackComments,
-      rerequestReview,
-    } = params;
-
-    log.info(
-      { issueId: issue.identifier, pipeline: pipelineKey, prUrl },
-      "startFeedback() called",
-    );
-
-    // Rate-limit: one feedback run per PR at a time
-    if (this.activeFeedbackRuns.has(prUrl)) {
-      log.info({ prUrl }, "feedback run already active for this PR — skipping");
-      return;
-    }
-
-    const runId = nanoid();
-    const db = this.db as AnyDb;
-    const runLog = createLogger({
-      component: "PipelineRunner",
-      runId,
-      issueId: issue.identifier,
-    });
-
-    // Copy linearTeamId from the parent run (if any) for spend-cap accounting.
-    let linearTeamId: string | null = null;
-    if (parentRunId) {
-      const parentRows = await db
-        .select({ linearTeamId: pipelineRuns.linearTeamId })
-        .from(pipelineRuns)
-        .where(eq(pipelineRuns.id, parentRunId))
-        .limit(1);
-      linearTeamId = parentRows[0]?.linearTeamId ?? null;
-    }
-
-    runLog.info({ branch, prUrl }, "inserting feedback run into DB");
-    await db.insert(pipelineRuns).values({
-      id: runId,
-      issueId: issue.identifier,
-      issueTitle: issue.title,
-      pipelineKey,
-      repoUrl: repoConfig.url,
-      branch,
-      status: "queued",
-      prUrl,
-      runType: "review-feedback",
-      parentRunId: parentRunId ?? null,
-      feedbackContext: JSON.stringify(feedbackComments),
-      linearTeamId,
-    });
-
-    const run = this.buildPipelineRun(runId, issue, pipelineKey, repoConfig, branch);
-    run.prUrl = prUrl;
-    run.runType = "review-feedback";
-    run.feedbackContext = JSON.stringify(feedbackComments);
-
-    // Register in activeFeedbackRuns BEFORE enqueue so rate-limit check works
-    this.activeFeedbackRuns.set(prUrl, runId);
-
-    this.queue
-      .enqueue(async () => {
-        if (!this.activeFeedbackRuns.has(prUrl)) return; // was cancelled
-
-        runLog.info("executing feedback pipeline");
-        try {
-          await runWithLogContext({ runId, issueId: issue.identifier }, () =>
-            this.executeFeedbackPipeline(
-              runId,
-              run,
-              pipelineConfig,
-              repoConfig,
-              sanitizedIssue,
-              branch,
-              prUrl,
-              prNumber,
-              feedbackComments,
-              rerequestReview ?? false,
-            ),
-          );
-        } catch (err) {
-          runLog.error({ err }, "feedback pipeline execution failed");
-        } finally {
-          this.activeFeedbackRuns.delete(prUrl);
-        }
-      })
-      .catch((err) => {
-        runLog.error({ err }, "feedback queue execution failed");
-        this.activeFeedbackRuns.delete(prUrl);
-      });
+    const ctx: FeedbackStartContext = {
+      db: this.db as AnyDb,
+      notifier: this.notifier,
+      repoCloneDir: this.repoCloneDir,
+      agentRunDir: this.agentRunDir,
+      githubConfig: this.githubConfig,
+      gitlabConfig: this.gitlabConfig,
+      pushQueue: this.pushQueue,
+      lockAdapter: this.lockAdapter,
+      prLockTimeoutMs: this.prLockTimeoutMs,
+      budgetAlertedRuns: this.budgetAlertedRuns,
+      checkTokenBudget: this.checkTokenBudget.bind(this),
+      failPipeline: this.failPipeline.bind(this),
+      injectAgentConfig: this.injectAgentConfig.bind(this),
+      activeFeedbackRuns: this.activeFeedbackRuns,
+      queue: this.queue,
+      buildPipelineRun: this.buildPipelineRun.bind(this),
+    };
+    return startFeedbackPipeline(ctx, params);
   }
 
   /**
@@ -2669,335 +2562,6 @@ export class PipelineRunner {
     };
 
     await this.notifier.onDailyTokenSummary?.(summary);
-  }
-
-  /**
-   * Execute a review-feedback pipeline run.
-   *
-   * Key differences from executePipeline():
-   *  - Checks out the EXISTING PR branch (not a new one).
-   *  - Skips triage, reproduce, await-approval stages.
-   *  - Does NOT create a new PR — pushes to the same branch.
-   *  - Optionally re-requests review via GitHub App after push.
-   *  - Feedback comment context is injected into the implement stage prompt.
-   */
-  private async executeFeedbackPipeline(
-    runId: string,
-    run: PipelineRun,
-    config: PipelineConfig,
-    repoConfig: RepoConfig,
-    sanitizedIssue: SanitizedIssue,
-    branch: string,
-    prUrl: string,
-    prNumber: number | undefined,
-    feedbackComments: ReviewFeedbackComment[],
-    rerequestReview: boolean,
-  ): Promise<void> {
-    const db = this.db as AnyDb;
-    const runLog = createLogger({
-      component: "PipelineRunner",
-      runId,
-      issueId: run.issueId,
-    });
-
-    let worktreePath: string | undefined;
-    let devcontainerSession: DevcontainerSession | undefined;
-
-    await db
-      .update(pipelineRuns)
-      .set({ status: "running" })
-      .where(eq(pipelineRuns.id, runId));
-    run.status = "running";
-
-    await upsertActiveWork(db, {
-      runId,
-      issueId: sanitizedIssue.id,
-      stage: "implement",
-    });
-
-    await this.notifier.onPipelineStart(run);
-
-    try {
-      // -----------------------------------------------------------------------
-      // Set up worktree from existing remote branch
-      // -----------------------------------------------------------------------
-      const repoDir = `${this.repoCloneDir}/${sanitizedIssue.slug}`;
-      const cloneUrl =
-        repoConfig.provider === "gitlab" && this.gitlabConfig
-          ? buildAuthenticatedUrl(repoConfig.url, this.gitlabConfig)
-          : repoConfig.url;
-      const logUrl = cloneUrl.replace(/:\/\/[^@]+@/, "://[redacted]@");
-      runLog.info({ repoUrl: logUrl, repoDir }, "feedback: cloning/fetching repository");
-      await cloneRepo(cloneUrl, repoDir);
-
-      runLog.info({ branch }, "feedback: creating worktree from existing remote branch");
-      worktreePath = await createWorktreeFromRemote(
-        repoDir,
-        runId,
-        branch,
-        this.agentRunDir,
-      );
-      runLog.info({ worktreePath }, "feedback: worktree created");
-
-      // Devcontainer (if configured)
-      const useDevcontainer = await shouldUseDevcontainer(
-        worktreePath,
-        repoConfig.devcontainer,
-      );
-      if (useDevcontainer) {
-        runLog.info("feedback: starting devcontainer");
-        devcontainerSession = await devcontainerUp(
-          worktreePath,
-          repoConfig.devcontainer,
-        );
-      }
-
-      await this.injectAgentConfig(worktreePath);
-
-      if (repoConfig.setupCommands) {
-        for (const cmdArgs of repoConfig.setupCommands) {
-          const [command, ...args] = cmdArgs;
-          runLog.info({ command, args }, "feedback: running setup command");
-          try {
-            await execFileAsync(command, args, { cwd: worktreePath });
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            runLog.error({ command, args, err }, "feedback: setup command failed");
-            throw new Error(
-              `Setup command failed: ${command} ${args.join(" ")} — ${msg}`,
-            );
-          }
-        }
-      }
-
-      const techStack = await detectTechStack(worktreePath);
-      runLog.info(
-        {
-          languages: techStack.languages,
-          frameworks: techStack.frameworks,
-          buildSystems: techStack.buildSystems,
-        },
-        "feedback: tech stack detected",
-      );
-
-      // -----------------------------------------------------------------------
-      // Build review-feedback context for the implement stage. This routes the
-      // implement template into its dedicated review-feedback branch
-      // ("address comments on existing branch, push to same branch") instead
-      // of the standard "create new branch + implement from scratch" path,
-      // which is wrong for PR-comment triggered runs.
-      // -----------------------------------------------------------------------
-      const reviewFeedback = buildReviewFeedbackContext(
-        prUrl,
-        branch,
-        feedbackComments,
-      );
-
-      // -----------------------------------------------------------------------
-      // Execute pipeline stages — skip triage, reproduce, await-approval
-      // -----------------------------------------------------------------------
-      const skipStages = new Set<string>(["triage", "reproduce", "await-approval"]);
-      const stagesToRun = config.stages.filter((s) => !skipStages.has(s));
-
-      runLog.info({ stages: stagesToRun }, "feedback: starting pipeline stages");
-
-      let handoff: HandoffArtifact | undefined;
-      let allModifiedFiles: string[] = [];
-
-      for (const stage of stagesToRun) {
-        const stageType = stage as StageType;
-        runLog.info({ stage: stageType }, "feedback: executing stage");
-
-        await upsertActiveWork(db, {
-          runId,
-          issueId: sanitizedIssue.id,
-          stage: stageType,
-          filesModified: allModifiedFiles.length > 0 ? allModifiedFiles : undefined,
-        });
-
-        // Only the implement stage uses reviewFeedback; the test/review stages
-        // get their context from the implement stage's handoff.
-        const stageReviewFeedback =
-          stageType === "implement" ? reviewFeedback : undefined;
-
-        let result = await executeStage({
-          runId,
-          issueId: sanitizedIssue.id,
-          stage: stageType,
-          sanitizedIssue,
-          repoConfig,
-          handoff,
-          workdir: worktreePath,
-          db: this.db,
-          techStack,
-          devcontainerSession,
-          reviewFeedback: stageReviewFeedback,
-          stageModels: config.stageModels,
-        });
-
-        run.totalInputTokens += result.inputTokens;
-        run.totalOutputTokens += result.outputTokens;
-
-        if (await this.checkTokenBudget(db, runId, run, config, stage)) return;
-
-        await this.notifier.onStageComplete(run, stage, result);
-
-        if (result.status === "failed") {
-          const errorMsg = result.errorMessage ?? "Stage failed";
-          await this.failPipeline(db, runId, run, stage, errorMsg, false);
-          return;
-        }
-
-        handoff = result.handoffArtifact;
-
-        if (await autoCommitChanges(worktreePath, sanitizedIssue.id, branch)) {
-          run.autoCommitted = true;
-        }
-
-        if (worktreePath) {
-          const freshFiles = await getModifiedFiles(worktreePath);
-          if (freshFiles.length > 0) {
-            allModifiedFiles = freshFiles;
-            await upsertActiveWork(db, {
-              runId,
-              issueId: sanitizedIssue.id,
-              stage: stageType,
-              filesModified: allModifiedFiles,
-            });
-          }
-        }
-      }
-
-      // -----------------------------------------------------------------------
-      // Push to existing branch — no new PR
-      // -----------------------------------------------------------------------
-      await this.pushQueue.enqueue(async () => {
-        await withBranchLock(
-          this.lockAdapter,
-          branch,
-          this.prLockTimeoutMs,
-          async () => {
-            const wtPath = worktreePath!;
-
-            if (await autoCommitChanges(wtPath, sanitizedIssue.id, branch)) {
-              run.autoCommitted = true;
-            }
-
-            runLog.info(
-              { defaultBranch: repoConfig.defaultBranch },
-              "feedback push: rebasing before push",
-            );
-            const rebaseResult = await rebaseBranch(wtPath, repoConfig.defaultBranch);
-
-            const feedbackHasConflicts = !rebaseResult.success && rebaseResult.hasConflicts;
-            if (feedbackHasConflicts) {
-              runLog.warn(
-                "feedback push: rebase conflicts — force-pushing for human review",
-              );
-              await abortRebase(wtPath);
-              await pushBranchForce(wtPath, branch);
-              await this.notifier.onHumanReviewNeeded?.(
-                run,
-                prUrl,
-                "Merge conflicts in feedback run — please resolve manually",
-              );
-            } else {
-              const feedbackPushStrategy = choosePushStrategy(branch, false);
-              if (feedbackPushStrategy === "force-with-lease") {
-                runLog.info(
-                  { branch },
-                  "feedback push: force-with-lease push for agent branch",
-                );
-                await pushBranchForce(wtPath, branch);
-              } else {
-                await pushBranch(wtPath, branch);
-              }
-            }
-
-            runLog.info({ prUrl }, "feedback: pushed to existing PR branch");
-
-            // Re-request review via GitHub App if configured
-            if (rerequestReview && this.githubConfig && prNumber) {
-              try {
-                const { owner, repo } = parseRepoUrl(repoConfig.url);
-                const octokit = await createGitHubClient(this.githubConfig);
-                const reRequested = await rerequestPRReview(
-                  octokit,
-                  owner,
-                  repo,
-                  prNumber,
-                );
-                if (reRequested) {
-                  runLog.info({ prUrl, prNumber }, "feedback: re-requested review");
-                } else {
-                  runLog.info(
-                    { prUrl, prNumber },
-                    "feedback: no existing reviewers to re-request",
-                  );
-                }
-              } catch (reviewErr) {
-                runLog.error({ err: reviewErr }, "feedback: failed to re-request review");
-              }
-            }
-          },
-        );
-      });
-
-      await db
-        .update(pipelineRuns)
-        .set({
-          status: "completed",
-          completedAt: new Date(),
-          totalInputTokens: run.totalInputTokens,
-          totalOutputTokens: run.totalOutputTokens,
-          prUrl,
-          autoCommitted: run.autoCommitted ?? null,
-        })
-        .where(eq(pipelineRuns.id, runId));
-      run.status = "completed";
-
-      runLog.info(
-        {
-          prUrl,
-          totalInputTokens: run.totalInputTokens,
-          totalOutputTokens: run.totalOutputTokens,
-          autoCommitted: run.autoCommitted ?? false,
-        },
-        "feedback pipeline completed",
-      );
-
-      await this.notifier.onPipelineComplete(run, {
-        prUrl,
-        totalInputTokens: run.totalInputTokens,
-        totalOutputTokens: run.totalOutputTokens,
-        stagesCompleted: stagesToRun.length,
-        autoMerged: false,
-      });
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      runLog.error({ err: error }, "feedback pipeline failed with unexpected error");
-      await this.failPipeline(db, runId, run, "unknown", errorMsg, true);
-    } finally {
-      this.budgetAlertedRuns.delete(runId);
-      await removeActiveWork(db, runId);
-      if (devcontainerSession) {
-        try {
-          await devcontainerDown(devcontainerSession);
-        } catch {
-          // Ignore cleanup errors
-        }
-      }
-      // Feedback runs don't pause — always clean up worktree on completion or failure.
-      // Cast to string because failPipeline mutates run.status at runtime beyond the initial type.
-      const feedbackStatus = run.status as string;
-      if (worktreePath && (feedbackStatus === "completed" || feedbackStatus === "failed")) {
-        try {
-          await deleteWorktree(worktreePath);
-        } catch {
-          // Ignore cleanup errors
-        }
-      }
-    }
   }
 
   private buildPipelineRun(
