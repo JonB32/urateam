@@ -3,18 +3,6 @@ import type { ReviewFeedbackComment } from "../webhook/github-handler.js";
 import type { addPRComment } from "../repo/github.js";
 import type { Logger } from "pino";
 
-// Task 3 will extend HandoffArtifact.context with addressedComments in the
-// Zod schema. Until then, we read it via a local augmented type.
-type HandoffContext = HandoffArtifact["context"] & {
-  addressedComments?: { commentId: string; response: string }[];
-};
-
-// Task 4 will add htmlUrl to ReviewFeedbackComment. Until then, we accept it
-// via a locally augmented type so the dispatcher can pass it through.
-type ReviewFeedbackCommentWithUrl = ReviewFeedbackComment & {
-  htmlUrl?: string;
-};
-
 /**
  * Markdown-special characters escaped before rendering user-controlled
  * strings (author names, file paths, comment bodies). Conservative — escapes
@@ -41,7 +29,7 @@ function singleLine(s: string): string {
  */
 function buildCommentUrl(
   prUrl: string | undefined,
-  comment: ReviewFeedbackCommentWithUrl,
+  comment: ReviewFeedbackComment,
 ): string {
   if (comment.htmlUrl) return comment.htmlUrl;
   if (!prUrl) return "";
@@ -69,16 +57,13 @@ export function renderChangeSummary(input: ChangeSummaryInput): string {
 
   const summary = singleLine(handoff.summary);
 
-  // TODO Task 3: schema extension makes addressedComments properly typed.
-  const ctx = handoff.context as HandoffContext;
+  const ctx = handoff.context;
   const addressedById = new Map<string, string>();
   for (const ac of ctx.addressedComments ?? []) {
     addressedById.set(ac.commentId, ac.response);
   }
 
-  const comments = triggeringComments as ReviewFeedbackCommentWithUrl[];
-
-  const responseLines = comments.map((c) => {
+  const responseLines = triggeringComments.map((c) => {
     const url = buildCommentUrl(prUrl, c);
     const linkText = c.filePath
       ? `@${escapeMd(c.author)}'s comment on \`${escapeMd(c.filePath)}${
