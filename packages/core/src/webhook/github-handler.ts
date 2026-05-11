@@ -79,6 +79,47 @@ export function verifyGitHubSignature(
 }
 
 // ---------------------------------------------------------------------------
+// Shared DB helpers — avoid repeating the same lookup / update patterns
+// ---------------------------------------------------------------------------
+
+/**
+ * Look up a pipeline run by PR URL (primary) then by branch name (fallback).
+ * Returns `undefined` when no matching row is found.
+ */
+async function findPipelineRunByPrUrlOrBranch(
+  db: AnyDb,
+  prUrl?: string,
+  prBranch?: string,
+): Promise<(typeof pipelineRuns.$inferSelect) | undefined> {
+  if (prUrl) {
+    const rows = await db.select().from(pipelineRuns).where(eq(pipelineRuns.prUrl, prUrl)).limit(1);
+    if (rows.length > 0) return rows[0];
+  }
+  if (prBranch?.startsWith("agent/")) {
+    const rows = await db.select().from(pipelineRuns).where(eq(pipelineRuns.branch, prBranch)).limit(1);
+    if (rows.length > 0) return rows[0];
+  }
+  return undefined;
+}
+
+/**
+ * Persist a merge decision to the DB.
+ * `merged` — pass `true` (or `result.merged || null` for the automerge path).
+ * `reason` — human-readable label stored in `autoMergeReason`.
+ */
+async function updatePipelineRunMerged(
+  db: AnyDb,
+  runId: string,
+  merged: boolean | null,
+  reason: string,
+): Promise<void> {
+  await db
+    .update(pipelineRuns)
+    .set({ autoMerged: merged, autoMergeReason: reason })
+    .where(eq(pipelineRuns.id, runId));
+}
+
+// ---------------------------------------------------------------------------
 // In-memory dedup for processed comment IDs (30s TTL per entry)
 // ---------------------------------------------------------------------------
 
@@ -177,16 +218,7 @@ async function handleAutoMergeEvent(
 
   for (const candidate of candidates) {
     // Look up pipeline run in DB by PR URL then branch
-    let originalRun: (typeof pipelineRuns.$inferSelect) | undefined;
-
-    if (candidate.prUrl) {
-      const rows = await db.select().from(pipelineRuns).where(eq(pipelineRuns.prUrl, candidate.prUrl)).limit(1);
-      if (rows.length > 0) originalRun = rows[0];
-    }
-    if (!originalRun && candidate.prBranch?.startsWith("agent/")) {
-      const rows = await db.select().from(pipelineRuns).where(eq(pipelineRuns.branch, candidate.prBranch)).limit(1);
-      if (rows.length > 0) originalRun = rows[0];
-    }
+    const originalRun = await findPipelineRunByPrUrlOrBranch(db, candidate.prUrl, candidate.prBranch);
 
     if (!originalRun) {
       log.debug({ candidate }, "automerge: no pipeline run found for PR — skipping");
@@ -239,13 +271,7 @@ async function handleAutoMergeEvent(
     );
 
     // Persist result to DB
-    await db
-      .update(pipelineRuns)
-      .set({
-        autoMerged: result.merged || null,
-        autoMergeReason: result.message,
-      })
-      .where(eq(pipelineRuns.id, originalRun.id));
+    await updatePipelineRunMerged(db, originalRun.id, result.merged || null, result.message);
 
     log.info(
       { runId: originalRun.id, prNumber, merged: result.merged, message: result.message },
@@ -280,21 +306,8 @@ async function handlePRMergedEvent(
   }
 
   const db = config.db;
-  let originalRun: (typeof pipelineRuns.$inferSelect) | undefined;
-
-  // Look up pipeline run by PR URL (primary)
-  const byUrl = await db.select().from(pipelineRuns).where(eq(pipelineRuns.prUrl, prUrl)).limit(1);
-  if (byUrl.length > 0) originalRun = byUrl[0];
-
-  // Fallback: look up by branch name for agent-created branches
-  if (!originalRun && prBranch?.startsWith("agent/")) {
-    const byBranch = await db
-      .select()
-      .from(pipelineRuns)
-      .where(eq(pipelineRuns.branch, prBranch))
-      .limit(1);
-    if (byBranch.length > 0) originalRun = byBranch[0];
-  }
+  // Look up pipeline run by PR URL (primary) then by branch (fallback)
+  const originalRun = await findPipelineRunByPrUrlOrBranch(db, prUrl, prBranch);
 
   if (!originalRun) {
     log.debug({ prUrl }, "pr-merged: no pipeline run found for PR — skipping");
@@ -308,10 +321,7 @@ async function handlePRMergedEvent(
   }
 
   // Update DB to reflect the human/external merge
-  await db
-    .update(pipelineRuns)
-    .set({ autoMerged: true, autoMergeReason: "merged via GitHub" })
-    .where(eq(pipelineRuns.id, originalRun.id));
+  await updatePipelineRunMerged(db, originalRun.id, true, "merged via GitHub");
 
   log.info({ runId: originalRun.id, prUrl }, "pr-merged: updated pipeline run auto_merged=true");
 
@@ -475,25 +485,7 @@ export function createGitHubWebhookHandler(
     // 6. Find the original pipeline run for this PR
     //    First try by PR URL (exact match), then by branch name (agent/ prefix).
     const db = config.db;
-    let originalRun: (typeof pipelineRuns.$inferSelect) | undefined;
-
-    if (prUrl) {
-      const byUrl = await db
-        .select()
-        .from(pipelineRuns)
-        .where(eq(pipelineRuns.prUrl, prUrl))
-        .limit(1);
-      if (byUrl.length > 0) originalRun = byUrl[0];
-    }
-
-    if (!originalRun && prBranch?.startsWith("agent/")) {
-      const byBranch = await db
-        .select()
-        .from(pipelineRuns)
-        .where(eq(pipelineRuns.branch, prBranch))
-        .limit(1);
-      if (byBranch.length > 0) originalRun = byBranch[0];
-    }
+    const originalRun = await findPipelineRunByPrUrlOrBranch(db, prUrl, prBranch);
 
     if (!originalRun) {
       return c.json({ ok: true, skipped: "not an agent-created PR" });
