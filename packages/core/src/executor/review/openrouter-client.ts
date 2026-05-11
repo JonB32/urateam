@@ -46,10 +46,21 @@ export class OpenRouterClient {
       const body = await res.text();
       throw new Error(`openrouter ${res.status} ${body.slice(0, 200)}`);
     }
+    // Some providers (notably free-tier / community models) return 200 OK with
+    // an error body and no `choices` field. Treat missing/empty choices as a
+    // failure with a meaningful message instead of letting `json.choices[0]`
+    // throw "Cannot read properties of undefined (reading '0')".
     const json = (await res.json()) as {
-      choices: Array<{ message: { content: string } }>;
-      usage: { prompt_tokens: number; completion_tokens: number };
+      choices?: Array<{ message?: { content?: string } }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+      error?: { message?: string; code?: string | number };
     };
+    if (!Array.isArray(json.choices) || json.choices.length === 0) {
+      const providerErr = json.error?.message ?? "no error message in response body";
+      throw new Error(
+        `openrouter response missing choices — provider returned 200 OK but no completion: ${providerErr}`,
+      );
+    }
     return {
       content: json.choices[0]?.message?.content ?? "",
       inputTokens: json.usage?.prompt_tokens ?? 0,
