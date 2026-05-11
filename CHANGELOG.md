@@ -17,6 +17,23 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+## [0.1.46] — 2026-05-11
+
+Bumps:
+- `@urateam/core`: 0.1.31 → 0.1.32
+- `@urateam/cli`: 0.1.33 → 0.1.34
+- `@urateam/dashboard`: 0.1.31 → 0.1.32
+- `create-urateam`: 0.1.34 → 0.1.35
+
+### Added (OSS+)
+- **Operator stop & container halt** ([#268](https://github.com/JonB32/urateam/pull/268)) — three coordinated surfaces for stopping pipeline runs. Cancel a single run mid-stream via a new `AbortController` wired into `consumeAgentStream` (throws new `StageCancelledError`); graceful-stop a run between stages; halt the entire container (pauses the PM Agent + cancels every active pipeline + feedback run). Surfaces: dashboard (`POST /runs/:id/{cancel,stop}`, `/admin/halt-all`, RBAC-gated `runs.stop`/`system.halt`, CSRF via `HX-Request`, confirm dialogs on the run-detail page), Slack (`/pm cancel|stop|halt` with parser + Haiku NL classifier), CLI (`ura stop <runId> [--graceful]`, `ura halt`, talking to `/cli/*` guarded by `URATEAM_CLI_TOKEN` shared secret with constant-time `timingSafeEqual` compare). New audit events `run.cancelled` and `system.halted` record actor + mode. Runs land in new `status: "cancelled"` (distinct from system-initiated `"aborted"`). Setup doc: `deploy/STOP_AND_HALT.md`.
+- **Slack thinking-emoji ack** ([#268](https://github.com/JonB32/urateam/pull/268)) — the bot now reacts with 🤔 on receipt of an `app_mention` / `message` event (swaps to ✅ / ⚠️ on completion), and slash commands return an immediate ephemeral "Working on it…" then post the real reply via `response_url` so slow commands don't trip Slack's 3-second slash-command timeout.
+
+### Fixed (OSS+)
+- **Quality Observer findings no longer burn implement-stage tokens** ([#268](https://github.com/JonB32/urateam/pull/268)) — Quality Observer files a fresh GH issue per pipeline run with >50 turns; the fingerprint includes the runId, so each flagged run became a new Linear ticket and the implement pipeline burned tokens trying to "fix" a non-actionable diagnostic. PM Agent triage now detects the observer body marker (`<!-- urateam-qo-observer:`, preserved by `gh-linear-sync`'s verbatim body copy) and routes the ticket to the `needs-design` pipeline, whose `await-approval` stage gates a human before any implement-stage work runs.
+
+### Chore (OSS+)
+- New env var `URATEAM_CLI_TOKEN` (documented in `.env.dogfood.example` and `deploy/STOP_AND_HALT.md`) — required for `ura stop` / `ura halt` to reach a running container's control plane.
 ## [0.1.45] — 2026-05-11
 
 Bumps:
