@@ -100,14 +100,19 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
 
   let promotedCount = 0;
 
-  for (const candidate of candidates) {
-    if (promotedCount >= slotsAvailable) break;
+  // Pre-fetch all candidate relations in parallel before entering the loop.
+  // Each candidate's team/labels are independent, so a single Promise.all
+  // reduces wall-clock time from O(N × RTT) to O(RTT) for the batch.
+  const allCandidateRelations = await Promise.all(
+    candidates.map((c: any) => resolveIssueRelations(c)),
+  );
 
-    // Parallelise the labels and team relation fetches using resolveIssueRelations,
-    // replacing the previous sequential pattern (labels first, then team later).
-    // Both fetches are independent so Promise.all reduces latency by the slower of
-    // the two rather than their sum.
-    const { team, labels: labelsConnection } = await resolveIssueRelations(candidate);
+  for (let i = 0; i < candidates.length; i++) {
+    if (promotedCount >= slotsAvailable) break;
+    const candidate = candidates[i]!;
+
+    // Both team and labels were fetched concurrently above via Promise.all.
+    const { team, labels: labelsConnection } = allCandidateRelations[i]!;
     const teamId = team?.id;
     const labelNodes = labelsConnection?.nodes ?? [];
     const labelNames: string[] = labelNodes.map((l: any) => l.name);

@@ -181,12 +181,14 @@ export async function recoverStuckInProgressIssues(
 
   const results: StuckIssueResult[] = [];
 
-  for (const issue of toProcess) {
-    // Parallelise the lazy team and state relations on the Linear SDK issue
-    // object, replacing the previous sequential-await pattern that cost 2
-    // round-trips per issue.  Labels are not needed here but are fetched as
-    // part of the shared resolveIssueRelations helper.
-    const { team, state: issueStateRelation } = await resolveIssueRelations(issue);
+  // Pre-fetch all issue relations in parallel before entering the loop.
+  // Each issue's team/state/labels are independent, so a single Promise.all
+  // reduces wall-clock time from O(N × RTT) to O(RTT) for the batch.
+  const allIssueRelations = await Promise.all(toProcess.map((i) => resolveIssueRelations(i)));
+
+  for (let issueIdx = 0; issueIdx < toProcess.length; issueIdx++) {
+    const issue = toProcess[issueIdx]!;
+    const { team, state: issueStateRelation } = allIssueRelations[issueIdx]!;
     const teamId = team?.id;
     const lastRunStatus = lastRunStatusMap.get(issue.identifier) ?? null;
     const lastRunPrUrl = lastRunPrUrlMap.get(issue.identifier) ?? null;

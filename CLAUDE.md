@@ -69,7 +69,8 @@ Bidirectional close-out (GH issue closed when Linear ticket reaches Done state) 
 
 A codebase-wide analysis (2026-05-11) surfaced a set of foundational improvements that are tracked in Linear and should land before substantial new feature work. Contributors touching the affected areas should coordinate with these tickets to avoid merge conflicts:
 
-- **Foundation (P1 Urgent)**: BEC-187 (DB indexes), BEC-188 (`util/env.ts` + `util/json.ts`), BEC-189 (`util/linear.ts` + Promise.all relations), BEC-190 (tighten `AnyDb` + `retry_count` schema fix + Linear SDK typing).
+- **Foundation (P1 Urgent)**: BEC-187 (DB indexes), BEC-188 (`util/env.ts` + `util/json.ts`), BEC-190 (tighten `AnyDb` + `retry_count` schema fix + Linear SDK typing).
+- **Completed**: BEC-189 (`util/linear.ts` + Promise.all relations) ✅ — `getLinearClient`, `resolveIssueRelations`, `resolveWorkflowStatesByTeam` shipped in `packages/core/src/util/linear.ts`.
 - **Cleanup (P2 High)**: BEC-191 (dead code), BEC-192 (resume-payload zod), BEC-193 (Octokit memoization + parseRepoUrl hoist).
 - **File splits (P2 High, sequential)**: BEC-194 (`create-urateam/index.ts`), BEC-195 (`pm/slack-interface.ts`), BEC-196 (`release-manager/scheduler.ts`), BEC-197 (`audit/events.ts`), BEC-199 (extract feedback-pipeline from `runner.ts`).
 - **Infrastructure (P2 High)**: BEC-198 (env-validation module + `deploy/ENV_VARS.md`), BEC-200 (test gaps in runner retry-strategies + policyErr + status webhook + paused-tick).
@@ -80,7 +81,7 @@ Known limitations being addressed (don't compound these):
 - `AnyDb = any` in `db/client.ts:23` cascades into ~50 `as any` casts. Don't add new `(this.db as AnyDb)` casts; wait for BEC-190.
 - `linearClient: any` in `pm/actions/*` and `pm/linear-helpers.ts`. Use `LinearClient` from `@linear/sdk` when adding new code there.
 - 5 missing indexes on `pipeline_runs` + `pm_approvals` — landing in BEC-187. Don't add new hot-path queries that scan these tables until BEC-187 ships.
-- Sequential `await issue.team` / `await issue.state` patterns in `pm/actions/*`. New code in these files should use `Promise.all` (or wait for BEC-189's `resolveIssueRelations` helper).
+- Sequential `await issue.team` / `await issue.state` patterns in `pm/actions/*` have been eliminated (BEC-189 ✅). New code in these files should call `resolveIssueRelations(issue)` from `util/linear.ts` to fetch team, state, and labels concurrently.
 
 ## Key Patterns
 
