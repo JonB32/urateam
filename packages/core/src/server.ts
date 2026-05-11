@@ -120,6 +120,9 @@ export async function createApp(config: ServerConfig) {
       repoConfigs: config.repoConfigs,
       db: db as any,
       github: config.github,
+      // BEC-186: webhook handler needs the notifier to fire onPRMerged when a
+      // PR is merged externally (human merge / GitHub auto-merge-when-ready).
+      notifier,
     });
     app.route("/", githubWebhookApp);
   }
