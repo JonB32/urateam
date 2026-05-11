@@ -258,6 +258,14 @@ export const HandoffArtifactSchema = z.object({
     assumptions: z.array(z.string()),
     testResults: TestResultSchema.optional(),
     reviewFindings: z.array(ReviewFindingSchema).optional(),
+    addressedComments: z
+      .array(
+        z.object({
+          commentId: z.string(),
+          response: z.string(),
+        }),
+      )
+      .optional(),
   }),
   tokenBudget: z.object({
     contextTokensUsed: z.number().int().min(0),
