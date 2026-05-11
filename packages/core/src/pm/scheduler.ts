@@ -12,7 +12,7 @@ import { resolveApprovals, type ResolveApprovalsInput, type ResolveApprovalsResu
 import { recoverRetriableRuns, type RecoverResult } from "./actions/recover.js";
 import { recoverStuckInProgressIssues, type StuckIssueResult } from "./actions/recover-stuck.js";
 import { startTodoIssues, type StartTodoInput, type StartTodoResult } from "./actions/start-todo.js";
-import { checkStalledStages, type StalledStageResult } from "./actions/check-stalled-stages.js";
+import { checkStalledStages, DEFAULT_STALLED_STAGE_THRESHOLD_MINUTES, type StalledStageResult } from "./actions/check-stalled-stages.js";
 import { getActiveFileMaps, predictConflict, type ActiveRun } from "./conflict.js";
 import { PmSlackNotifier } from "./slack.js";
 import { isPmPaused } from "./slack-interface.js";
@@ -30,6 +30,19 @@ import { pruneExpiredSessions } from "../auth/index.js";
 import { recomputeCostRollups } from "../cost/index.js";
 
 const log = createLogger({ component: "PmAgent:scheduler" });
+
+/**
+ * Parses an integer threshold from an environment variable with a fallback.
+ * Uses `isNaN` guard (avoids falsy `||` check on `0`) and clamps to ≥1 min.
+ */
+function parseThresholdMinutesFromEnv(
+  envVar: string,
+  configFallback: number | undefined,
+  defaultValue: number,
+): number {
+  const parsed = parseInt(process.env[envVar] ?? "", 10);
+  return isNaN(parsed) ? (configFallback ?? defaultValue) : Math.max(1, parsed);
+}
 
 export interface PmSchedulerDeps {
   config: PmAgentConfig;
@@ -266,11 +279,11 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
             // BEC-184: read PM_AGENT_STUCK_RUN_AGE_MIN from env (default 60 min).
             // Controls how long a 'running' run must be active before it's treated
             // as a zombie and eligible for stuck-issue recovery.
-            // PM_AGENT_STUCK_RUN_AGE_MIN: use isNaN guard so '0' doesn't silently
-            // fall back to 60 via || falsy check; clamp to ≥1 min to prevent
-            // overly-aggressive recovery on mis-configured deployments.
-            const _parsedAge = parseInt(process.env.PM_AGENT_STUCK_RUN_AGE_MIN ?? "", 10);
-            const stuckRunAgeMinutes = isNaN(_parsedAge) ? 60 : Math.max(1, _parsedAge);
+            const stuckRunAgeMinutes = parseThresholdMinutesFromEnv(
+              "PM_AGENT_STUCK_RUN_AGE_MIN",
+              undefined,
+              60,
+            );
             const stuckResult = actions?.recoverStuckInProgressIssues
               ? await actions.recoverStuckInProgressIssues({} as any)
               : await recoverStuckInProgressIssues({
@@ -302,13 +315,11 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
         // emits structured log alerts for operators/monitoring systems.
         // Threshold is configurable via PM_AGENT_STALLED_STAGE_THRESHOLD_MIN (default 30).
         try {
-          const _parsedThreshold = parseInt(
-            process.env.PM_AGENT_STALLED_STAGE_THRESHOLD_MIN ?? "",
-            10,
+          const staleAgeMinutes = parseThresholdMinutesFromEnv(
+            "PM_AGENT_STALLED_STAGE_THRESHOLD_MIN",
+            config.stalledStageThresholdMinutes,
+            DEFAULT_STALLED_STAGE_THRESHOLD_MINUTES,
           );
-          const staleAgeMinutes = isNaN(_parsedThreshold)
-            ? ((config as any).stalledStageThresholdMinutes ?? 30)
-            : Math.max(1, _parsedThreshold);
           const stalledResults = actions?.checkStalledStages
             ? await actions.checkStalledStages({} as any)
             : await checkStalledStages({ db, staleAgeMinutes });
@@ -553,11 +564,11 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           log.warn({ err }, "cost rollup failed");
         }
 
-      log.info({
-        triaged: tick.triaged.length,
-        promoted: tick.promoted.filter((p) => p.promoted).length,
-        errors: tick.errors.length,
-      }, "tick complete");
+        log.info({
+          triaged: tick.triaged.length,
+          promoted: tick.promoted.filter((p) => p.promoted).length,
+          errors: tick.errors.length,
+        }, "tick complete");
       } finally {
         await releaseLock();
       }

@@ -20,6 +20,29 @@ import { requirePermission } from "../middleware/rbac.js";
 
 type AnyDb = any;
 
+/** Fetches a pipeline run by ID; returns null if not found. */
+async function getRunById(d: AnyDb, id: string): Promise<any | null> {
+  const rows = await d
+    .select()
+    .from(pipelineRuns)
+    .where(eq(pipelineRuns.id, id))
+    .limit(1);
+  return rows.length > 0 ? (rows[0] as any) : null;
+}
+
+/**
+ * Handles HTMX-aware redirects.
+ * HTMX submits need HX-Redirect for full-page navigation; a plain 302 would
+ * swap the destination page into the originating element instead.
+ */
+function handleHtmxRedirect(c: any, target: string) {
+  if (c.req.header("HX-Request")) {
+    c.header("HX-Redirect", target);
+    return c.body(null, 200);
+  }
+  return c.redirect(target, 302);
+}
+
 export interface RunsRouterDeps {
   db: Db;
   runner?: {
@@ -148,15 +171,10 @@ export function createRunsRouter(
     requirePermission("runs.retry"),
     async (c) => {
       const id = c.req.param("id");
-      const rows = await d
-        .select()
-        .from(pipelineRuns)
-        .where(eq(pipelineRuns.id, id))
-        .limit(1);
-      if (rows.length === 0) {
+      const run = await getRunById(d, id);
+      if (!run) {
         return c.text("Run not found", 404);
       }
-      const run = rows[0] as any;
       if (run.status !== "failed" && run.status !== "retriable") {
         return c.text(`Cannot retry a run in status ${run.status}`, 409);
       }
@@ -195,17 +213,7 @@ export function createRunsRouter(
           }),
         );
       }
-      // HTMX-driven submits (the real user path — CSRF requires HX-Request)
-      // need HX-Redirect for a full-page navigation. A plain 302 makes HTMX
-      // follow the redirect via XHR and swap the response into the originating
-      // form, leaving the <dialog> open with the run-detail page rendered
-      // inside the dialog's <form>.
-      const target = `${effectiveBasePath}/runs/${id}`;
-      if (c.req.header("HX-Request")) {
-        c.header("HX-Redirect", target);
-        return c.body(null, 200);
-      }
-      return c.redirect(target, 302);
+      return handleHtmxRedirect(c, `${effectiveBasePath}/runs/${id}`);
     },
   );
 
@@ -228,15 +236,10 @@ export function createRunsRouter(
     requirePermission("runs.retry"),
     async (c) => {
       const id = c.req.param("id");
-      const rows = await d
-        .select()
-        .from(pipelineRuns)
-        .where(eq(pipelineRuns.id, id))
-        .limit(1);
-      if (rows.length === 0) {
+      const run = await getRunById(d, id);
+      if (!run) {
         return c.text("Run not found", 404);
       }
-      const run = rows[0] as any;
       if (run.status !== "running") {
         return c.text(
           `Cannot resume-stalled a run in status ${run.status} — only 'running' runs can be resumed via this endpoint`,
@@ -278,12 +281,7 @@ export function createRunsRouter(
         );
       }
 
-      const target = `${effectiveBasePath}/runs/${id}`;
-      if (c.req.header("HX-Request")) {
-        c.header("HX-Redirect", target);
-        return c.body(null, 200);
-      }
-      return c.redirect(target, 302);
+      return handleHtmxRedirect(c, `${effectiveBasePath}/runs/${id}`);
     },
   );
 

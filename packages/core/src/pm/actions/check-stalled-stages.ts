@@ -110,6 +110,7 @@ export async function checkStalledStages(
 
   // Emit a structured log alert for each stalled stage so operators can
   // diagnose the hang from log aggregators / monitoring systems.
+  const stalledMessage = `stalled stage detected: no active_work updates for >${staleAgeMinutes} min — consider POST /runs/:id/resume-stalled for manual recovery`;
   for (const result of results) {
     log.warn(
       {
@@ -120,9 +121,7 @@ export async function checkStalledStages(
         issueId: result.issueId,
         staleAgeMinutes,
       },
-      "stalled stage detected: no active_work updates for >" +
-        staleAgeMinutes +
-        " min — consider POST /runs/:id/resume-stalled for manual recovery",
+      stalledMessage,
     );
   }
 
