@@ -52,6 +52,8 @@ Autonomous backlog manager in `packages/core/src/pm/`:
   - PR review/inline comments (`pull_request_review`, `pull_request_review_comment`) → review-feedback pipeline
   - Regular PR comments (`issue_comment` on PRs) → review-feedback pipeline (supports `@ateam` trigger keyword)
   - CI/status events (`check_suite`, `status`, `pull_request` labeled/synchronize/opened) → automerge evaluation
+- **GitLab webhook** (`/webhooks/gitlab`): `X-Gitlab-Token` plain shared secret validation (timing-safe); `object_kind: "note"` on MergeRequest → review-feedback runs; `object_kind: "merge_request"` with `action: "merge"` → marks pipeline run merged
+- **Bitbucket webhook** (`/webhooks/bitbucket`): `X-Hub-Signature-256` HMAC-SHA256 validation (same scheme as GitHub); `X-Event-Key: pullrequest:comment_created` → review-feedback runs; `X-Event-Key: pullrequest:fulfilled` → marks pipeline run merged
 
 ## Auto-merge
 - Configurable per pipeline: `autoMerge`, `autoMergeMaxLines` (default 200), `autoMergeExcludePatterns` (globs)

@@ -17,6 +17,17 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+### Added (BEC-206)
+- **Complete GitLab parity**: `repo/gitlab.ts:addMRComment()` is now wired into all comment-posting code paths in `runner.ts`. The `repoConfig.provider !== "gitlab"` short-circuit guards on cost-summary and change-summary comments have been removed. GitLab users now receive per-PR cost summaries (opt-in via `URATEAM_PR_COST_SUMMARY=true`) and change-summary comments on review-feedback runs, identical to GitHub.
+- **GitLab automerge** (`merge_when_pipeline_succeeds`): `runner.ts` now calls the new `mergeMRWhenPipelineSucceeds()` function when `autoMerge: true` and `repoConfig.provider === "gitlab"`. The GitLab API queues the MR for merge once all CI pipelines succeed.
+- **`webhook/gitlab-handler.ts`**: New Hono handler at `/webhooks/gitlab`. Validates the `X-Gitlab-Token` shared-secret header (timing-safe comparison). MR comment (`Note Hook` with `noteable_type: "MergeRequest"`) events trigger `review-feedback` pipeline runs identically to the GitHub handler. MR merged events mark the pipeline run as merged and fire `Notifier.onPRMerged()`.
+- **New `repo/bitbucket.ts`** module: `buildBitbucketAuthenticatedUrl()`, `createBitbucketPR()`, `addBitbucketPRComment()`, `mergeBitbucketPR()`, `parseBitbucketUrl()`, plus thin wrappers `cloneBitbucketRepo()` / `pushBitbucketCode()` (mirroring `repo/gitlab.ts`). Supports OAuth access tokens (Bearer) and App Passwords (Basic auth). Configurable `apiBaseUrl` for Bitbucket Data Center.
+- **`webhook/bitbucket-handler.ts`**: New Hono handler at `/webhooks/bitbucket`. Validates `X-Hub-Signature-256` HMAC-SHA256 (same scheme as GitHub). `pullrequest:comment_created` events trigger review-feedback runs; `pullrequest:fulfilled` events mark pipeline runs as merged.
+- **Bitbucket wired into `runner.ts`**: clone, PR creation, cost-summary/change-summary comment posting, and automerge (via Bitbucket merge API) all route through `repo/bitbucket.ts` when `repoConfig.provider === "bitbucket"`.
+- **`feedback-pipeline.ts` updated**: Bitbucket clone URLs are now authenticated via `buildBitbucketAuthenticatedUrl()` when `bitbucketConfig` is configured.
+- **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
+- **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
+
 ## [0.1.56] — 2026-05-13
 
 Bumps:

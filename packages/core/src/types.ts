@@ -221,8 +221,8 @@ export const RepoConfigSchema = z.object({
   devcontainer: DevcontainerConfigSchema.optional(),
   /** Per-team trigger map. Overrides the global triggerMap for this team's repo. Falls back to DEFAULT_TRIGGER_MAP. */
   triggerMap: TriggerMapSchema.optional(),
-  /** Hosting provider. Defaults to "github". Set to "gitlab" for GitLab repos. */
-  provider: z.enum(["github", "gitlab"]).optional(),
+  /** Hosting provider. Defaults to "github". Set to "gitlab" for GitLab repos or "bitbucket" for Bitbucket. */
+  provider: z.enum(["github", "gitlab", "bitbucket"]).optional(),
   /** Configuration for GitHub PR review comment → pipeline re-entry (feedback runs). */
   githubFeedback: GitHubFeedbackConfigSchema.optional(),
   /** BEC-135: Release Manager agent (Pro feature). */

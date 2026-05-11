@@ -41,6 +41,27 @@ It is a pnpm monorepo with 4 packages:
 - `scripts/` — Setup scripts for Linear webhook and GitHub App; `gh-linear-sync.ts` (GH→Linear sync entry point)
 - `docs/` — Design specs and documentation
 
+### Multi-VCS Provider Support (BEC-206)
+
+Three providers are fully supported. Set `provider` in your `RepoConfig`:
+
+| Provider | `provider` value | Auth | PR/MR creation | Comments | Automerge |
+|----------|-----------------|------|----------------|----------|-----------|
+| GitHub | `"github"` (default) | GitHub App or CLI | Octokit `createPR()` | `addPRComment()` | `mergePRViaCli()` |
+| GitLab | `"gitlab"` | Personal/deploy token | REST `createMR()` | REST `addMRComment()` | `mergeMRWhenPipelineSucceeds()` |
+| Bitbucket | `"bitbucket"` | OAuth token or App Password | REST `createBitbucketPR()` | REST `addBitbucketPRComment()` | REST `mergeBitbucketPR()` |
+
+**Webhook handlers:**
+- `/webhooks/github` — `X-Hub-Signature-256` HMAC-SHA256, enabled by `githubWebhookSecret`
+- `/webhooks/gitlab` — `X-Gitlab-Token` shared secret, enabled by `gitlabWebhookToken`
+- `/webhooks/bitbucket` — `X-Hub-Signature-256` HMAC-SHA256, enabled by `bitbucketWebhookSecret`
+
+**GitLab setup**: `ServerConfig.gitlab = { token: "glpat-…", host?: "https://gitlab.example.com" }`.
+In GitLab Webhook settings: URL = `/webhooks/gitlab`, Secret token = `gitlabWebhookToken`, enable "Comments" + "Merge request events".
+
+**Bitbucket setup**: `ServerConfig.bitbucket = { accessToken: "…" }` (OAuth) or `{ appUsername: "u", appPassword: "p" }`.
+In Bitbucket Webhook settings: URL = `/webhooks/bitbucket`, Secret key = `bitbucketWebhookSecret`, enable "PR: Comment created" + "PR: Fulfilled".
+
 ### GitHub Issues → Linear Sync (BEC-173)
 
 Autonomous incident/change-management bridge. Open GitHub issues are synced to Linear tickets in the Triage state every hour via a scheduled GitHub Action.

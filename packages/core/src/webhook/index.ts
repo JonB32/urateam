@@ -7,3 +7,13 @@ export {
   type GitHubWebhookHandlerConfig,
   type ReviewFeedbackComment,
 } from "./github-handler.js";
+export {
+  createGitLabWebhookHandler,
+  verifyGitLabToken,
+  type GitLabWebhookHandlerConfig,
+} from "./gitlab-handler.js";
+export {
+  createBitbucketWebhookHandler,
+  verifyBitbucketSignature,
+  type BitbucketWebhookHandlerConfig,
+} from "./bitbucket-handler.js";
