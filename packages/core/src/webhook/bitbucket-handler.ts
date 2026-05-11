@@ -16,17 +16,27 @@
  *
  * ## Signature format
  * `X-Hub-Signature-256: sha256=<hex-digest>` (same format as GitHub webhooks).
+ *
+ * ## Environment variables / Authentication
+ * - `BITBUCKET_ACCESS_TOKEN` — OAuth 2.0 access token (recommended).
+ * - `BITBUCKET_APP_USERNAME` + `BITBUCKET_APP_PASSWORD` — App Password auth (alternative).
+ * Set via `ServerConfig.bitbucket` (`accessToken` or `appUsername`/`appPassword`).
+ * The webhook secret is set via `ServerConfig.bitbucketWebhookSecret`.
  */
 
 import { Hono } from "hono";
 import { createHmac, timingSafeEqual } from "crypto";
-import { eq } from "drizzle-orm";
-import { pipelineRuns } from "../db/schema.js";
 import type { AnyDb } from "../db/client.js";
 import type { PipelineRunner } from "../pipeline/runner.js";
-import type { Notifier, PipelineConfig, PipelineRun, RepoConfig } from "../types.js";
+import type { Notifier, PipelineConfig, RepoConfig } from "../types.js";
 import { createLogger } from "../logger.js";
-import type { ReviewFeedbackComment } from "./github-handler.js";
+import {
+  WebhookDedupSet,
+  buildRepoConfigMap,
+  findPipelineRunByUrlOrBranch,
+  handleMergedEvent,
+  processCommentFeedback,
+} from "./shared-handlers.js";
 
 const log = createLogger({ component: "BitbucketWebhookHandler" });
 
@@ -81,110 +91,6 @@ export function verifyBitbucketSignature(
 }
 
 // ---------------------------------------------------------------------------
-// Shared DB helpers
-// ---------------------------------------------------------------------------
-
-async function findPipelineRunByPrUrlOrBranch(
-  db: AnyDb,
-  prUrl?: string,
-  branch?: string,
-): Promise<(typeof pipelineRuns.$inferSelect) | undefined> {
-  if (prUrl) {
-    const rows = await db.select().from(pipelineRuns).where(eq(pipelineRuns.prUrl, prUrl)).limit(1);
-    if (rows.length > 0) return rows[0];
-  }
-  if (branch?.startsWith("agent/")) {
-    const rows = await db.select().from(pipelineRuns).where(eq(pipelineRuns.branch, branch)).limit(1);
-    if (rows.length > 0) return rows[0];
-  }
-  return undefined;
-}
-
-async function updatePipelineRunMerged(
-  db: AnyDb,
-  runId: string,
-  merged: boolean | null,
-  reason: string,
-): Promise<void> {
-  await db
-    .update(pipelineRuns)
-    .set({ autoMerged: merged, autoMergeReason: reason })
-    .where(eq(pipelineRuns.id, runId));
-}
-
-// ---------------------------------------------------------------------------
-// In-memory dedup for processed comment IDs (24h TTL)
-// ---------------------------------------------------------------------------
-
-class CommentDedupSet {
-  private entries = new Map<string, number>();
-
-  has(id: string): boolean {
-    const expiry = this.entries.get(id);
-    if (expiry === undefined) return false;
-    if (Date.now() > expiry) {
-      this.entries.delete(id);
-      return false;
-    }
-    return true;
-  }
-
-  add(id: string, ttlMs = 86_400_000 /* 24 h */): void {
-    this.entries.set(id, Date.now() + ttlMs);
-  }
-
-  cleanup(): void {
-    const now = Date.now();
-    for (const [id, expiry] of this.entries) {
-      if (now > expiry) this.entries.delete(id);
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Event handlers
-// ---------------------------------------------------------------------------
-
-/**
- * Handle `pullrequest:fulfilled` events (Bitbucket's term for "merged").
- */
-async function handlePRFulfilledEvent(
-  payload: Record<string, any>,
-  config: BitbucketWebhookHandlerConfig,
-): Promise<void> {
-  const pr = payload.pullrequest;
-  if (!pr) return;
-
-  const prUrl: string = pr.links?.html?.href ?? "";
-  const branch: string = pr.source?.branch?.name ?? "";
-
-  if (!prUrl) {
-    log.warn({ payload }, "pr-fulfilled: no PR URL in payload — skipping");
-    return;
-  }
-
-  const originalRun = await findPipelineRunByPrUrlOrBranch(config.db, prUrl, branch);
-  if (!originalRun) {
-    log.debug({ prUrl }, "pr-fulfilled: no pipeline run found for PR — skipping");
-    return;
-  }
-
-  if (originalRun.autoMerged) {
-    log.debug({ runId: originalRun.id }, "pr-fulfilled: run already marked merged — skipping");
-    return;
-  }
-
-  await updatePipelineRunMerged(config.db, originalRun.id, true, "merged via Bitbucket");
-  log.info({ runId: originalRun.id, prUrl }, "pr-fulfilled: updated pipeline run auto_merged=true");
-
-  if (config.notifier?.onPRMerged) {
-    await config.notifier.onPRMerged(originalRun as unknown as PipelineRun).catch((err) =>
-      log.error({ err, runId: originalRun.id }, "pr-fulfilled: notifier.onPRMerged() failed"),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Handler factory
 // ---------------------------------------------------------------------------
 
@@ -192,12 +98,19 @@ async function handlePRFulfilledEvent(
  * Create a Hono app that handles Bitbucket webhook events at `/webhooks/bitbucket`.
  *
  * Mount in your server: `app.route("/", createBitbucketWebhookHandler(config))`.
+ *
+ * Shared DB helpers and comment-filtering logic are provided by
+ * `./shared-handlers.ts`. An O(1) Map of repo URL → RepoConfig is built
+ * once at initialisation to avoid per-request linear scans.
  */
 export function createBitbucketWebhookHandler(
   config: BitbucketWebhookHandlerConfig,
 ): Hono {
   const app = new Hono();
-  const dedup = new CommentDedupSet();
+  const dedup = new WebhookDedupSet();
+
+  // Build O(1) URL → RepoConfig map once at init (avoids per-request O(n) scan)
+  const repoConfigsByUrl = buildRepoConfigMap(config.repoConfigs);
 
   const cleanupTimer = setInterval(() => dedup.cleanup(), 60_000);
   cleanupTimer.unref();
@@ -224,7 +137,16 @@ export function createBitbucketWebhookHandler(
 
     // 3a. PR fulfilled (merged)
     if (eventKey === "pullrequest:fulfilled") {
-      await handlePRFulfilledEvent(payload, config);
+      const pr = payload.pullrequest ?? {};
+      await handleMergedEvent(
+        pr.links?.html?.href ?? "",
+        pr.source?.branch?.name ?? "",
+        {
+          db: config.db,
+          notifier: config.notifier,
+          mergeReason: "merged via Bitbucket",
+        },
+      );
       return c.json({ ok: true, action: "pr-merged" });
     }
 
@@ -237,7 +159,8 @@ export function createBitbucketWebhookHandler(
     const comment = payload.comment ?? {};
     const commentId = String(comment.id ?? "");
     const commentBody: string = comment.content?.raw ?? "";
-    const commentAuthor: string = payload.actor?.nickname ?? payload.actor?.display_name ?? "";
+    const commentAuthor: string =
+      payload.actor?.nickname ?? payload.actor?.display_name ?? "";
     const commentHtmlUrl: string = comment.links?.html?.href ?? "";
 
     if (!commentBody.trim()) {
@@ -255,131 +178,39 @@ export function createBitbucketWebhookHandler(
     }
 
     // 6. Find the original pipeline run
-    const db = config.db;
-    const originalRun = await findPipelineRunByPrUrlOrBranch(db, prUrl, prBranch);
-
+    const originalRun = await findPipelineRunByUrlOrBranch(config.db, prUrl, prBranch);
     if (!originalRun) {
       return c.json({ ok: true, skipped: "not an agent-created PR" });
     }
 
-    const resolvedBranch = prBranch || originalRun.branch || "";
-
-    // 7. Resolve repoConfig
-    const repoUrl = originalRun.repoUrl;
-    let repoConfig: RepoConfig | undefined;
-    for (const rc of Object.values(config.repoConfigs)) {
-      if (rc.url === repoUrl) {
-        repoConfig = rc;
-        break;
-      }
-    }
-
+    // 7. Resolve repoConfig — O(1) Map lookup (initialised once at handler creation)
+    const repoConfig = repoConfigsByUrl.get(originalRun.repoUrl ?? "");
     if (!repoConfig) {
-      log.warn({ repoUrl }, "no repoConfig found for PR's repo URL");
+      log.warn({ repoUrl: originalRun.repoUrl }, "no repoConfig found for PR's repo URL");
       return c.json({ ok: true, skipped: "no repo config for this PR" });
     }
 
-    // 8. Feedback config
-    const feedbackCfg = repoConfig.githubFeedback;
-
-    const botLogins = feedbackCfg?.botLogins ?? [];
-    if (botLogins.length > 0 && botLogins.includes(commentAuthor)) {
-      return c.json({ ok: true, skipped: "comment from bot login" });
-    }
-
-    const allowedReviewers = feedbackCfg?.allowedReviewers ?? [];
-    if (allowedReviewers.length > 0 && !allowedReviewers.includes(commentAuthor)) {
-      return c.json({ ok: true, skipped: "commenter not in allowedReviewers" });
-    }
-
-    const triggerKeyword = feedbackCfg?.triggerKeyword;
-    const autoTrigger = feedbackCfg?.autoTrigger !== false;
-    if (triggerKeyword) {
-      if (!commentBody.includes(triggerKeyword)) {
-        return c.json({ ok: true, skipped: "trigger keyword not found" });
-      }
-    } else if (!autoTrigger) {
-      return c.json({ ok: true, skipped: "autoTrigger is disabled and no triggerKeyword configured" });
-    }
-
-    // 9. Dedup
-    if (dedup.has(commentId)) {
-      return c.json({ ok: true, deduplicated: true });
-    }
-
-    // 10. Rate-limit
-    if (config.runner.isActiveFeedback(prUrl)) {
-      log.info({ prUrl }, "feedback run already in progress for this PR — skipping");
-      return c.json({ ok: true, skipped: "feedback run already in progress" });
-    }
-
-    // 11. Pipeline config
-    const pipelineKey = originalRun.pipelineKey;
-    const pipelineConfig = config.pipelineConfigs[pipelineKey];
-    if (!pipelineConfig) {
-      log.warn({ pipelineKey }, "no pipeline config found for original run's pipelineKey");
-      return c.json({ ok: true, skipped: "pipeline config not found" });
-    }
-
-    // 12. Commit dedup
-    dedup.add(commentId);
-
-    // 13. Sanitize
-    const MAX_COMMENT_LENGTH = 4000;
-    const sanitizedBody = commentBody
-      .slice(0, MAX_COMMENT_LENGTH)
-      .replace(/<\/review-comment>/gi, "[/review-comment]");
-
-    const feedbackComment: ReviewFeedbackComment = {
-      commentId,
-      author: commentAuthor,
-      body: sanitizedBody,
-      htmlUrl: commentHtmlUrl,
-    };
-
-    // 14. Build minimal issue from DB row
-    const issue = {
-      id: originalRun.issueId,
-      identifier: originalRun.issueId,
-      title: originalRun.issueTitle,
-      description: "",
-      labels: [] as Array<{ name: string }>,
-      priority: 0,
-      teamId: "",
-    };
-
-    const branchSlug = resolvedBranch.startsWith("agent/")
-      ? resolvedBranch.slice("agent/".length)
-      : (originalRun.issueId ?? "feedback");
-
-    const sanitizedIssue = {
-      id: originalRun.issueId,
-      slug: branchSlug,
-      title: originalRun.issueTitle,
-      description: "",
-      acceptanceCriteria: [] as string[],
-      labels: [] as string[],
-      priority: 0,
-    };
-
-    // 15. Fire-and-forget feedback run
-    config.runner
-      .startFeedback({
-        issue,
-        pipelineKey,
-        pipelineConfig,
-        repoConfig,
-        sanitizedIssue,
-        branch: resolvedBranch,
+    // 8–15. Shared filter/dedup/rate-limit/fire logic
+    const result = await processCommentFeedback(
+      {
+        commentId,
+        commentBody,
+        commentAuthor,
+        commentHtmlUrl,
         prUrl,
+        prBranch,
         prNumber,
-        parentRunId: originalRun.id,
-        feedbackComments: [feedbackComment],
-        rerequestReview: false,
-      })
-      .catch((err) => log.error({ err }, "runner.startFeedback() failed"));
+        originalRun,
+        repoConfig,
+      },
+      {
+        runner: config.runner,
+        pipelineConfigs: config.pipelineConfigs,
+        dedup,
+      },
+    );
 
-    return c.json({ ok: true, action: "feedback-triggered" });
+    return c.json(result);
   });
 
   return app;

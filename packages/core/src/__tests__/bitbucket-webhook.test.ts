@@ -10,7 +10,7 @@
  *  - Integration path: handler → runner.startFeedback()
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { createHmac } from "crypto";
 import {
   createBitbucketWebhookHandler,

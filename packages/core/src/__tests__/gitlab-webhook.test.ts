@@ -10,7 +10,7 @@
  *  - Integration path: handler → runner.startFeedback()
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { createGitLabWebhookHandler, verifyGitLabToken } from "../webhook/gitlab-handler.js";
 import type { GitLabWebhookHandlerConfig } from "../webhook/gitlab-handler.js";
 import type { PipelineConfig, RepoConfig } from "../types.js";

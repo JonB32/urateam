@@ -17,3 +17,14 @@ export {
   verifyBitbucketSignature,
   type BitbucketWebhookHandlerConfig,
 } from "./bitbucket-handler.js";
+export {
+  WebhookDedupSet,
+  buildRepoConfigMap,
+  findPipelineRunByUrlOrBranch,
+  updatePipelineRunMerged,
+  handleMergedEvent,
+  processCommentFeedback,
+  type MergedEventHandlerConfig,
+  type CommentFeedbackInput,
+  type CommentFeedbackResult,
+} from "./shared-handlers.js";
