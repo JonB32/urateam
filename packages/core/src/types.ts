@@ -258,6 +258,14 @@ export const HandoffArtifactSchema = z.object({
     assumptions: z.array(z.string()),
     testResults: TestResultSchema.optional(),
     reviewFindings: z.array(ReviewFindingSchema).optional(),
+    addressedComments: z
+      .array(
+        z.object({
+          commentId: z.string(),
+          response: z.string(),
+        }),
+      )
+      .optional(),
   }),
   tokenBudget: z.object({
     contextTokensUsed: z.number().int().min(0),
@@ -384,6 +392,12 @@ export interface PipelineRun {
    * Used to skip RALPH for review-feedback runs (BEC-182).
    */
   runType?: string | null;
+  /**
+   * JSON-serialised `ReviewFeedbackComment[]` captured at run start. Mirrors
+   * the DB `feedback_context` column. Used by the PR change-summary dispatcher
+   * to reconstruct the triggering review comments.
+   */
+  feedbackContext?: string | null;
 }
 
 // --- Pipeline Result / Error ---

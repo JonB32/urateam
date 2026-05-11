@@ -30,6 +30,7 @@ import type { ReviewModelRun } from "../executor/review/review-provider.js";
 import { extractHandoff } from "../executor/extract-handoff.js";
 import { DEFAULT_AGENT_CLAUDE_MD } from "../executor/agent-config.js";
 import { generatePRDescription } from "./pr-description.js";
+import { maybePostChangeSummary } from "./pr-change-summary.js";
 import { access, writeFile, appendFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -595,6 +596,7 @@ export class PipelineRunner {
     const run = this.buildPipelineRun(runId, issue, pipelineKey, repoConfig, branch);
     run.prUrl = prUrl;
     run.runType = "review-feedback";
+    run.feedbackContext = JSON.stringify(feedbackComments);
 
     // Register in activeFeedbackRuns BEFORE enqueue so rate-limit check works
     this.activeFeedbackRuns.set(prUrl, runId);
@@ -2322,6 +2324,48 @@ export class PipelineRunner {
           runLog.warn(
             { err: err instanceof Error ? err.message : String(err) },
             "BEC-175: PR cost summary post failed (non-fatal)",
+          );
+        }
+      }
+
+      // PR change-summary comment for review-feedback runs. Always-on (no env
+      // flag) — a review-feedback run only exists because a human asked for
+      // changes, so silent shipping is a bug.
+      if (
+        run.runType === "review-feedback" &&
+        prUrl &&
+        repoConfig.provider !== "gitlab" &&
+        this.githubConfig
+      ) {
+        try {
+          const summaryPrMatch = prUrl.match(/\/pull\/(\d+)/);
+          const summaryPrNumber = summaryPrMatch
+            ? parseInt(summaryPrMatch[1]!, 10)
+            : null;
+          const { owner: csOwner, repo: csRepo } = parseRepoUrl(repoConfig.url);
+          const csOctokit = await createGitHubClient(this.githubConfig);
+          await maybePostChangeSummary({
+            run: {
+              id: run.id,
+              runType: run.runType,
+              prUrl: run.prUrl,
+              feedbackContext: run.feedbackContext ?? null,
+              totalInputTokens: run.totalInputTokens,
+              totalOutputTokens: run.totalOutputTokens,
+            },
+            handoff: handoff ?? null,
+            prNumber: summaryPrNumber,
+            owner: csOwner,
+            repo: csRepo,
+            octokit: csOctokit,
+            postPRComment: addPRComment,
+            dashboardBaseUrl: process.env.URATEAM_DASHBOARD_URL ?? "",
+            logger: runLog,
+          });
+        } catch (err) {
+          runLog.warn(
+            { err: err instanceof Error ? err.message : String(err) },
+            "PR change summary post failed (non-fatal)",
           );
         }
       }

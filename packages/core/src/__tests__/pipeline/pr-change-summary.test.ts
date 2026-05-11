@@ -1,0 +1,333 @@
+import { describe, it, expect, vi } from "vitest";
+import {
+  renderChangeSummary,
+  type ChangeSummaryInput,
+  maybePostChangeSummary,
+  type MaybePostChangeSummaryDeps,
+} from "../../pipeline/pr-change-summary.js";
+import type { HandoffArtifact } from "../../types.js";
+import type { ReviewFeedbackComment } from "../../webhook/github-handler.js";
+
+
+const handoff: HandoffArtifact = {
+  runId: "run_abc",
+  issueId: "BEC-100",
+  stage: "implement",
+  timestamp: "2026-05-10T12:00:00Z",
+  summary: "Addressed null-check + rename feedback.",
+  filesChanged: ["src/foo.ts", "src/bar.ts", "src/__tests__/foo.test.ts"],
+  approach: "Minimal changes to address the two reviewer comments.",
+  context: {
+    issueIntent: "Address PR review feedback",
+    constraints: [],
+    assumptions: [],
+    addressedComments: [
+      { commentId: "c-101", response: "Added null check before destructuring." },
+      { commentId: "c-102", response: "Renamed `flag` → `isEnabled` per request." },
+    ],
+  },
+  tokenBudget: { contextTokensUsed: 5000, recommendedMaxTurns: 10 },
+};
+
+const triggeringComments: ReviewFeedbackComment[] = [
+  {
+    commentId: "c-101",
+    author: "alice",
+    body: "Need a null check here.",
+    filePath: "src/foo.ts",
+    lineNumber: 42,
+    htmlUrl: "https://github.com/o/r/pull/1#discussion_r101",
+  },
+  {
+    commentId: "c-102",
+    author: "bob",
+    body: "Rename for clarity.",
+    htmlUrl: "https://github.com/o/r/pull/1#issuecomment-102",
+  },
+];
+
+const baseInput: ChangeSummaryInput = {
+  handoff,
+  run: { id: "run_abc", totalInputTokens: 1000, totalOutputTokens: 200 },
+  triggeringComments,
+  dashboardBaseUrl: "https://dogfood.urateams.com:8443",
+};
+
+describe("renderChangeSummary", () => {
+  it("renders header + summary + per-comment responses + files + run link", () => {
+    const out = renderChangeSummary(baseInput);
+    expect(out).toContain("## 🤖 Addressed PR feedback");
+    expect(out).toContain("Addressed null-check + rename feedback.");
+    expect(out).toContain("**In response to:**");
+    expect(out).toContain(
+      "[@alice's comment on `src/foo.ts:42`](https://github.com/o/r/pull/1#discussion_r101)",
+    );
+    expect(out).toContain("Added null check before destructuring.");
+    expect(out).toContain(
+      "[@bob's general comment](https://github.com/o/r/pull/1#issuecomment-102)",
+    );
+    expect(out).toContain("Renamed `flag` → `isEnabled` per request.");
+    expect(out).toContain("**Files changed:**");
+    expect(out).toContain("- `src/foo.ts`");
+    expect(out).toContain("- `src/bar.ts`");
+    expect(out).toContain("- `src/__tests__/foo.test.ts`");
+    expect(out).toContain(
+      "[run_abc](https://dogfood.urateams.com:8443/runs/run_abc)",
+    );
+  });
+
+  it("collapses multi-line summaries to a single line (newlines → spaces)", () => {
+    const out = renderChangeSummary({
+      ...baseInput,
+      handoff: {
+        ...handoff,
+        summary: "Line one.\nLine two.\n\nLine three.",
+      },
+    });
+    expect(out).toContain("Line one. Line two. Line three.");
+    expect(out).not.toContain("Line one.\nLine two");
+  });
+
+  it("falls back gracefully when addressedComments is missing", () => {
+    const out = renderChangeSummary({
+      ...baseInput,
+      handoff: {
+        ...handoff,
+        context: { ...handoff.context, addressedComments: undefined },
+      },
+    });
+    expect(out).toContain("**In response to:**");
+    expect(out).toContain(
+      "[@alice's comment on `src/foo.ts:42`](https://github.com/o/r/pull/1#discussion_r101)",
+    );
+    // No response text follows the link
+    expect(out).not.toContain("Added null check before destructuring.");
+    expect(out).toContain("_(per-comment responses unavailable; see diff)_");
+  });
+
+  it("falls back gracefully when addressedComments is empty", () => {
+    const out = renderChangeSummary({
+      ...baseInput,
+      handoff: {
+        ...handoff,
+        context: { ...handoff.context, addressedComments: [] },
+      },
+    });
+    expect(out).toContain("_(per-comment responses unavailable; see diff)_");
+  });
+
+  it("drops addressedComments entries whose commentId is not in triggeringComments", () => {
+    const out = renderChangeSummary({
+      ...baseInput,
+      handoff: {
+        ...handoff,
+        context: {
+          ...handoff.context,
+          addressedComments: [
+            { commentId: "c-101", response: "Added null check." },
+            { commentId: "c-FAKE", response: "This should not render." },
+          ],
+        },
+      },
+    });
+    expect(out).toContain("Added null check.");
+    expect(out).not.toContain("This should not render.");
+  });
+
+  it("renders triggering comments without responses when addressedComments has only a partial match", () => {
+    const out = renderChangeSummary({
+      ...baseInput,
+      handoff: {
+        ...handoff,
+        context: {
+          ...handoff.context,
+          addressedComments: [
+            { commentId: "c-101", response: "Did the thing." },
+            // c-102 has no response
+          ],
+        },
+      },
+    });
+    expect(out).toContain("Did the thing.");
+    // c-102 link still present, but no response after it
+    expect(out).toContain(
+      "[@bob's general comment](https://github.com/o/r/pull/1#issuecomment-102)",
+    );
+    // The disclaimer line should NOT appear when at least one response is present
+    expect(out).not.toContain(
+      "_(per-comment responses unavailable; see diff)_",
+    );
+  });
+
+  it("escapes markdown-special chars in author names and file paths", () => {
+    const out = renderChangeSummary({
+      ...baseInput,
+      triggeringComments: [
+        {
+          commentId: "c-101",
+          author: "evil*user[link](x)",
+          body: "x",
+          filePath: "src/[weird]_*name.ts",
+          lineNumber: 5,
+          htmlUrl: "https://github.com/o/r/pull/1#discussion_r101",
+        } as ReviewFeedbackComment,
+      ],
+    });
+    // Escaped: each markdown-special char is preceded by a backslash
+    expect(out).toContain("evil\\*user\\[link\\]\\(x\\)");
+    expect(out).toContain("src/\\[weird\\]\\_\\*name.ts");
+  });
+
+  it("suppresses the 'In response to' section when triggeringComments is empty", () => {
+    const out = renderChangeSummary({
+      ...baseInput,
+      triggeringComments: [],
+    });
+    expect(out).toContain("## 🤖 Addressed PR feedback");
+    expect(out).toContain("**Files changed:**");
+    // No "In response to" section should appear
+    expect(out).not.toContain("**In response to:**");
+  });
+
+  it("renders a plain run id with no link when dashboardBaseUrl is empty (no doubled 'Run')", () => {
+    const out = renderChangeSummary({ ...baseInput, dashboardBaseUrl: "" });
+    // The footer's "Run " prefix should be the ONLY "Run " in the output;
+    // earlier impl produced "Run Run run_abc" by doubling.
+    expect(out).toContain("<sub>Run run_abc · auto-generated</sub>");
+    expect(out).not.toContain("Run Run");
+    expect(out).not.toContain("](/runs/run_abc)");
+  });
+
+  it("constructs an htmlUrl when ReviewFeedbackComment.htmlUrl is missing (fallback)", () => {
+    const out = renderChangeSummary({
+      ...baseInput,
+      prUrl: "https://github.com/o/r/pull/1",
+      handoff: {
+        ...handoff,
+        context: { ...handoff.context, addressedComments: undefined },
+      },
+      triggeringComments: [
+        {
+          commentId: "999",
+          author: "alice",
+          body: "x",
+          filePath: "src/foo.ts",
+          lineNumber: 7,
+          // htmlUrl absent
+        },
+        {
+          commentId: "888",
+          author: "bob",
+          body: "y",
+          // no filePath, htmlUrl absent
+        },
+      ],
+    });
+    expect(out).toContain("https://github.com/o/r/pull/1#discussion_r999");
+    expect(out).toContain("https://github.com/o/r/pull/1#issuecomment-888");
+  });
+});
+
+function makeDeps(over: Partial<MaybePostChangeSummaryDeps> = {}): MaybePostChangeSummaryDeps {
+  const noopLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  return {
+    run: {
+      id: "run_abc",
+      runType: "review-feedback",
+      prUrl: "https://github.com/o/r/pull/1",
+      feedbackContext: JSON.stringify(triggeringComments),
+      totalInputTokens: 1000,
+      totalOutputTokens: 200,
+    },
+    handoff,
+    prNumber: 1,
+    owner: "o",
+    repo: "r",
+    octokit: {} as never,
+    postPRComment: vi.fn().mockResolvedValue(undefined),
+    dashboardBaseUrl: "https://dogfood.urateams.com:8443",
+    logger: noopLogger,
+    ...over,
+  };
+}
+
+describe("maybePostChangeSummary", () => {
+  it("posts exactly once for a review-feedback run with a prUrl", async () => {
+    const deps = makeDeps();
+    await maybePostChangeSummary(deps);
+    expect(deps.postPRComment).toHaveBeenCalledTimes(1);
+    const [, owner, repo, prNumber, body] = (
+      deps.postPRComment as ReturnType<typeof vi.fn>
+    ).mock.calls[0];
+    expect(owner).toBe("o");
+    expect(repo).toBe("r");
+    expect(prNumber).toBe(1);
+    expect(body).toContain("## 🤖 Addressed PR feedback");
+  });
+
+  it("does NOT post for runType=standard", async () => {
+    const deps = makeDeps({
+      run: { ...makeDeps().run, runType: "standard" },
+    });
+    await maybePostChangeSummary(deps);
+    expect(deps.postPRComment).not.toHaveBeenCalled();
+  });
+
+  it("does NOT post when prUrl is null", async () => {
+    const deps = makeDeps({
+      run: { ...makeDeps().run, prUrl: null },
+      prNumber: null,
+    });
+    await maybePostChangeSummary(deps);
+    expect(deps.postPRComment).not.toHaveBeenCalled();
+    expect(deps.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: "run_abc" }),
+      "skipped change summary: no PR URL on run",
+    );
+  });
+
+  it("does NOT post when handoff is missing", async () => {
+    const deps = makeDeps({ handoff: null });
+    await maybePostChangeSummary(deps);
+    expect(deps.postPRComment).not.toHaveBeenCalled();
+    expect(deps.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: "run_abc" }),
+      "skipped change summary: no handoff persisted",
+    );
+  });
+
+  it("posts a degraded comment when feedback_context JSON is malformed", async () => {
+    const deps = makeDeps({
+      run: { ...makeDeps().run, feedbackContext: "{not json" },
+    });
+    await maybePostChangeSummary(deps);
+    expect(deps.postPRComment).toHaveBeenCalledTimes(1);
+    const body = (deps.postPRComment as ReturnType<typeof vi.fn>).mock.calls[0][4];
+    expect(body).toContain("## 🤖 Addressed PR feedback");
+    // Degraded body has no "In response to" section
+    expect(body).not.toContain("**In response to:**");
+    expect(deps.logger.error).toHaveBeenCalled();
+  });
+
+  it("does not throw when postPRComment rejects (logs at warn level)", async () => {
+    const deps = makeDeps({
+      postPRComment: vi.fn().mockRejectedValue(new Error("rate limit")),
+    });
+    await expect(maybePostChangeSummary(deps)).resolves.toBeUndefined();
+    expect(deps.logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: "run_abc", prNumber: 1 }),
+      "PR change summary post failed (non-fatal)",
+    );
+  });
+
+  it("treats null/missing feedback_context as empty triggering comments (no In response to section)", async () => {
+    const deps = makeDeps({
+      run: { ...makeDeps().run, feedbackContext: null },
+    });
+    await maybePostChangeSummary(deps);
+    expect(deps.postPRComment).toHaveBeenCalledTimes(1);
+    const body = (deps.postPRComment as ReturnType<typeof vi.fn>).mock.calls[0][4];
+    expect(body).toContain("## 🤖 Addressed PR feedback");
+    expect(body).not.toContain("**In response to:**");
+  });
+});

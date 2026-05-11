@@ -162,3 +162,64 @@ describe("HandoffArtifactSchema", () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe("HandoffArtifactSchema addressedComments", () => {
+  const base = {
+    runId: "r1",
+    issueId: "i1",
+    stage: "implement",
+    timestamp: "2026-05-10T00:00:00Z",
+    summary: "x",
+    filesChanged: ["a.ts"],
+    approach: "y",
+    tokenBudget: { contextTokensUsed: 1, recommendedMaxTurns: 1 },
+  };
+
+  it("preserves context.addressedComments when populated (not stripped)", () => {
+    const result = HandoffArtifactSchema.safeParse({
+      ...base,
+      context: {
+        issueIntent: "x",
+        constraints: [],
+        assumptions: [],
+        addressedComments: [
+          { commentId: "c1", response: "Did the thing." },
+        ],
+      },
+    });
+    expect(result.success).toBe(true);
+    // Without the schema change, zod's default .strip mode silently drops
+    // the unknown key — success: true but addressedComments: undefined. This
+    // assertion is what makes the test fail before the schema change lands.
+    if (result.success) {
+      expect(result.data.context.addressedComments).toEqual([
+        { commentId: "c1", response: "Did the thing." },
+      ]);
+    }
+  });
+
+  it("accepts a handoff with addressedComments absent (backwards compat)", () => {
+    const result = HandoffArtifactSchema.safeParse({
+      ...base,
+      context: {
+        issueIntent: "x",
+        constraints: [],
+        assumptions: [],
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects when addressedComments[i].response is missing", () => {
+    const result = HandoffArtifactSchema.safeParse({
+      ...base,
+      context: {
+        issueIntent: "x",
+        constraints: [],
+        assumptions: [],
+        addressedComments: [{ commentId: "c1" }],
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+});

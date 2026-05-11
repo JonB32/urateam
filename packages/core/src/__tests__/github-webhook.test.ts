@@ -94,6 +94,7 @@ function makeReviewCommentPayload(overrides: Record<string, any> = {}) {
       user: { login: "reviewer-alice" },
       path: "src/index.ts",
       line: 42,
+      html_url: "https://github.com/org/repo/pull/7#discussion_r12345",
     },
     pull_request: {
       number: 7,
@@ -112,6 +113,7 @@ function makeReviewPayload(overrides: Record<string, any> = {}) {
       body: "LGTM with minor changes",
       user: { login: "reviewer-alice" },
       state: "changes_requested",
+      html_url: "https://github.com/org/repo/pull/7#pullrequestreview-99999",
     },
     pull_request: {
       number: 7,
@@ -441,5 +443,55 @@ describe("createGitHubWebhookHandler", () => {
     expect(res.status).toBe(500);
     const json = await res.json();
     expect(json.error).toBe("Webhook secret not configured");
+  });
+
+  it("populates htmlUrl on ReviewFeedbackComment from pull_request_review_comment payload", async () => {
+    const mockDb = makeMockDb();
+    const app = createGitHubWebhookHandler(
+      buildConfig({ runner: runner as any, db: mockDb as any }),
+    );
+    const res = await postWebhook(app, makeReviewCommentPayload());
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.action).toBe("feedback-triggered");
+    expect(runner.startFeedback).toHaveBeenCalledTimes(1);
+
+    const callArgs = runner.startFeedback.mock.calls[0][0];
+    expect(callArgs.feedbackComments[0].htmlUrl).toBe(
+      "https://github.com/org/repo/pull/7#discussion_r12345",
+    );
+  });
+
+  it("populates htmlUrl on ReviewFeedbackComment from pull_request_review payload", async () => {
+    const mockDb = makeMockDb();
+    const app = createGitHubWebhookHandler(
+      buildConfig({ runner: runner as any, db: mockDb as any }),
+    );
+    const res = await postWebhook(app, makeReviewPayload(), "pull_request_review");
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.action).toBe("feedback-triggered");
+    expect(runner.startFeedback).toHaveBeenCalledTimes(1);
+
+    const callArgs = runner.startFeedback.mock.calls[0][0];
+    expect(callArgs.feedbackComments[0].htmlUrl).toBe(
+      "https://github.com/org/repo/pull/7#pullrequestreview-99999",
+    );
+  });
+
+  it("leaves htmlUrl undefined when comment payload lacks html_url", async () => {
+    const mockDb = makeMockDb();
+    const app = createGitHubWebhookHandler(
+      buildConfig({ runner: runner as any, db: mockDb as any }),
+    );
+    const payload = makeReviewCommentPayload();
+    delete (payload.comment as { html_url?: string }).html_url;
+    const res = await postWebhook(app, payload);
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.action).toBe("feedback-triggered");
+
+    const callArgs = runner.startFeedback.mock.calls[0][0];
+    expect(callArgs.feedbackComments[0].htmlUrl).toBeUndefined();
   });
 });

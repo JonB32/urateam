@@ -31,4 +31,11 @@ describe("implementTemplate — review-feedback prompt (BEC-182)", () => {
     const out = implementTemplate(baseIssue, baseRepo, undefined, feedback);
     expect(out).toMatch(/stop and report what blocks the resolution/);
   });
+
+  it("review-feedback implement prompt instructs agent to emit context.addressedComments", () => {
+    const out = implementTemplate(baseIssue, baseRepo, undefined, feedback);
+    expect(out).toContain("context.addressedComments");
+    expect(out).toContain("commentId");
+    expect(out).toContain("response");
+  });
 });

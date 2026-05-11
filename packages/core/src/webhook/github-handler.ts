@@ -25,6 +25,8 @@ export interface ReviewFeedbackComment {
   filePath?: string;
   /** Line number for inline review comments. */
   lineNumber?: number;
+  /** GitHub html_url for the comment — used to link back from change-summary. */
+  htmlUrl?: string;
 }
 
 export interface GitHubWebhookHandlerConfig {
@@ -326,16 +328,19 @@ export function createGitHubWebhookHandler(
     let commentAuthor: string;
     let filePath: string | undefined;
     let lineNumber: number | undefined;
+    let commentHtmlUrl: string | undefined;
 
     if (event === "pull_request_review") {
       commentBody = (payload.review?.body as string) ?? "";
       commentId = String(payload.review?.id ?? "");
       commentAuthor = (payload.review?.user?.login as string) ?? "";
+      commentHtmlUrl = payload.review?.html_url as string | undefined;
     } else {
       // pull_request_review_comment and issue_comment both use payload.comment
       commentBody = (payload.comment?.body as string) ?? "";
       commentId = String(payload.comment?.id ?? "");
       commentAuthor = (payload.comment?.user?.login as string) ?? "";
+      commentHtmlUrl = payload.comment?.html_url as string | undefined;
       if (event === "pull_request_review_comment") {
         filePath = payload.comment?.path as string | undefined;
         lineNumber = (payload.comment?.line ?? payload.comment?.original_line) as
@@ -501,6 +506,7 @@ export function createGitHubWebhookHandler(
       body: sanitizedBody,
       filePath: sanitizedFilePath,
       lineNumber,
+      htmlUrl: commentHtmlUrl,
     };
 
     // 16. Build minimal LinearIssue from the DB row (issue was already sanitised earlier)
