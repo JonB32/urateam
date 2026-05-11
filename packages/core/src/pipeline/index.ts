@@ -25,3 +25,12 @@ export {
   type AutomergeCheckResult,
   type AutomergeResult,
 } from "./automerge.js";
+export {
+  checkConvergence,
+  CONVERGENCE_DEFAULTS,
+  type TurnRecord,
+  type FindingFingerprint,
+  type ConvergenceResult,
+  type ConvergenceDiagnosis,
+  type ConvergenceConfig,
+} from "./convergenceValidator.js";

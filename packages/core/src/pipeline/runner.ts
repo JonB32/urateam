@@ -57,7 +57,9 @@ import {
   branchName,
   createWorktreeFromRemote,
   pruneWorktreesInRepoDirs,
+  gitExecSafe,
 } from "../repo/git.js";
+import { createHash } from "node:crypto";
 import {
   addPRComment,
   createGitHubClient,
@@ -100,6 +102,11 @@ import { evaluatePolicyGates } from "../policy/evaluate.js";
 import { buildReviewerRequest, verifyApprovalsReceived } from "../policy/index.js";
 import { logAuditEvent, policyReviewersRequestedEvent, reviewFanoutFallbackUsedEvent } from "../audit/index.js";
 import { matchesAnyPattern } from "../util/glob.js";
+import {
+  checkConvergence,
+  CONVERGENCE_DEFAULTS,
+  type TurnRecord,
+} from "./convergenceValidator.js";
 
 // Module-level logger (no runId yet — used for pre-run messages)
 const log = createLogger({ component: "PipelineRunner" });
@@ -1440,6 +1447,10 @@ export class PipelineRunner {
       // run 3 parallel sub-agents (reuse, quality, efficiency) to harden code
       // quality. Configurable via deepReviewPasses (default 0/disabled) and
       // maxDeepReviewPasses (hard cap, default 3).
+      //
+      // BEC-208: The loop is also guarded by a convergenceValidator that detects
+      // when the same unresolved issues appear in 3 consecutive turns or when the
+      // configurable maxReviewTurns limit (default 12) is exceeded.
       const effectiveDeepReviewPasses = isFeatureLicensed("deep-review")
         ? config.deepReviewPasses ?? 0
         : 0;
@@ -1449,10 +1460,14 @@ export class PipelineRunner {
       const hasImplement = config.stages.includes("implement");
 
       if (deepReviewPasses > 0 && hasReview && hasImplement) {
-        // Cap deep review iterations against maxReviewPasses
-        const passLimit = Math.min(deepReviewPasses, maxDeepReviewPasses);
+        // Cap deep review iterations against maxReviewPasses and maxReviewTurns.
+        // maxReviewTurns (BEC-208) provides a global convergence-based cap
+        // independent of the per-config deepReviewPasses setting.
+        const maxTurns = config.maxReviewTurns ?? CONVERGENCE_DEFAULTS.MAX_TURNS;
+        const passLimit = Math.min(deepReviewPasses, maxDeepReviewPasses, maxTurns);
 
-        let previousFindingsCount = Infinity;
+        // BEC-208: convergence history tracks TurnRecords for the validator.
+        const convergenceHistory: TurnRecord[] = [];
 
         for (let drPass = 1; drPass <= passLimit; drPass++) {
           if (!handoff) {
@@ -1503,23 +1518,15 @@ export class PipelineRunner {
 
           const findingsCount = deepResult.findings.length;
           runLog.info(
-            { drPass, findings: findingsCount, previousFindings: previousFindingsCount },
+            { drPass, findings: findingsCount },
             "deep review: sub-agents complete",
           );
 
-          // Convergence: stop when no findings or count didn't change
+          // Convergence fast-exit: no findings means the code is clean.
           if (findingsCount === 0) {
             runLog.info({ drPass }, "deep review: no findings — converged");
             break;
           }
-          if (findingsCount >= previousFindingsCount) {
-            runLog.info(
-              { drPass, findingsCount, previousFindingsCount },
-              "deep review: findings count did not decrease — stopping to prevent loop",
-            );
-            break;
-          }
-          previousFindingsCount = findingsCount;
 
           // Re-run implement stage with deep review context. The agentic
           // review provider already converts DeepReviewFinding -> ReviewFinding
@@ -1540,7 +1547,29 @@ export class PipelineRunner {
               fix: f.fix,
             };
           });
-          const deepReviewContext = buildDeepReviewContext(drPass, deepFindingsForContext, handoff);
+
+          // BEC-208: compute the pre-implement state fingerprint so the
+          // convergence validator can detect whether the implementation changed
+          // between turns. We hash both the latest commit SHA (captures committed
+          // changes) and `git diff HEAD` (captures uncommitted changes), because
+          // when the agent commits all its work `git diff HEAD` is empty and a
+          // hash of "" would be identical every pass even when commits differ.
+          const [preImplCommit, preImplDiff] = await Promise.all([
+            gitExecSafe(["log", "--format=%H", "-1"], worktreePath ?? "."),
+            gitExecSafe(["diff", "HEAD"], worktreePath ?? "."),
+          ]);
+          const implDiffHash = createHash("sha256")
+            .update(preImplCommit)
+            .update(preImplDiff)
+            .digest("hex")
+            .slice(0, 16);
+
+          const deepReviewContext = buildDeepReviewContext(
+            drPass,
+            deepFindingsForContext,
+            handoff,
+            implDiffHash,
+          );
           runLog.info({ drPass }, "deep review: re-running implement stage");
 
           const drImplementResult = await executeStage({
@@ -1643,6 +1672,76 @@ export class PipelineRunner {
                 reviewFindings: [...existingFindings, ...deepResult.findings],
               },
             };
+          }
+
+          // BEC-208: compute the post-implement diff hash for this turn.
+          // We re-compute here (after the re-implement stage ran) so the hash
+          // reflects the state after all changes in this turn.
+          // Hash both the latest commit SHA and uncommitted diff so we detect
+          // changes regardless of whether the agent committed or not.
+          const [postImplCommit, postImplDiff] = await Promise.all([
+            gitExecSafe(["log", "--format=%H", "-1"], worktreePath ?? "."),
+            gitExecSafe(["diff", "HEAD"], worktreePath ?? "."),
+          ]);
+          const postImplDiffHash = createHash("sha256")
+            .update(postImplCommit)
+            .update(postImplDiff)
+            .digest("hex")
+            .slice(0, 16);
+
+          // BEC-208: record this turn in the convergence history.
+          convergenceHistory.push({
+            turn: drPass,
+            findings: deepResult.findings.map((f) => ({
+              file: f.file,
+              line: f.line,
+              category: f.category,
+              description: f.description,
+            })),
+            implDiffHash: postImplDiffHash,
+          });
+
+          // BEC-208: check for convergence after recording the turn.
+          const convergenceResult = checkConvergence(convergenceHistory, {
+            maxTurns,
+            consecutiveThreshold: CONVERGENCE_DEFAULTS.CONSECUTIVE_THRESHOLD,
+          });
+
+          if (convergenceResult.shouldStop) {
+            runLog.warn(
+              {
+                drPass,
+                reason: convergenceResult.reason,
+                diagnosis: convergenceResult.diagnosis,
+                unresolvedCount: convergenceResult.unresolvedIssues.length,
+                message: convergenceResult.message,
+              },
+              "deep review: convergence validator stopped loop",
+            );
+            // Force the PR to draft so operators know unresolved issues remain.
+            if (handoff) {
+              const convergenceFinding: ReviewFinding = {
+                severity: "blocking",
+                file: "(deep-review)",
+                line: 0,
+                category: "convergence-failure",
+                description: convergenceResult.message ?? "Deep-review loop did not converge.",
+                fix: convergenceResult.diagnosis === "non-responsive-implementation"
+                  ? "The implementation agent is not incorporating feedback. Check the deep-review context block is being processed correctly."
+                  : convergenceResult.diagnosis === "misaligned-review-criteria"
+                    ? "Review criteria may be ambiguous or too strict. Manually review the outstanding findings and adjust if necessary."
+                    : "Review the outstanding findings and resolve manually, or increase maxReviewTurns.",
+              };
+              const existingFindings = handoff.context.reviewFindings ?? [];
+              handoff = {
+                ...handoff,
+                context: {
+                  ...handoff.context,
+                  reviewFindings: [...existingFindings, convergenceFinding],
+                },
+              };
+            }
+            break;
           }
         }
       }

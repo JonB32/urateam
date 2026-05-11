@@ -388,11 +388,20 @@ export function deepFindingsToReviewFindings(
 /**
  * Build a prompt context block for the implement agent describing the deep
  * review findings it should address.
+ *
+ * @param pass - 1-based pass number.
+ * @param findings - Findings from the review providers for this pass.
+ * @param previousHandoff - Handoff artifact from the previous implement stage.
+ * @param implDiffHash - Optional hash of `git diff HEAD` after the previous
+ *   implement run. When provided it is embedded in the context block so that
+ *   the convergence validator and downstream tooling can compare whether the
+ *   implementation actually changed between passes.
  */
 export function buildDeepReviewContext(
   pass: number,
   findings: DeepReviewFinding[],
   previousHandoff: HandoffArtifact,
+  implDiffHash?: string,
 ): string {
   const grouped = {
     reuse: findings.filter((f) => f.agent === "reuse"),
@@ -413,12 +422,16 @@ export function buildDeepReviewContext(
           .map((f) => `  [${f.severity}] ${sanitizeField(f.file)}:${f.line} — ${sanitizeField(f.description)}\n  Fix: ${sanitizeField(f.fix)}`)
           .join("\n");
 
-  return `<deep-review pass="${pass}">
+  // Embed the implementation diff hash when available so downstream tooling
+  // (convergence validator) can detect whether the implementation changed.
+  const diffHashAttr = implDiffHash ? ` implDiffHash="${implDiffHash}"` : "";
+
+  return `<deep-review pass="${pass}"${diffHashAttr}>
 IMPORTANT: This is deep-review pass ${pass}. Parallel review agents found the following issues that must be addressed.
 
 Previous implementation summary: ${sanitizeField(previousHandoff.summary)}
 Files changed: ${previousHandoff.filesChanged.map(sanitizeField).join(", ") || "none"}
-
+${implDiffHash ? `Implementation diff hash: ${implDiffHash}\n` : ""}
 Code Reuse findings:
 ${formatFindings(grouped.reuse)}
 

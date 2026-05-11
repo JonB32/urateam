@@ -49,6 +49,19 @@ export const PipelineConfigSchema = z.object({
   deepReviewPasses: z.number().int().min(0).max(5).optional(),
   /** Hard cap on deep review passes. Prevents infinite loops. Default: 3. */
   maxDeepReviewPasses: z.number().int().min(1).max(10).optional(),
+  /**
+   * Maximum number of deep-review loop turns (iterations of:
+   * run-review-providers → re-implement → re-review).
+   * The loop is aborted — and the PR created as draft — if this limit is
+   * reached before convergence. Default: 12.
+   *
+   * The convergence validator also aborts early (before this limit) if the
+   * same unresolved issues appear in 3 consecutive turns, which indicates
+   * either a non-responsive implementation or misaligned review criteria.
+   *
+   * See CLAUDE.md § "Convergence detection" for the full decision logic.
+   */
+  maxReviewTurns: z.number().int().min(1).optional(),
   /** Auto-merge PRs when changes are trivial. Default: false (opt-in). */
   autoMerge: z.boolean().optional(),
   /** Max diff lines for auto-merge eligibility. Default: 200. */
