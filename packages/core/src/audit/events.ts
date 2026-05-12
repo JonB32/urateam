@@ -647,3 +647,28 @@ export function claudeAuthExpiredEvent(args: {
     },
   });
 }
+
+/**
+ * Tier 1a — emitted when the scratch-file denylist gate matches one or more
+ * agent-added files and forces the PR to draft. Payload includes the matched
+ * paths so operators can see the rate and categories. Capped at 50 paths to
+ * keep the audit row bounded.
+ */
+export function pipelineScratchFilesBlockedEvent(args: {
+  runId: string;
+  issueId: string;
+  files: string[];
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.scratch_files_blocked",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      files: args.files.slice(0, 50),
+      truncated: args.files.length > 50,
+      count: args.files.length,
+    },
+  });
+}

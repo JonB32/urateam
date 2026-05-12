@@ -97,8 +97,14 @@ import { createLogger, runWithLogContext } from "../logger.js";
 import { isTransientError, MAX_TRANSIENT_RETRIES } from "./error-classifier.js";
 import { evaluatePolicyGates } from "../policy/evaluate.js";
 import { buildReviewerRequest, verifyApprovalsReceived } from "../policy/index.js";
-import { logAuditEvent, policyReviewersRequestedEvent, reviewFanoutFallbackUsedEvent } from "../audit/index.js";
+import {
+  logAuditEvent,
+  policyReviewersRequestedEvent,
+  reviewFanoutFallbackUsedEvent,
+  pipelineScratchFilesBlockedEvent,
+} from "../audit/index.js";
 import { matchesAnyPattern } from "../util/glob.js";
+import { findScratchFiles } from "./scratch-file-guard.js";
 import {
   startFeedbackPipeline,
   type FeedbackStartContext,
@@ -1756,6 +1762,55 @@ export class PipelineRunner {
             "org-policy: gate evaluation failed — skipping",
           );
         }
+      }
+
+      // Tier 1a — scratch-file denylist gate. Runs after all stages have
+      // committed (per-stage auto-commits at line ~1247 have run; push-queue
+      // auto-commit at ~1780 is still ahead and serves as the final safety net
+      // for any files that escape this point). If matches are found, surface
+      // them as blocking findings so the existing draft-PR renderer takes over.
+      // Fail-open: a git error returns an empty result and the gate stays silent.
+      try {
+        const scratch = await findScratchFiles(
+          worktreePath!,
+          repoConfig.defaultBranch,
+        );
+        if (scratch.skipped) {
+          runLog.info("scratch-file-guard: skipped via URATEAM_DISABLE_SCRATCH_GUARD env var");
+        } else if (scratch.files.length > 0) {
+          shouldDraft = true;
+          for (const f of scratch.files) {
+            unresolvedBlockingFindings.push({
+              severity: "blocking",
+              file: f,
+              line: 0,
+              category: "scratch-files",
+              description: `Scratch artifact at \`${f}\` matched the urateam denylist (agent self-documentation / *.bak / *.tmp / *.log / root-only commit-*.sh|run-*.sh / non-exempt repo-root *.md).`,
+              fix:
+                "Delete the file from the worktree (`git rm`), re-run, or set `URATEAM_DISABLE_SCRATCH_GUARD=true` if the match is a false positive.",
+            });
+          }
+          runLog.warn(
+            {
+              issueId: sanitizedIssue.id,
+              files: scratch.files,
+              count: scratch.files.length,
+            },
+            "scratch-file-guard: matched denylist — forcing draft PR",
+          );
+          await logAuditEvent(
+            this.db as AnyDb,
+            pipelineScratchFilesBlockedEvent({
+              runId,
+              issueId: sanitizedIssue.id,
+              files: scratch.files,
+            }),
+          );
+        }
+      } catch (guardErr) {
+        // Best-effort: log and continue. The push-queue auto-commit + the
+        // review-stage convention check (Tier 2) provide overlapping coverage.
+        runLog.warn({ err: guardErr }, "scratch-file-guard: gate evaluation failed — skipping");
       }
 
       // All stages complete — push branch and create PR.
