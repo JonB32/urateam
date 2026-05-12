@@ -529,6 +529,12 @@ export const AuditEventTypeSchema = z.enum([
    *  deep-review fanout runs. Payload includes the diff metrics and which
    *  threshold tripped. */
   "pipeline.auto_deep_review_bumped",
+  /** Tier 5 — an issue tripped the consecutive-failures circuit breaker
+   *  (≥ `maxConsecutiveFailures` failed runs in a row). The PM Agent
+   *  escalated by adding the `needs-design` label, posting a Linear
+   *  comment with the last failure's error message, and sending a Slack
+   *  alert. Payload includes failureCount and a truncated errorMessage. */
+  "pm.escalated_to_needs_design",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 

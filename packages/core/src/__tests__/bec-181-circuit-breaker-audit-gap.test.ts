@@ -157,20 +157,30 @@ async function assertPromoteBreakerSkip(opts: {
   expect(results[0].promoted).toBe(false);
   expect(results[0].reason).toMatch(/circuit.breaker/i);
   expect(results[0].reason).toContain(`${opts.failureCount} consecutive failed runs`);
-  expect(client.updateIssue).not.toHaveBeenCalled();
+  // Tier 5 escalation: when the issue is NOT already labeled `needs-design`,
+  // promoteReadyIssues now attempts to label-update the issue and post a
+  // Linear comment (the side effects of escalation). The fixture above
+  // doesn't include `issueLabels` on the client, so the escalation's label
+  // lookup fails — but `createComment` is still called (defensive path).
+  // For BEC-181's contract verification we only assert that the circuit
+  // breaker still fires before conflict detection.
   // Breaker fires before conflict detection (saves tokens)
   expect(conflictChecker).not.toHaveBeenCalled();
 
   await flushFireAndForget();
 
-  // Audit event is now written when the breaker fires
+  // Audit events: at minimum `pm.skipped_circuit_breaker` (BEC-181's
+  // contract) — Tier 5 may additionally emit `pm.escalated_to_needs_design`
+  // when the issue isn't already escalated. Both are expected after Tier 5.
   const auditRows = await (db as any).select().from(auditEvents);
-  expect(auditRows).toHaveLength(1);
-  expect(auditRows[0].eventType).toBe("pm.skipped_circuit_breaker");
-  expect(auditRows[0].issueId).toBe(opts.issueId);
-  expect(JSON.parse(auditRows[0].payload).failureCount).toBe(opts.failureCount);
-  expect(JSON.parse(auditRows[0].payload).threshold).toBe(opts.threshold);
-  expect(JSON.parse(auditRows[0].payload).source).toBe("promote");
+  const breakerEvents = auditRows.filter(
+    (r: any) => r.eventType === "pm.skipped_circuit_breaker",
+  );
+  expect(breakerEvents).toHaveLength(1);
+  expect(breakerEvents[0].issueId).toBe(opts.issueId);
+  expect(JSON.parse(breakerEvents[0].payload).failureCount).toBe(opts.failureCount);
+  expect(JSON.parse(breakerEvents[0].payload).threshold).toBe(opts.threshold);
+  expect(JSON.parse(breakerEvents[0].payload).source).toBe("promote");
 }
 
 describe("BEC-181 Part 2: promoteReadyIssues circuit-breaker skip (working correctly)", () => {
