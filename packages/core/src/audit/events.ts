@@ -705,6 +705,43 @@ export function pipelineTypecheckFailedEvent(args: {
  * undefined symbol; the audit event captures the list (capped at 20 tuples)
  * for rate-tracking.
  */
+/**
+ * Tier 3 — emitted when the auto-deep-review heuristic bumps
+ * `deepReviewPasses` because the agent's diff exceeded one or more
+ * thresholds (changedFiles / totalLines / newPublicExports). Lets operators
+ * track the rate of auto-bumps and tune thresholds.
+ */
+export function pipelineAutoDeepReviewBumpedEvent(args: {
+  runId: string;
+  issueId: string;
+  metrics: {
+    changedFiles: number;
+    totalLines: number;
+    newPublicExports: number;
+  };
+  thresholds: {
+    changedFiles: number;
+    totalLines: number;
+    newPublicExports: number;
+  };
+  from: number;
+  to: number;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.auto_deep_review_bumped",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      metrics: args.metrics,
+      thresholds: args.thresholds,
+      from: args.from,
+      to: args.to,
+    },
+  });
+}
+
 export function pipelineSpecVsImplFailedEvent(args: {
   runId: string;
   issueId: string;
