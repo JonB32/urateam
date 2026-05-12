@@ -8,6 +8,7 @@ import type {
 } from "../../types.js";
 import {
   SECURITY_REVIEW_CHECKLIST,
+  PROJECT_CONVENTION_CHECKLIST,
   REVIEW_OUTPUT_FORMAT,
 } from "../../security/review-checklist.js";
 import { sanitize } from "./sanitizer.js";
@@ -356,9 +357,12 @@ ${handoffBlock(handoff)}
 
 ${SECURITY_REVIEW_CHECKLIST}
 
+${PROJECT_CONVENTION_CHECKLIST}
+
 Instructions:
-- Review all changed files for correctness, style, and security.
-- Apply the security checklist above to every change.
+- Review all changed files for correctness, style, security, AND adherence to the Project Convention Checklist above.
+- Apply the security checklist to every change.
+- Apply the Tier 2 convention checklist to every change. The 9 categories (scratch-files, db-ddl-drift, audit-bypass-undocumented, credential-in-interface, spec-vs-impl, convention-execfile, convention-console, convention-throw, convention-as-any) are blocking-severity by default — use them verbatim in your \`ReviewFinding.category\` field so operators see one consistent vocabulary across the deterministic gates (Tiers 1a/1b/1c) and your findings.
 - IMPORTANT: Cross-reference the implementation against the acceptance criteria listed in the issue data above. For each criterion, verify there is corresponding code in the diff. If any acceptance criterion is NOT addressed by the code changes, report it as a blocking finding with category "incomplete-implementation".
 - DEAD CODE CHECK: For every new export (function, class, constant) in the changed files, use Grep to check if it is imported and called from at least one file other than its own test file. Re-exports in index/barrel files do NOT count as callers — there must be an actual invocation. Exception: side-effect-only registrations that run at import time are acceptable. If a new export has no callers outside its definition and test files, report it as a BLOCKING finding with category "dead-code" — the implementation is not wired into the pipeline and will have no effect at runtime.
 - DOCUMENTATION CHECK: If the changes introduce new configuration options, CLI flags, environment variables, or change existing behavior, check whether CLAUDE.md, README.md, or deploy/README.md were updated. If documentation was not updated, report it as a warning finding with category "missing-documentation".
