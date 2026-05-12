@@ -1845,17 +1845,23 @@ export class PipelineRunner {
           );
         } else {
           shouldDraft = true;
-          const messagesBlock = tc.firstMessages
-            .map((m) => `  ${m}`)
-            .join("\n");
+          // Keep `description` single-line so it renders cleanly inside the
+          // draft-PR comment's markdown list item (runner.ts:2188 interpolates
+          // description directly into a `-` list bullet — embedded `\n` would
+          // break the list).
+          const firstMessage = tc.firstMessages[0] ?? "(no parseable first message)";
+          const additional =
+            tc.firstMessages.length > 1
+              ? ` (+${tc.firstMessages.length - 1} more)`
+              : "";
           unresolvedBlockingFindings.push({
             severity: "blocking",
             file: "(workspace)",
             line: 0,
             category: "typecheck",
-            description: `Typecheck failed with ${tc.errorCount} error${tc.errorCount === 1 ? "" : "s"}.\n\nFirst messages:\n${messagesBlock}`,
+            description: `Typecheck failed with ${tc.errorCount} error${tc.errorCount === 1 ? "" : "s"}. First: ${firstMessage}${additional}`,
             fix:
-              "Fix the type errors above. Full output is preserved in the run logs. Set `URATEAM_DISABLE_TYPECHECK_GATE=true` if the gate is firing on a false positive.",
+              "Fix the type errors. Full output (up to 5 first errors) is in the audit log (`pipeline.typecheck_failed` event) and the run's structured logs. Set `URATEAM_DISABLE_TYPECHECK_GATE=true` if the gate is firing on a false positive.",
           });
           runLog.warn(
             {
