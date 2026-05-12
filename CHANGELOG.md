@@ -17,6 +17,17 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+## [0.1.49] — 2026-05-12
+
+Bumps:
+- `@urateam/core`: 0.1.34 → 0.1.35
+- `@urateam/cli`: 0.1.36 → 0.1.37
+- `@urateam/dashboard`: 0.1.34 → 0.1.35
+- `create-urateam`: 0.1.37 → 0.1.38
+
+### Added (OSS+)
+- **Tier 2: convention-checklist review prompt** ([#285](https://github.com/JonB32/urateam/pull/285)) — new `PROJECT_CONVENTION_CHECKLIST` in `packages/core/src/security/review-checklist.ts` injected into both the main review-stage prompt (`reviewTemplate`) and the OpenRouter fanout system prompt (`buildReviewPrompt`). The 9 categories (`scratch-files`, `db-ddl-drift`, `audit-bypass-undocumented`, `credential-in-interface`, `spec-vs-impl`, `convention-execfile`, `convention-console`, `convention-throw`, `convention-as-any`) mirror the deterministic-gate vocabulary from Tier 1, so operators see one consistent set of `category` strings whether the finding came from a deterministic gate or from the AI review. Review stage runs on Sonnet (not Haiku) per the existing `DEFAULT_AGENT_PROFILES.review.model`. Adds defense in depth against the Tier 1 failure modes the static checks can't catch (e.g., bare `throw` outside the runner, schema-change drift across all three required sites, credential-shaped fields in newly exported interfaces).
+
 ## [0.1.48] — 2026-05-12
 
 Bumps:
