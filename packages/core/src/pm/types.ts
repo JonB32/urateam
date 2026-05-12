@@ -83,6 +83,16 @@ export interface TriageResult {
   complexity: "trivial" | "small" | "medium" | "large";
   rationale: string;
   acceptanceCriteria: string[];
+  /** Tier 4 — 3-5 line approach summary the agent will follow. Empty for
+   *  observer-origin issues (which skip Claude classification). */
+  approachSummary?: string;
+  /** Tier 4 — questions the operator must answer before implement starts.
+   *  When non-empty, the pipeline is forced to `needs-design` regardless of
+   *  the complexity classification, mirroring the observer-marker gate. */
+  openQuestions?: string[];
+  /** Tier 4 — "things this should NOT do" — anti-acceptance criteria the
+   *  agent must respect to stay in scope. */
+  antiAcceptanceCriteria?: string[];
 }
 
 export interface ConflictCheckResult {
