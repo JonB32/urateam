@@ -14,6 +14,7 @@
  */
 
 import { Command } from "commander";
+import { createLogger } from "@urateam/core";
 import * as http from "node:http";
 import * as net from "node:net";
 import * as fs from "node:fs/promises";
@@ -21,6 +22,23 @@ import * as childProcess from "node:child_process";
 import * as readline from "node:readline";
 import * as crypto from "node:crypto";
 import * as path from "node:path";
+
+// ---------------------------------------------------------------------------
+// Module-level constants
+// ---------------------------------------------------------------------------
+
+/** Ports that the urateam stack occupies: app (3000) and dashboard (3001). */
+const APP_PORTS = [3000, 3001] as const;
+
+/** Port range scanned when looking for a free callback server port. */
+const CALLBACK_PORT_RANGE = { min: 9876, max: 9896 };
+
+/**
+ * Returns the canonical output directory for generated files.
+ * Falls back to `process.cwd()` when `dir` is omitted.
+ * @internal
+ */
+const getOutputDir = (dir?: string): string => dir ?? process.cwd();
 
 // ---------------------------------------------------------------------------
 // Types
@@ -55,13 +73,30 @@ export interface BootstrapDeps {
   isPortFree?: (port: number) => Promise<boolean>;
 }
 
-/** Result from a successful GitHub App manifest flow. */
+/**
+ * @internal
+ * Result from a successful GitHub App manifest flow.
+ *
+ * Credential carrier — do NOT log or serialise this object.
+ * Fields named `*Key`, `*Secret`, and `*Id` contain sensitive material.
+ * Pass this struct only to {@link generateEnvFile} / {@link generateDockerCompose};
+ * never include it in audit log entries, Slack messages, or HTTP responses.
+ *
+ * @remarks
+ *   This type is exported only because TypeScript's `declaration: true` requires
+ *   exported functions to have fully-resolvable return types in `.d.ts` files.
+ *   Treat it as `@internal` at the API level.
+ */
+/** @internal */
 export interface GitHubAppCredentials {
   appId: number;
   appName: string;
+  /** @internal PEM-encoded private key — never log */
   privateKey: string;
+  /** @internal Webhook HMAC secret — never log */
   webhookSecret: string;
   clientId: string;
+  /** @internal OAuth client secret — never log */
   clientSecret: string;
   htmlUrl: string;
 }
@@ -77,17 +112,26 @@ export interface CreateGitHubAppOpts {
   deps?: BootstrapDeps;
 }
 
-/** Everything needed to render output files. */
+/**
+ * @internal
+ * Everything needed to render output files (.env, docker-compose, Caddyfile).
+ *
+ * Credential carrier — do NOT log or serialise this object.
+ * It contains sensitive strings (private keys, API keys, webhook secrets,
+ * dashboard passwords). Pass it only to the `generate*` functions; never
+ * include it in audit log entries, Slack messages, or HTTP responses.
+ */
+/** @internal */
 export interface BootstrapContext {
   /** GitHub App ID. */
   appId: number;
-  /** PEM-encoded GitHub App private key (raw string). */
+  /** @internal PEM-encoded GitHub App private key — never log */
   privateKey: string;
-  /** GitHub App webhook secret. */
+  /** @internal GitHub App webhook secret — never log */
   githubWebhookSecret: string;
-  /** Linear API key. */
+  /** @internal Linear API key — never log */
   linearApiKey: string;
-  /** Linear webhook secret (from registration response). */
+  /** @internal Linear webhook secret (from registration response) — never log */
   linearWebhookSecret: string;
   /** Public webhook URL (e.g. https://hooks.example.com). */
   webhookUrl: string;
@@ -95,8 +139,47 @@ export interface BootstrapContext {
   databaseUrl?: string;
   /** Dashboard basic-auth username. */
   dashboardUser?: string;
-  /** Dashboard basic-auth password. */
+  /** @internal Dashboard basic-auth password — never log */
   dashboardPassword?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Internal API response shapes
+// ---------------------------------------------------------------------------
+
+/**
+ * Shape of the JSON returned by the GitHub App manifest exchange endpoint
+ * (POST /app-manifests/{code}/conversions).
+ *
+ * @see https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app-from-a-manifest
+ * @internal
+ */
+interface GitHubAppManifestResponse {
+  id: number;
+  name: string;
+  /** PEM-encoded private key */
+  pem: string;
+  webhook_secret: string;
+  client_id: string;
+  client_secret: string;
+  html_url: string;
+}
+
+/**
+ * Shape of the JSON returned by the Linear `webhookCreate` GraphQL mutation.
+ * @internal
+ */
+interface LinearWebhookCreateResponse {
+  data?: {
+    webhookCreate?: {
+      success: boolean;
+      webhook?: {
+        id: string;
+        url: string;
+      };
+    };
+  };
+  errors?: Array<{ message: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -223,16 +306,15 @@ export async function preflightChecks(deps?: BootstrapDeps): Promise<void> {
 
   // --- Ports -----------------------------------------------------------------
   const portCheck = deps?.isPortFree ?? isPortFree;
-  const requiredPorts = [3000, 3001];
-  for (const port of requiredPorts) {
-    const free = await portCheck(port);
-    if (!free) {
-      throw new Error(
-        `Port ${port} is already in use.\n` +
-          `Stop the process occupying port ${port} and re-run bootstrap.\n` +
-          `You can identify it with: lsof -i :${port}`,
-      );
-    }
+  const portResults = await Promise.all(APP_PORTS.map((p) => portCheck(p)));
+  const busyPortIdx = portResults.findIndex((free) => !free);
+  if (busyPortIdx !== -1) {
+    const port = APP_PORTS[busyPortIdx];
+    throw new Error(
+      `Port ${port} is already in use.\n` +
+        `Stop the process occupying port ${port} and re-run bootstrap.\n` +
+        `You can identify it with: lsof -i :${port}`,
+    );
   }
 
   // --- Tools -----------------------------------------------------------------
@@ -242,17 +324,18 @@ export async function preflightChecks(deps?: BootstrapDeps): Promise<void> {
     { name: "jq", checkArgs: ["--version"] },
   ];
 
-  for (const tool of tools) {
-    try {
-      await execFileP(deps, tool.name, tool.checkArgs);
-    } catch {
-      throw new Error(
-        `Required tool "${tool.name}" is not installed or not on PATH.\n` +
-          `Install it before running bootstrap:\n` +
-          `  macOS:  brew install ${tool.name}\n` +
-          `  Linux:  apt-get install ${tool.name}  (or equivalent)`,
-      );
-    }
+  const toolResults = await Promise.allSettled(
+    tools.map((t) => execFileP(deps, t.name, t.checkArgs)),
+  );
+  const failedToolIdx = toolResults.findIndex((r) => r.status === "rejected");
+  if (failedToolIdx !== -1) {
+    const tool = tools[failedToolIdx]!;
+    throw new Error(
+      `Required tool "${tool.name}" is not installed or not on PATH.\n` +
+        `Install it before running bootstrap:\n` +
+        `  macOS:  brew install ${tool.name}\n` +
+        `  Linux:  apt-get install ${tool.name}  (or equivalent)`,
+    );
   }
 }
 
@@ -288,8 +371,8 @@ export async function createGitHubApp(
   // Find a free port for the callback server.
   let callbackPort = opts.callbackPort;
   if (!callbackPort) {
-    // Try ports in the range 9876-9896 until one is free.
-    for (let p = 9876; p <= 9896; p++) {
+    // Try ports in the callback range until one is free.
+    for (let p = CALLBACK_PORT_RANGE.min; p <= CALLBACK_PORT_RANGE.max; p++) {
       if (await portCheck(p)) {
         callbackPort = p;
         break;
@@ -297,7 +380,8 @@ export async function createGitHubApp(
     }
     if (!callbackPort) {
       throw new Error(
-        "Could not find a free port for the GitHub App callback server (tried 9876-9896).",
+        `Could not find a free port for the GitHub App callback server ` +
+          `(tried ${CALLBACK_PORT_RANGE.min}-${CALLBACK_PORT_RANGE.max}).`,
       );
     }
   }
@@ -412,16 +496,15 @@ export async function createGitHubApp(
           return;
         }
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const data = (await exchangeResp.json()) as any;
+        const data = (await exchangeResp.json()) as unknown as GitHubAppManifestResponse;
         resolve({
-          appId: data.id as number,
-          appName: (data.name as string) ?? "urateam",
-          privateKey: data.pem as string,
-          webhookSecret: (data.webhook_secret as string) ?? "",
-          clientId: data.client_id as string,
-          clientSecret: data.client_secret as string,
-          htmlUrl: (data.html_url as string) ?? "",
+          appId: data.id,
+          appName: data.name ?? "urateam",
+          privateKey: data.pem,
+          webhookSecret: data.webhook_secret ?? "",
+          clientId: data.client_id,
+          clientSecret: data.client_secret,
+          htmlUrl: data.html_url ?? "",
         });
       } catch (err) {
         reject(err);
@@ -506,8 +589,7 @@ export async function registerLinearWebhook(
     );
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const data = (await resp.json()) as any;
+  const data = (await resp.json()) as unknown as LinearWebhookCreateResponse;
 
   if (data.errors?.length) {
     throw new Error(
@@ -540,7 +622,7 @@ export async function generateEnvFile(
   deps?: BootstrapDeps,
 ): Promise<void> {
   const writeFn = getWriteFile(deps);
-  const dir = outputDir ?? process.cwd();
+  const dir = getOutputDir(outputDir);
 
   // Escape private key newlines for a single-line .env value.
   const privateKeyEscaped = ctx.privateKey.replace(/\n/g, "\\n");
@@ -599,7 +681,7 @@ export async function generateDockerCompose(
   deps?: BootstrapDeps,
 ): Promise<void> {
   const writeFn = getWriteFile(deps);
-  const dir = outputDir ?? process.cwd();
+  const dir = getOutputDir(outputDir);
 
   const composeContent = [
     "# urateam docker-compose — generated by `ura bootstrap`",
@@ -664,7 +746,7 @@ export async function generateReverseProxyConfig(
 ): Promise<void> {
   const writeFn = getWriteFile(deps);
   const log = deps?.log ?? ((msg: string) => process.stdout.write(msg + "\n"));
-  const dir = outputDir ?? process.cwd();
+  const dir = getOutputDir(outputDir);
 
   if (choice === "caddy") {
     const caddyfile = [
@@ -804,26 +886,27 @@ export const bootstrapCommand = new Command("bootstrap")
     outputDir?: string;
     port?: string;
   }) => {
-    const log = (msg: string) => console.log(msg);
+    const logger = createLogger({ component: "bootstrap" });
 
-    log("");
-    log("╔══════════════════════════════════════════════════════════╗");
-    log("║         urateam — Self-Hosted Bootstrap Wizard           ║");
-    log("╚══════════════════════════════════════════════════════════╝");
-    log("");
-
-    // ── Step 1: Pre-flight checks ──────────────────────────────────────────
-    log("[ 1/7 ] Running pre-flight checks...");
-    try {
-      await preflightChecks();
-      log("        Pre-flight checks passed.");
-    } catch (err) {
-      console.error(`\nPre-flight check failed:\n  ${(err as Error).message}\n`);
+    /** Logs an error via the structured logger then exits with code 1. */
+    function exitWithError(message: string, err: unknown): never {
+      logger.error({ err: (err as Error).message }, message);
       process.exit(1);
     }
 
+    logger.info("urateam — Self-Hosted Bootstrap Wizard starting");
+
+    // ── Step 1: Pre-flight checks ──────────────────────────────────────────
+    logger.info("[1/7] Running pre-flight checks...");
+    try {
+      await preflightChecks();
+      logger.info("[1/7] Pre-flight checks passed.");
+    } catch (err) {
+      exitWithError("Pre-flight check failed", err);
+    }
+
     // ── Step 2: Interactive prompts ────────────────────────────────────────
-    log("\n[ 2/7 ] Gathering configuration...");
+    logger.info("[2/7] Gathering configuration...");
 
     const org = await prompt(
       "GitHub organisation (leave blank for personal account)",
@@ -856,7 +939,7 @@ export const bootstrapCommand = new Command("bootstrap")
     let appCredentials: GitHubAppCredentials | null = null;
 
     if (opts.skipGithubApp) {
-      log("\n[ 3/7 ] Skipping GitHub App creation (--skip-github-app set).");
+      logger.info("[3/7] Skipping GitHub App creation (--skip-github-app set).");
       const appIdStr =
         process.env.GITHUB_APP_ID ||
         (await prompt("GITHUB_APP_ID"));
@@ -877,14 +960,12 @@ export const bootstrapCommand = new Command("bootstrap")
         htmlUrl: "",
       };
     } else {
-      log("\n[ 3/7 ] Creating GitHub App via manifest flow...");
-      log("        A browser window will open. Complete the GitHub App creation there.");
+      logger.info("[3/7] Creating GitHub App via manifest flow — a browser window will open.");
       try {
         appCredentials = await createGitHubApp({ org: org || undefined });
-        log(`        GitHub App "${appCredentials.appName}" created (ID: ${appCredentials.appId}).`);
+        logger.info({ appId: appCredentials.appId, appName: appCredentials.appName }, "[3/7] GitHub App created.");
       } catch (err) {
-        console.error(`\nGitHub App creation failed:\n  ${(err as Error).message}\n`);
-        process.exit(1);
+        exitWithError("GitHub App creation failed", err);
       }
     }
 
@@ -895,20 +976,19 @@ export const bootstrapCommand = new Command("bootstrap")
     const linearWebhookSecret = crypto.randomBytes(32).toString("hex");
 
     if (opts.skipLinear) {
-      log("\n[ 4/7 ] Skipping Linear webhook registration (--skip-linear set).");
+      logger.info("[4/7] Skipping Linear webhook registration (--skip-linear set).");
     } else {
-      log(`\n[ 4/7 ] Registering Linear webhook at ${webhookUrl}...`);
+      logger.info({ webhookUrl }, "[4/7] Registering Linear webhook...");
       try {
         await registerLinearWebhook(linearApiKey, webhookUrl, linearTeamId);
-        log("        Linear webhook registered.");
+        logger.info("[4/7] Linear webhook registered.");
       } catch (err) {
-        console.error(`\nLinear webhook registration failed:\n  ${(err as Error).message}\n`);
-        process.exit(1);
+        exitWithError("Linear webhook registration failed", err);
       }
     }
 
     // ── Step 5: .env file ──────────────────────────────────────────────────
-    log("\n[ 5/7 ] Generating .env...");
+    logger.info("[5/7] Generating .env...");
     // appCredentials is always set here — both branches of the skip/create flow
     // either assign it or call process.exit(1).
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
@@ -923,73 +1003,56 @@ export const bootstrapCommand = new Command("bootstrap")
     };
     try {
       await generateEnvFile(ctx, opts.outputDir);
-      const envPath = path.join(opts.outputDir ?? process.cwd(), ".env");
-      log(`        Written: ${envPath}`);
+      const envPath = path.join(getOutputDir(opts.outputDir), ".env");
+      logger.info({ path: envPath }, "[5/7] .env written.");
     } catch (err) {
-      console.error(`\nFailed to write .env:\n  ${(err as Error).message}\n`);
-      process.exit(1);
+      exitWithError("Failed to write .env", err);
     }
 
     // ── Step 6: docker-compose ─────────────────────────────────────────────
-    log("\n[ 6/7 ] Generating docker-compose.dogfood.yml...");
+    logger.info("[6/7] Generating docker-compose.dogfood.yml...");
     try {
       await generateDockerCompose(ctx, opts.outputDir);
-      const composePath = path.join(opts.outputDir ?? process.cwd(), "docker-compose.dogfood.yml");
-      log(`        Written: ${composePath}`);
+      const composePath = path.join(getOutputDir(opts.outputDir), "docker-compose.dogfood.yml");
+      logger.info({ path: composePath }, "[6/7] docker-compose.dogfood.yml written.");
     } catch (err) {
-      console.error(`\nFailed to write docker-compose.dogfood.yml:\n  ${(err as Error).message}\n`);
-      process.exit(1);
+      exitWithError("Failed to write docker-compose.dogfood.yml", err);
     }
 
     // Reverse-proxy config.
     if (domain) {
-      log(`\n        Generating ${proxyType} config for ${domain}...`);
+      logger.info({ domain, proxyType }, "Generating reverse-proxy config...");
       try {
         await generateReverseProxyConfig(domain, proxyType, opts.outputDir);
       } catch (err) {
-        console.error(`\nFailed to generate proxy config:\n  ${(err as Error).message}\n`);
         // Non-fatal — user can set up proxy manually.
+        logger.warn({ err: (err as Error).message }, "Failed to generate proxy config (non-fatal).");
       }
     }
 
     // ── Step 7: Validation ─────────────────────────────────────────────────
     const port = parseInt(opts.port ?? "3000", 10);
     if (opts.validate) {
-      log(`\n[ 7/7 ] Validating stack on port ${port}...`);
-      log("        Waiting for the webhook server to start (up to 30s)...");
+      logger.info({ port }, "[7/7] Validating stack — waiting up to 30s for webhook server...");
       try {
         await validateSetup(port);
-        log("        Validation passed — the webhook server is healthy.");
+        logger.info("[7/7] Validation passed — the webhook server is healthy.");
       } catch (err) {
-        console.error(`\nValidation failed:\n  ${(err as Error).message}\n`);
         // Non-fatal — stack may just need a moment.
+        logger.warn({ err: (err as Error).message }, "[7/7] Validation failed (non-fatal).");
       }
     } else {
-      log("\n[ 7/7 ] Skipping validation (pass --validate to enable).");
+      logger.info("[7/7] Skipping validation (pass --validate to enable).");
     }
 
-    // ── Success banner ─────────────────────────────────────────────────────
-    log("");
-    log("╔══════════════════════════════════════════════════════════╗");
-    log("║                   Bootstrap complete!                    ║");
-    log("╚══════════════════════════════════════════════════════════╝");
-    log("");
-    log("Next steps:");
-    log("  1. Review .env and add your Claude credential:");
-    log("       ANTHROPIC_API_KEY=sk-ant-...  (API key, pay-per-token)");
-    log("       CLAUDE_CODE_OAUTH_TOKEN=...   (subscription, run: claude setup-token)");
-    log("");
-    log("  2. Start the stack:");
-    log("       docker compose -f docker-compose.dogfood.yml up -d");
-    log("");
-    if (domain) {
-      log(`  3. Set your webhook URL in Linear to:`);
-      log(`       https://${domain}/webhooks/linear`);
-    } else {
-      log("  3. Expose port 3000 via ngrok or your proxy, then update WEBHOOK_URL");
-      log("     in .env and your Linear webhook settings.");
-    }
-    log("");
-    log("  4. Move a Linear issue to 'Todo' to trigger your first pipeline run.");
-    log("");
+    // ── Success ────────────────────────────────────────────────────────────
+    logger.info(
+      {
+        envPath: path.join(getOutputDir(opts.outputDir), ".env"),
+        composePath: path.join(getOutputDir(opts.outputDir), "docker-compose.dogfood.yml"),
+        webhookUrl,
+      },
+      "Bootstrap complete! Next: add ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN to .env, " +
+        "then run: docker compose -f docker-compose.dogfood.yml up -d",
+    );
   });
