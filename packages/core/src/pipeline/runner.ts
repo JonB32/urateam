@@ -102,9 +102,11 @@ import {
   policyReviewersRequestedEvent,
   reviewFanoutFallbackUsedEvent,
   pipelineScratchFilesBlockedEvent,
+  pipelineTypecheckFailedEvent,
 } from "../audit/index.js";
 import { matchesAnyPattern } from "../util/glob.js";
 import { findScratchFiles } from "./scratch-file-guard.js";
+import { runTypecheck } from "./typecheck-gate.js";
 import {
   startFeedbackPipeline,
   type FeedbackStartContext,
@@ -1811,6 +1813,73 @@ export class PipelineRunner {
         // Best-effort: log and continue. The push-queue auto-commit + the
         // review-stage convention check (Tier 2) provide overlapping coverage.
         runLog.warn({ err: guardErr }, "scratch-file-guard: gate evaluation failed — skipping");
+      }
+
+      // Tier 1b — typecheck gate. Runs `pnpm -w typecheck` inside the
+      // worktree as a deterministic backstop for the review stage missing
+      // type errors.
+      //
+      // Two failure classes, treated differently:
+      //   • `errorCount > 0` — parseable `error TSnnnn` lines in the output.
+      //     This is a REAL typecheck failure: push a `category: "typecheck"`
+      //     blocking ReviewFinding, force draft, emit audit event.
+      //   • `errorCount === 0` && `!passed` — non-zero exit with no parseable
+      //     errors. Almost always a setup issue (missing `node_modules`, no
+      //     root `typecheck` script, pnpm not on PATH). Log warn and continue
+      //     — we don't want a broken `pnpm install` to draft every PR.
+      //
+      // The gate is also fail-open on runner exceptions (caught below).
+      try {
+        const tc = await runTypecheck(worktreePath!);
+        if (tc.skipped) {
+          runLog.info("typecheck-gate: skipped via URATEAM_DISABLE_TYPECHECK_GATE env var");
+        } else if (tc.passed) {
+          runLog.info("typecheck-gate: passed");
+        } else if (tc.errorCount === 0) {
+          // Setup failure (no parseable TS errors). Don't block on this —
+          // operator likely has a misconfigured workspace; review-stage will
+          // catch real issues anyway.
+          runLog.warn(
+            { excerpt: tc.firstMessages, outputPrefix: tc.output.slice(0, 200) },
+            "typecheck-gate: non-zero exit with no parseable TS errors — treating as setup issue and continuing",
+          );
+        } else {
+          shouldDraft = true;
+          const messagesBlock = tc.firstMessages
+            .map((m) => `  ${m}`)
+            .join("\n");
+          unresolvedBlockingFindings.push({
+            severity: "blocking",
+            file: "(workspace)",
+            line: 0,
+            category: "typecheck",
+            description: `Typecheck failed with ${tc.errorCount} error${tc.errorCount === 1 ? "" : "s"}.\n\nFirst messages:\n${messagesBlock}`,
+            fix:
+              "Fix the type errors above. Full output is preserved in the run logs. Set `URATEAM_DISABLE_TYPECHECK_GATE=true` if the gate is firing on a false positive.",
+          });
+          runLog.warn(
+            {
+              issueId: sanitizedIssue.id,
+              errorCount: tc.errorCount,
+              firstMessages: tc.firstMessages,
+            },
+            "typecheck-gate: failed — forcing draft PR",
+          );
+          await logAuditEvent(
+            this.db as AnyDb,
+            pipelineTypecheckFailedEvent({
+              runId,
+              issueId: sanitizedIssue.id,
+              errorCount: tc.errorCount,
+              firstMessages: tc.firstMessages,
+            }),
+          );
+        }
+      } catch (tcErr) {
+        runLog.warn(
+          { err: tcErr },
+          "typecheck-gate: evaluation failed — skipping",
+        );
       }
 
       // All stages complete — push branch and create PR.

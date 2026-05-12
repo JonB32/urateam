@@ -494,6 +494,11 @@ export const AuditEventTypeSchema = z.enum([
   /** Tier 1a — the scratch-file denylist gate fired on this run, forcing a
    *  draft PR. Payload includes the matched paths. */
   "pipeline.scratch_files_blocked",
+  /** Tier 1b — `pnpm typecheck` (or the configured equivalent) reported
+   *  errors on the agent's diff before push. Payload includes errorCount and
+   *  up to 5 first messages. The runner forces draft and surfaces the output
+   *  in the PR body. */
+  "pipeline.typecheck_failed",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 
