@@ -82,6 +82,13 @@ describe("audit_events immutability", () => {
       "packages/core/src/qa/github.ts",
       "packages/core/src/qa/gap.ts",
       "packages/core/src/__tests__/audit-immutability.test.ts",
+      // Tier 2: the convention-checklist text documents the
+      // `audit-bypass-undocumented` category by name (`logAuditEventUnchecked`
+      // appears as a literal in the prompt fragment, not as a call site).
+      // The grep is intentionally loose so renames to similar identifiers
+      // still trip; the allow-list entry is the right surface for "this
+      // file mentions the name but does not invoke it" exceptions.
+      "packages/core/src/security/review-checklist.ts",
     ];
 
     let matches: string[] = [];
