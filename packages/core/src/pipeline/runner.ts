@@ -103,10 +103,12 @@ import {
   reviewFanoutFallbackUsedEvent,
   pipelineScratchFilesBlockedEvent,
   pipelineTypecheckFailedEvent,
+  pipelineSpecVsImplFailedEvent,
 } from "../audit/index.js";
 import { matchesAnyPattern } from "../util/glob.js";
 import { findScratchFiles } from "./scratch-file-guard.js";
 import { runTypecheck } from "./typecheck-gate.js";
+import { checkSpecVsImpl } from "./spec-vs-impl-gate.js";
 import {
   startFeedbackPipeline,
   type FeedbackStartContext,
@@ -1885,6 +1887,55 @@ export class PipelineRunner {
         runLog.warn(
           { err: tcErr },
           "typecheck-gate: evaluation failed — skipping",
+        );
+      }
+
+      // Tier 1c — spec-vs-impl JSDoc gate. Scans the agent's added/modified
+      // TS files for docblock references (`config.X` / `opts.X` / `env.X` /
+      // `deps.X` / `options.X`) whose bare symbol isn't defined anywhere in
+      // the worktree's tracked source. Catches the PR #254 BEC-201 failure
+      // mode (`config.implementProviderFallback` documented but never added
+      // to the Zod schema). Fail-open: any error from the gate is logged and
+      // swallowed.
+      try {
+        const sv = await checkSpecVsImpl(worktreePath!, repoConfig.defaultBranch);
+        if (sv.skipped) {
+          runLog.info(
+            "spec-vs-impl-gate: skipped via URATEAM_DISABLE_SPEC_VS_IMPL_GATE env var",
+          );
+        } else if (sv.findings.length > 0) {
+          shouldDraft = true;
+          for (const f of sv.findings) {
+            unresolvedBlockingFindings.push({
+              severity: "blocking",
+              file: f.filePath,
+              line: 0,
+              category: "spec-vs-impl",
+              description: `JSDoc references \`${f.promisedPrefix}.${f.promisedSymbol}\` but \`${f.promisedSymbol}\` is not defined anywhere in the worktree's TS/JS source.`,
+              fix: `Either add the symbol to the relevant schema/interface, or update the docblock to reference the actual field name. Set \`URATEAM_DISABLE_SPEC_VS_IMPL_GATE=true\` to bypass (heuristic — false positives possible).`,
+            });
+          }
+          runLog.warn(
+            {
+              issueId: sanitizedIssue.id,
+              count: sv.findings.length,
+              findings: sv.findings.slice(0, 5),
+            },
+            "spec-vs-impl-gate: matched undefined symbols — forcing draft PR",
+          );
+          await logAuditEvent(
+            this.db as AnyDb,
+            pipelineSpecVsImplFailedEvent({
+              runId,
+              issueId: sanitizedIssue.id,
+              findings: sv.findings,
+            }),
+          );
+        }
+      } catch (svErr) {
+        runLog.warn(
+          { err: svErr },
+          "spec-vs-impl-gate: evaluation failed — skipping",
         );
       }
 
