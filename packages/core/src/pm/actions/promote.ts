@@ -5,8 +5,24 @@ import { resolveIssueRelations } from "../../util/linear.js";
 import { resolvePipeline } from "../../pipeline/router.js";
 import { createLogger } from "../../logger.js";
 import type { AnyDb } from "../../db/client.js";
-import { logAuditEventUnchecked, pmPromotedEvent, pmSkippedCircuitBreakerEvent } from "../../audit/index.js";
-import { batchCountConsecutiveFailures } from "./db-queries.js";
+import {
+  logAuditEventUnchecked,
+  pmPromotedEvent,
+  pmSkippedCircuitBreakerEvent,
+  pmEscalatedToNeedsDesignEvent,
+} from "../../audit/index.js";
+import {
+  batchCountConsecutiveFailures,
+  getLastFailureError,
+} from "./db-queries.js";
+
+/**
+ * Tier 5 — the pipeline label assigned to issues that have tripped the
+ * consecutive-failures circuit breaker. Mirrors the observer-marker gate
+ * vocabulary so operators see one consistent set of "human review needed"
+ * routings across surfaces.
+ */
+const ESCALATION_PIPELINE_LABEL = "needs-design";
 
 const log = createLogger({ component: "PmAgent:promote" });
 
@@ -45,6 +61,27 @@ export interface PromoteInput {
    * set when `maxConsecutiveFailures` is configured.
    */
   getFailureCount?: (issueId: string) => Promise<number>;
+  /**
+   * Tier 5 — fetches the most recent failed run's errorMessage for an
+   * issue. Used by the escalation path to summarize the failure mode in
+   * the Linear comment + Slack alert. Tests inject a stub. Production
+   * omits this so `getLastFailureError` is used against `db` instead.
+   * If neither is set, the escalation still fires but with `errorMessage:
+   * null`.
+   */
+  getLastError?: (issueId: string) => Promise<string | null>;
+  /**
+   * Tier 5 — Slack alert callback invoked when an issue is escalated to
+   * needs-design. Operators wire this to their PM notifier. Optional: if
+   * unset, escalation proceeds without a Slack post (Linear + audit
+   * event still fire).
+   */
+  slackPostAlert?: (args: {
+    issueId: string;
+    issueTitle: string;
+    failureCount: number;
+    errorMessage: string | null;
+  }) => Promise<void>;
 }
 
 export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteResult[]> {
@@ -157,11 +194,140 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
             }),
           );
         }
+
+        // Tier 5 — escalation. If the issue is NOT already routed to
+        // needs-design, move it there now, post a Linear comment with the
+        // last failure's error message, and send a Slack alert. Idempotent:
+        // subsequent ticks find the label already in place and skip
+        // re-escalation (the circuit-breaker event still fires every tick
+        // for observability).
+        const alreadyEscalated = labelNames
+          .map((n) => n.toLowerCase())
+          .includes(ESCALATION_PIPELINE_LABEL);
+        if (!alreadyEscalated) {
+          let errorMessage: string | null = null;
+          try {
+            errorMessage = input.getLastError
+              ? await input.getLastError(candidate.identifier)
+              : input.db
+              ? await getLastFailureError(input.db, candidate.identifier)
+              : null;
+          } catch (err) {
+            log.warn(
+              { issueId: candidate.identifier, err },
+              "Tier 5 escalation: failed to fetch last error message — proceeding with null",
+            );
+          }
+
+          // Best-effort label resolution. If `needs-design` doesn't exist in
+          // the workspace, log and continue — same defensive pattern as
+          // observer-origin / Tier 4.
+          const needsDesignLabelId = await (async () => {
+            try {
+              const allLabels = await linearClient.issueLabels({ first: 100 });
+              for (const label of allLabels.nodes ?? []) {
+                if (label.name.toLowerCase() === ESCALATION_PIPELINE_LABEL) {
+                  return label.id as string;
+                }
+              }
+            } catch (err) {
+              log.warn(
+                { issueId: candidate.identifier, err },
+                "Tier 5 escalation: failed to look up needs-design label",
+              );
+            }
+            return undefined;
+          })();
+
+          if (!needsDesignLabelId) {
+            log.warn(
+              { issueId: candidate.identifier, label: ESCALATION_PIPELINE_LABEL },
+              "Tier 5 escalation: '" +
+                ESCALATION_PIPELINE_LABEL +
+                "' label not found in Linear — escalation logged but issue not relabeled",
+            );
+          }
+
+          try {
+            // Replace the existing label set with [oldLabels..., needs-design]
+            // — add, don't overwrite, so existing pipeline labels remain
+            // visible (operator can see this used to be auto-implement, etc).
+            if (needsDesignLabelId) {
+              const existingIds = labelNodes
+                .map((l: any) => l.id)
+                .filter(Boolean);
+              const merged = [...new Set([...existingIds, needsDesignLabelId])];
+              await linearClient.updateIssue(candidate.id, { labelIds: merged });
+            }
+            const truncated = errorMessage
+              ? errorMessage.length > 500
+                ? errorMessage.slice(0, 500) + "…"
+                : errorMessage
+              : "(no error message captured on the most recent failed run)";
+            await linearClient.createComment({
+              issueId: candidate.id,
+              body:
+                `🚨 **PM Agent — Escalated to \`needs-design\`**\n\n` +
+                `This issue has hit the consecutive-failures circuit breaker: ` +
+                `**${failureCount}** consecutive failed pipeline runs ` +
+                `(threshold ${input.maxConsecutiveFailures}). The agent has stopped ` +
+                `retrying. A human should diagnose the failure mode before the ticket ` +
+                `is moved back into the pipeline.\n\n` +
+                `**Last failure:**\n\`\`\`\n${truncated}\n\`\`\``,
+            });
+          } catch (err) {
+            log.warn(
+              { issueId: candidate.identifier, err },
+              "Tier 5 escalation: failed to update issue / post comment",
+            );
+          }
+
+          // Slack alert (best-effort; isolated from Linear failures so a
+          // notifier outage doesn't suppress the audit signal).
+          if (input.slackPostAlert) {
+            try {
+              await input.slackPostAlert({
+                issueId: candidate.identifier,
+                issueTitle: candidate.title,
+                failureCount,
+                errorMessage,
+              });
+            } catch (err) {
+              log.warn(
+                { issueId: candidate.identifier, err },
+                "Tier 5 escalation: Slack alert failed",
+              );
+            }
+          }
+
+          if (input.db) {
+            void logAuditEventUnchecked(
+              input.db,
+              pmEscalatedToNeedsDesignEvent({
+                issueId: candidate.identifier,
+                failureCount,
+                errorMessage,
+              }),
+            );
+          }
+
+          log.warn(
+            {
+              issueId: candidate.identifier,
+              failureCount,
+              hasError: errorMessage !== null,
+            },
+            "Tier 5 escalation: moved issue to needs-design and notified",
+          );
+        }
+
         results.push({
           issueId: candidate.identifier,
           issueTitle: candidate.title,
           promoted: false,
-          reason: `circuit-breaker: ${failureCount} consecutive failed runs (threshold ${input.maxConsecutiveFailures})`,
+          reason: alreadyEscalated
+            ? `circuit-breaker: ${failureCount} consecutive failed runs (already escalated to needs-design)`
+            : `circuit-breaker: ${failureCount} consecutive failed runs (escalated to needs-design)`,
         });
         continue;
       }

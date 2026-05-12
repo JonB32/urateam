@@ -742,6 +742,32 @@ export function pipelineAutoDeepReviewBumpedEvent(args: {
   });
 }
 
+/**
+ * Tier 5 — emitted when an issue trips the consecutive-failures circuit
+ * breaker (≥ maxConsecutiveFailures failed pipeline runs in a row) and the
+ * PM Agent escalates it to needs-design. Carries the truncated error
+ * message from the most-recent failed run so operators can see what kept
+ * failing without opening the run logs.
+ */
+export function pmEscalatedToNeedsDesignEvent(args: {
+  issueId: string;
+  failureCount: number;
+  errorMessage: string | null;
+}): AuditEvent {
+  return base({
+    eventType: "pm.escalated_to_needs_design",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    issueId: args.issueId,
+    payload: {
+      failureCount: args.failureCount,
+      errorMessage: args.errorMessage
+        ? args.errorMessage.slice(0, 500)
+        : null,
+    },
+  });
+}
+
 export function pipelineSpecVsImplFailedEvent(args: {
   runId: string;
   issueId: string;

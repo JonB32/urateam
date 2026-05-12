@@ -123,6 +123,39 @@ export async function countConsecutiveFailures(
  * an entry for every issueId in the input list (defaulting to 0 for issues
  * with no terminal runs).
  */
+/**
+ * Tier 5 — fetch the most recent failed pipeline_runs row's errorMessage for
+ * a single issue. Used by the promote-stage escalation to summarize the
+ * failure mode in the Linear comment / Slack alert when an issue trips the
+ * circuit breaker. Returns the message string or null if no failed run
+ * exists (or the column was empty).
+ *
+ * Single-issue, single-query — escalations are rare (≥ 3 consecutive
+ * failures per issue), so an N+1 here is acceptable in practice.
+ */
+export async function getLastFailureError(
+  db: AnyDb,
+  issueId: string,
+): Promise<string | null> {
+  const rows = await db
+    .select({
+      errorMessage: pipelineRuns.errorMessage,
+      startedAt: pipelineRuns.startedAt,
+    })
+    .from(pipelineRuns)
+    .where(
+      and(
+        eq(pipelineRuns.issueId, issueId),
+        eq(pipelineRuns.status, "failed"),
+      ),
+    )
+    .orderBy(desc(pipelineRuns.startedAt), desc(pipelineRuns.id))
+    .limit(1);
+
+  const row = (rows as Array<{ errorMessage: string | null }>)[0];
+  return row?.errorMessage ?? null;
+}
+
 export async function batchCountConsecutiveFailures(
   db: AnyDb,
   issueIds: string[],
