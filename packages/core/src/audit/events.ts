@@ -672,3 +672,28 @@ export function pipelineScratchFilesBlockedEvent(args: {
     },
   });
 }
+
+/**
+ * Tier 1b — emitted when the typecheck gate detects type errors on the agent's
+ * diff before push. The runner forces draft + a `category: "typecheck"`
+ * blocking finding from this signal; the audit event surfaces the rate so
+ * operators can spot regressions in agent code-quality.
+ */
+export function pipelineTypecheckFailedEvent(args: {
+  runId: string;
+  issueId: string;
+  errorCount: number;
+  firstMessages: string[];
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.typecheck_failed",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      errorCount: args.errorCount,
+      firstMessages: args.firstMessages.slice(0, 5),
+    },
+  });
+}
