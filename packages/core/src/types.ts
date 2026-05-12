@@ -59,7 +59,7 @@ export const PipelineConfigSchema = z.object({
    *  `REVIEW_MODELS` configured for the deep-review fanout to actually run.  */
   autoDeepReviewThresholds: z
     .object({
-      newFiles: z.number().int().min(0),
+      changedFiles: z.number().int().min(0),
       totalLines: z.number().int().min(0),
       newPublicExports: z.number().int().min(0),
     })
@@ -524,6 +524,11 @@ export const AuditEventTypeSchema = z.enum([
    *  in the worktree. Payload lists matched (file, prefix, symbol) tuples
    *  (capped at 20). */
   "pipeline.spec_vs_impl_failed",
+  /** Tier 3 — auto-deep-review thresholds tripped on this run; the runner
+   *  bumped `deepReviewPasses` from its configured value to ≥1 so the
+   *  deep-review fanout runs. Payload includes the diff metrics and which
+   *  threshold tripped. */
+  "pipeline.auto_deep_review_bumped",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 

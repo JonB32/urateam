@@ -105,6 +105,7 @@ import {
   pipelineScratchFilesBlockedEvent,
   pipelineTypecheckFailedEvent,
   pipelineSpecVsImplFailedEvent,
+  pipelineAutoDeepReviewBumpedEvent,
 } from "../audit/index.js";
 import { matchesAnyPattern } from "../util/glob.js";
 import { findScratchFiles } from "./scratch-file-guard.js";
@@ -1476,28 +1477,26 @@ export class PipelineRunner {
       const hasImplement = config.stages.includes("implement");
 
       // Tier 3 — auto-bump deepReviewPasses to ≥1 when the agent's diff trips
-      // any of the heuristic thresholds (newFiles / totalLines /
-      // newPublicExports). Requires OPENROUTER_API_KEY + REVIEW_MODELS for the
-      // fanout to actually be enabled; if they're not set, the bump is a no-op
-      // because the deep-review providers won't run anyway.
-      if (
-        isFeatureLicensed("deep-review") &&
-        process.env.OPENROUTER_API_KEY &&
-        process.env.REVIEW_MODELS &&
-        hasReview &&
-        hasImplement
-      ) {
+      // any of the heuristic thresholds (changedFiles / totalLines /
+      // newPublicExports). The agentic deep-review provider runs on Claude
+      // and is enabled by `deep-review` license alone — no OpenRouter env
+      // vars required. OpenRouter fanout is an additional provider that
+      // runs on top when its env vars are set, but the bump is useful
+      // regardless because the agentic provider always activates.
+      if (isFeatureLicensed("deep-review") && hasReview && hasImplement) {
         try {
           const diffOut = await gitExecSafe(
             ["diff", "--stat", `origin/${repoConfig.defaultBranch}...HEAD`],
             worktreePath!,
           );
           // "N files changed, X insertions(+), Y deletions(-)" — last line.
+          // git diff --stat reports changed (added + modified + deleted) — the
+          // field is named `changedFiles` to match.
           const tail = diffOut.split("\n").filter(Boolean).pop() ?? "";
-          const newFilesMatch = /^\s*(\d+)\s+files? changed/.exec(tail);
+          const changedFilesMatch = /^\s*(\d+)\s+files? changed/.exec(tail);
           const insertionsMatch = /(\d+)\s+insertion/.exec(tail);
           const deletionsMatch = /(\d+)\s+deletion/.exec(tail);
-          const newFiles = newFilesMatch ? Number(newFilesMatch[1]) : 0;
+          const changedFiles = changedFilesMatch ? Number(changedFilesMatch[1]) : 0;
           const totalLines =
             (insertionsMatch ? Number(insertionsMatch[1]) : 0) +
             (deletionsMatch ? Number(deletionsMatch[1]) : 0);
@@ -1508,22 +1507,37 @@ export class PipelineRunner {
           );
           const newPublicExports = countNewPublicExports(fullDiff);
 
+          const thresholds =
+            config.autoDeepReviewThresholds ??
+            DEFAULT_AUTO_DEEP_REVIEW_THRESHOLDS;
+
           if (
             shouldAutoDeepReview(
-              { newFiles, totalLines, newPublicExports },
-              config.autoDeepReviewThresholds ?? DEFAULT_AUTO_DEEP_REVIEW_THRESHOLDS,
+              { changedFiles, totalLines, newPublicExports },
+              thresholds,
             )
           ) {
             const bumped = Math.max(effectiveDeepReviewPasses, 1);
             if (bumped > effectiveDeepReviewPasses) {
               runLog.info(
                 {
-                  metrics: { newFiles, totalLines, newPublicExports },
-                  thresholds: config.autoDeepReviewThresholds ?? DEFAULT_AUTO_DEEP_REVIEW_THRESHOLDS,
+                  metrics: { changedFiles, totalLines, newPublicExports },
+                  thresholds,
                   from: effectiveDeepReviewPasses,
                   to: bumped,
                 },
                 "auto-deep-review: thresholds tripped — forcing deepReviewPasses ≥ 1",
+              );
+              await logAuditEvent(
+                this.db as AnyDb,
+                pipelineAutoDeepReviewBumpedEvent({
+                  runId,
+                  issueId: sanitizedIssue.id,
+                  metrics: { changedFiles, totalLines, newPublicExports },
+                  thresholds,
+                  from: effectiveDeepReviewPasses,
+                  to: bumped,
+                }),
               );
               effectiveDeepReviewPasses = bumped;
             }

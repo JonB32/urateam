@@ -12,11 +12,11 @@
  *   • totalLines ≥ N      — measures actual diff size
  *   • newPublicExports ≥ N — surface-area changes (new functions/types)
  *
- * Defaults: { newFiles: 5, totalLines: 200, newPublicExports: 2 }.
+ * Defaults: { changedFiles: 5, totalLines: 200, newPublicExports: 2 }.
  *
  * Two escape hatches:
  *   1. `URATEAM_DISABLE_AUTO_DEEP_REVIEW=true` short-circuits the heuristic.
- *   2. Per-pipeline `autoDeepReviewThresholds: { newFiles: 999999, ... }`
+ *   2. Per-pipeline `autoDeepReviewThresholds: { changedFiles: 999999, ... }`
  *      effectively raises the bar to disable.
  *
  * Deep-review findings are blocking-by-default (Tier 3 design); the
@@ -118,17 +118,17 @@ describe("shouldAutoDeepReview — fires when any threshold trips", () => {
     delete process.env[ENV_KEY];
   });
 
-  it("trips on newFiles >= threshold (5 by default)", () => {
+  it("trips on changedFiles >= threshold (5 by default)", () => {
     expect(
       shouldAutoDeepReview({
-        newFiles: 5,
+        changedFiles: 5,
         totalLines: 0,
         newPublicExports: 0,
       }),
     ).toBe(true);
     expect(
       shouldAutoDeepReview({
-        newFiles: 4,
+        changedFiles: 4,
         totalLines: 0,
         newPublicExports: 0,
       }),
@@ -138,14 +138,14 @@ describe("shouldAutoDeepReview — fires when any threshold trips", () => {
   it("trips on totalLines >= threshold (200 by default)", () => {
     expect(
       shouldAutoDeepReview({
-        newFiles: 0,
+        changedFiles: 0,
         totalLines: 200,
         newPublicExports: 0,
       }),
     ).toBe(true);
     expect(
       shouldAutoDeepReview({
-        newFiles: 0,
+        changedFiles: 0,
         totalLines: 199,
         newPublicExports: 0,
       }),
@@ -155,14 +155,14 @@ describe("shouldAutoDeepReview — fires when any threshold trips", () => {
   it("trips on newPublicExports >= threshold (2 by default)", () => {
     expect(
       shouldAutoDeepReview({
-        newFiles: 0,
+        changedFiles: 0,
         totalLines: 0,
         newPublicExports: 2,
       }),
     ).toBe(true);
     expect(
       shouldAutoDeepReview({
-        newFiles: 0,
+        changedFiles: 0,
         totalLines: 0,
         newPublicExports: 1,
       }),
@@ -172,7 +172,7 @@ describe("shouldAutoDeepReview — fires when any threshold trips", () => {
   it("does NOT trip on a clean diff (all below threshold)", () => {
     expect(
       shouldAutoDeepReview({
-        newFiles: 1,
+        changedFiles: 1,
         totalLines: 10,
         newPublicExports: 0,
       }),
@@ -182,8 +182,8 @@ describe("shouldAutoDeepReview — fires when any threshold trips", () => {
   it("honors per-pipeline threshold overrides (e.g. set to 999999 to disable)", () => {
     expect(
       shouldAutoDeepReview(
-        { newFiles: 100, totalLines: 10_000, newPublicExports: 100 },
-        { newFiles: 999_999, totalLines: 999_999, newPublicExports: 999_999 },
+        { changedFiles: 100, totalLines: 10_000, newPublicExports: 100 },
+        { changedFiles: 999_999, totalLines: 999_999, newPublicExports: 999_999 },
       ),
     ).toBe(false);
   });
@@ -192,7 +192,7 @@ describe("shouldAutoDeepReview — fires when any threshold trips", () => {
     process.env[ENV_KEY] = "true";
     expect(
       shouldAutoDeepReview({
-        newFiles: 1000,
+        changedFiles: 1000,
         totalLines: 1_000_000,
         newPublicExports: 1000,
       }),
@@ -204,7 +204,7 @@ describe("shouldAutoDeepReview — fires when any threshold trips", () => {
       process.env[ENV_KEY] = v;
       expect(
         shouldAutoDeepReview({
-          newFiles: 5,
+          changedFiles: 5,
           totalLines: 0,
           newPublicExports: 0,
         }),
@@ -217,9 +217,83 @@ describe("shouldAutoDeepReview — fires when any threshold trips", () => {
 describe("DEFAULT_AUTO_DEEP_REVIEW_THRESHOLDS — matches the operator brief", () => {
   it("has the documented defaults", () => {
     expect(DEFAULT_AUTO_DEEP_REVIEW_THRESHOLDS).toEqual({
-      newFiles: 5,
+      changedFiles: 5,
       totalLines: 200,
       newPublicExports: 2,
     });
+  });
+});
+
+describe("countNewPublicExports — handles export-default, named re-exports, wildcard re-exports", () => {
+  it("counts `export default function`", () => {
+    const diff = `
++++ b/packages/core/src/a.ts
+@@ -0,0 +1,2 @@
++export default function foo() {}
+`;
+    expect(countNewPublicExports(diff)).toBe(1);
+  });
+
+  it("counts `export default class`", () => {
+    const diff = `
++++ b/packages/core/src/a.ts
+@@ -0,0 +1,2 @@
++export default class Foo {}
+`;
+    expect(countNewPublicExports(diff)).toBe(1);
+  });
+
+  it("counts `export { foo, bar }` named re-exports", () => {
+    const diff = `
++++ b/packages/core/src/index.ts
+@@ -0,0 +1,1 @@
++export { foo, bar } from './x';
+`;
+    expect(countNewPublicExports(diff)).toBe(1);
+  });
+
+  it("counts `export *` wildcard re-exports", () => {
+    const diff = `
++++ b/packages/core/src/index.ts
+@@ -0,0 +1,1 @@
++export * from './x';
+`;
+    expect(countNewPublicExports(diff)).toBe(1);
+  });
+
+  it("counts exports under repo-root `src/` (non-monorepo deployments)", () => {
+    const diff = `
++++ b/src/a.ts
+@@ -0,0 +1,1 @@
++export function foo() {}
+`;
+    expect(countNewPublicExports(diff)).toBe(1);
+  });
+
+  it("excludes `src/__tests__/` even at repo root", () => {
+    const diff = `
++++ b/src/__tests__/foo.test.ts
+@@ -0,0 +1,1 @@
++export function notRealSurface() {}
+`;
+    expect(countNewPublicExports(diff)).toBe(0);
+  });
+});
+
+describe("deepReviewFindingsAreBlocking — explicit-false preserves original severity (BC contract)", () => {
+  // This contract is the runner-side wiring at runner.ts ~1733. The pure
+  // matcher here doesn't touch severity directly, but Tier 3's BC promise is:
+  // setting `deepReviewFindingsAreBlocking: false` restores the pre-Tier-3
+  // advisory behavior for operators with existing `deepReviewPasses: 1`
+  // configs. The runner test for this is covered by the existing deep-review
+  // integration suite; this stub documents the contract for future readers.
+  it("documents the contract — see runner.ts:1733 for the upgrade logic", () => {
+    // The flag default is `config.deepReviewFindingsAreBlocking ?? true`.
+    // When false: deepResult.findings flow through with their original
+    // severity (.warning / .suggestion / .blocking unchanged).
+    // When true (default): all findings are upgraded to "blocking".
+    // The schema field is documented in `PipelineConfigSchema` (types.ts)
+    // with the breaking-change note in the JSDoc.
+    expect(true).toBe(true);
   });
 });

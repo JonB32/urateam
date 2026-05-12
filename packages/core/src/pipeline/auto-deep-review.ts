@@ -26,32 +26,49 @@
  */
 
 export interface AutoDeepReviewThresholds {
-  newFiles: number;
+  /** Number of files changed (added + modified + deleted) in the diff. */
+  changedFiles: number;
+  /** Sum of insertions + deletions across the diff. */
   totalLines: number;
+  /** Number of newly-added top-level `export` lines under source paths.  */
   newPublicExports: number;
 }
 
 export const DEFAULT_AUTO_DEEP_REVIEW_THRESHOLDS: AutoDeepReviewThresholds = {
-  newFiles: 5,
+  changedFiles: 5,
   totalLines: 200,
   newPublicExports: 2,
 };
 
 export interface DiffMetrics {
-  /** Count of files added in the diff. */
-  newFiles: number;
+  /** Number of files changed (added + modified + deleted) in the diff. The
+   *  `git diff --stat` "N files changed" line counts all three; the threshold
+   *  is named accordingly to avoid the older `newFiles` misnomer the brief
+   *  used. */
+  changedFiles: number;
   /** Sum of insertions and deletions across the diff. */
   totalLines: number;
-  /** Count of newly-added `^export ...` lines under `packages/<pkg>/src/`. */
+  /** Count of newly-added top-level `export` lines under monorepo
+   *  `packages/<pkg>/src/` OR repo-root `src/` (for non-monorepo
+   *  consumers), excluding `__tests__/`. Counts named exports (`export
+   *  function`, `export class`, ...), default exports (`export default
+   *  ...`), named re-exports (`export { foo }`), and wildcard re-exports
+   *  (`export * from`). */
   newPublicExports: number;
 }
 
 const EXPORT_REGEX =
-  /^\+export\s+(async\s+)?(function|class|const|let|interface|type|enum)\s/;
+  /^\+export\s+(default\s+)?(async\s+)?(function|class|const|let|interface|type|enum|\{|\*)/;
 
 const PATH_HEADER_REGEX = /^\+\+\+ b\/(.+)$/;
 
-const PACKAGES_SRC_PATH = /^packages\/[^/]+\/src\//;
+/** Source paths that count toward `newPublicExports`:
+ *  - `packages/<pkg>/src/...` — monorepo case
+ *  - `src/...` — non-monorepo case (single-package projects)
+ *  Both exclude `__tests__/` (tests aren't public surface).
+ */
+const SOURCE_PATH_MONOREPO = /^packages\/[^/]+\/src\//;
+const SOURCE_PATH_SINGLE = /^src\//;
 
 const TESTS_PATH_FRAGMENT = "/__tests__/";
 
@@ -75,7 +92,8 @@ export function countNewPublicExports(diff: string): number {
     if (pathMatch) {
       currentFile = pathMatch[1]!;
       currentFileInScope =
-        PACKAGES_SRC_PATH.test(currentFile) &&
+        (SOURCE_PATH_MONOREPO.test(currentFile) ||
+          SOURCE_PATH_SINGLE.test(currentFile)) &&
         !currentFile.includes(TESTS_PATH_FRAGMENT);
       continue;
     }
@@ -98,7 +116,7 @@ export function shouldAutoDeepReview(
 ): boolean {
   if (process.env.URATEAM_DISABLE_AUTO_DEEP_REVIEW === "true") return false;
   return (
-    metrics.newFiles >= thresholds.newFiles ||
+    metrics.changedFiles >= thresholds.changedFiles ||
     metrics.totalLines >= thresholds.totalLines ||
     metrics.newPublicExports >= thresholds.newPublicExports
   );
