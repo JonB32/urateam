@@ -17,6 +17,23 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+## [0.1.48] — 2026-05-12
+
+Bumps:
+- `@urateam/core`: 0.1.33 → 0.1.34
+- `@urateam/cli`: 0.1.35 → 0.1.36
+- `@urateam/dashboard`: 0.1.33 → 0.1.34
+- `create-urateam`: 0.1.36 → 0.1.37
+
+### Added (OSS+)
+- **Tier 1a: scratch-file denylist gate** ([#280](https://github.com/JonB32/urateam/pull/280)) — new `packages/core/src/pipeline/scratch-file-guard.ts` runs after all stages and the org-policy gate, before the push queue. Scans `git diff --diff-filter=A origin/<base>...HEAD` plus `git status --porcelain` for agent-added paths matching a denylist (`*.bak`, repo-root `TEST_*.md`/`TESTING_*.md`/`FINAL_*.md`/`*_REPORT.md`/`*_CHECKLIST.md`, repo-root `commit-*.sh`/`run-*.sh`, `*.tmp`/`*.log` anywhere, non-exempt repo-root `*.md`). On match: pushes blocking `category: "scratch-files"` `ReviewFinding`(s), forces draft, emits `pipeline.scratch_files_blocked` audit event. Catches the failure mode that shipped 5 scratch artifacts in #258 (BEC-187). Escape hatch: `URATEAM_DISABLE_SCRATCH_GUARD=true`.
+- **Tier 1b: typecheck gate** ([#282](https://github.com/JonB32/urateam/pull/282)) — new `packages/core/src/pipeline/typecheck-gate.ts` runs `pnpm -w typecheck` (configurable) in the worktree before push. On parseable TS errors: blocking `category: "typecheck"` finding, force draft, emit `pipeline.typecheck_failed` audit event. Setup issues (no parseable errors, non-zero exit) warn-log and continue — a broken `pnpm install` does not block legitimate PRs. Output truncated at 50 KB; first 5 messages capped at 500 chars each. Escape hatch: `URATEAM_DISABLE_TYPECHECK_GATE=true`. Unit-testable via `TypecheckRunner` DI.
+- **Tier 1c: spec-vs-impl JSDoc gate** ([#283](https://github.com/JonB32/urateam/pull/283)) — new `packages/core/src/pipeline/spec-vs-impl-gate.ts` scans the agent's added/modified TS/JS files for JSDoc references matching `\b(config|opts|env|deps|options)\.([A-Za-z_][A-Za-z0-9_]*)\b` and verifies each bare symbol exists in the worktree's tracked source corpus. On unresolved references: blocking `category: "spec-vs-impl"` findings, force draft, emit `pipeline.spec_vs_impl_failed` audit event (cap 20). Catches the PR #254 (BEC-201) failure mode where docs promised a non-existent config field. Heuristic — false positives accepted per the operator brief. Escape hatch: `URATEAM_DISABLE_SPEC_VS_IMPL_GATE=true`.
+- **Tier 1d: audit-event count consistency test** ([#281](https://github.com/JonB32/urateam/pull/281)) — extends `audit-immutability.test.ts` with two regex-based checks that fail CI when the `(\d+) event types` / `(\d+) actor types` sentences in `CLAUDE.md` diverge from `AuditEventTypeSchema.options.length` / `AuditActorTypeSchema.options.length`. Closes the 17→41 drift (pre-existing) caught during Tier 1a review.
+
+### Audit log
+- New event types `pipeline.scratch_files_blocked`, `pipeline.typecheck_failed`, `pipeline.spec_vs_impl_failed` (Tiers 1a/1b/1c). Total audit event count: 41 → 43. CLAUDE.md updated to enumerate all 43 names; Tier 1d's test enforces the count consistency going forward.
+
 ## [0.1.47] — 2026-05-11
 
 Bumps:
