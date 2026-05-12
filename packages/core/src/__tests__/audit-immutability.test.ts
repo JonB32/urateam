@@ -9,7 +9,9 @@
  */
 import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
+import { AuditEventTypeSchema, AuditActorTypeSchema } from "../types.js";
 
 describe("audit_events immutability", () => {
   it("only audit/retention.ts may delete or update audit_events rows", () => {
@@ -102,5 +104,59 @@ describe("audit_events immutability", () => {
       offenders,
       `Unauthorized logAuditEventUnchecked usage in:\n${offenders.join("\n")}`,
     ).toEqual([]);
+  });
+
+  /**
+   * Tier 1d — keep CLAUDE.md's claimed audit-event count in sync with
+   * AuditEventTypeSchema. The autonomous pipeline has historically added new
+   * event types to the schema without updating the doc count (see Tier 1a's
+   * pre-existing 17→41 drift). This test fails CI when the regex match
+   * `(\d+) event types` in CLAUDE.md disagrees with `AuditEventTypeSchema`'s
+   * length.
+   *
+   * The pipeline's review-stage prompt will surface this as a blocking
+   * `audit-count-drift` finding via the convention checklist (Tier 2);
+   * the unit test is the deterministic backstop.
+   */
+  it("CLAUDE.md audit-event count matches AuditEventTypeSchema length", () => {
+    const repoRoot = path.resolve(__dirname, "../../../..");
+    const claudeMd = readFileSync(path.join(repoRoot, "CLAUDE.md"), "utf8");
+    const matches = [...claudeMd.matchAll(/(\d+)\s+event\s+types/g)];
+    expect(
+      matches.length,
+      "CLAUDE.md must contain exactly one `<N> event types` sentence so Tier 1d can lock it down",
+    ).toBe(1);
+    const documented = Number(matches[0]![1]);
+    const actual = AuditEventTypeSchema.options.length;
+    expect(
+      documented,
+      `CLAUDE.md says "${documented} event types" but AuditEventTypeSchema has ${actual}. Update CLAUDE.md or the schema; they must match.`,
+    ).toBe(actual);
+  });
+
+  /**
+   * Tier 1d — mirror of the event-type count check for the actor-type enum.
+   * The actor-type list is shorter and changes less often, but the same drift
+   * pattern applies (e.g. BEC-207 added a new actor without updating any doc).
+   * CLAUDE.md doesn't currently cite a number for actor types, so this test
+   * is gated: it only runs if a `(\d+) actor types` sentence is present, and
+   * fails when present-but-stale. Removes the test gracefully when the doc
+   * doesn't enumerate.
+   */
+  it("CLAUDE.md actor-type count matches AuditActorTypeSchema length (when present)", () => {
+    const repoRoot = path.resolve(__dirname, "../../../..");
+    const claudeMd = readFileSync(path.join(repoRoot, "CLAUDE.md"), "utf8");
+    const matches = [...claudeMd.matchAll(/(\d+)\s+actor\s+types/g)];
+    if (matches.length === 0) return; // not enumerated; nothing to validate
+    expect(
+      matches.length,
+      "CLAUDE.md must contain at most one `<N> actor types` sentence",
+    ).toBe(1);
+    const documented = Number(matches[0]![1]);
+    const actual = AuditActorTypeSchema.options.length;
+    expect(
+      documented,
+      `CLAUDE.md says "${documented} actor types" but AuditActorTypeSchema has ${actual}.`,
+    ).toBe(actual);
   });
 });
