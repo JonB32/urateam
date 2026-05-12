@@ -161,8 +161,8 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
           `- approachSummary: 3-5 lines describing what the implementation will do at a level the operator can sanity-check before spending implement-stage tokens. Concrete enough that someone reading it could predict the diff shape.\n` +
           `- openQuestions: list of unknowns that the operator must answer before implement is safe — ambiguous requirements, missing API contracts, undecided trade-offs. EMPTY when the issue is clearly specified. NON-EMPTY forces routing to "needs-design" so a human answers before any implement-stage tokens are spent.\n` +
           `- antiAcceptanceCriteria: list of "things this should NOT do" — explicit out-of-scope items so the agent doesn't drift (e.g. "must NOT change other pipelines' configs", "must NOT add new dependencies"). Helps the agent stay narrow.\n\n` +
-          `Respond with exactly this JSON format (no markdown, no explanation, just the JSON):\n` +
-          `{"priority": <1-4 where 1=urgent>, "labels": [<"bug"|"feature"|"backend"|"frontend"|"infra"|"docs">], "complexity": <"trivial"|"small"|"medium"|"large">, "rationale": "<one sentence>", "approachSummary": "<3-5 lines>", "openQuestions": ["<question>", ...], "antiAcceptanceCriteria": ["<not-this>", ...], "acceptanceCriteria": ["<integration criterion — specifies call site in existing code>", "<behavior criterion — testable outcome>", "<documentation criterion — if applicable>", ...]}`;
+          `Respond with exactly this JSON format (no markdown, no explanation, just the JSON). The canonical form for openQuestions is the EMPTY array \`[]\` — only populate it when the issue is genuinely ambiguous and you cannot proceed without operator input. Do not invent questions for clear specs.\n` +
+          `{"priority": <1-4 where 1=urgent>, "labels": [<"bug"|"feature"|"backend"|"frontend"|"infra"|"docs">], "complexity": <"trivial"|"small"|"medium"|"large">, "rationale": "<one sentence>", "approachSummary": "<3-5 lines>", "openQuestions": [], "antiAcceptanceCriteria": ["<not-this>", ...], "acceptanceCriteria": ["<integration criterion — specifies call site in existing code>", "<behavior criterion — testable outcome>", "<documentation criterion — if applicable>", ...]}`;
 
         const response = await callClaude(prompt);
         const parsed = parseJsonObject(response);
@@ -214,6 +214,18 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
             { issueId: issue.identifier, openQuestionsCount: openQuestions.length },
             "Tier 4 open-questions routing: ticket forced to needs-design (Claude flagged unanswered questions)",
           );
+          // Mirror the observer-origin gate's defensive label-existence warning
+          // (lines 104-109): if the operator's Linear workspace doesn't have a
+          // `needs-design` label, the issue still moves to Backlog but the
+          // routing label is dropped silently. Surface this so operators can
+          // diagnose why a ticket isn't being picked up by promote.
+          if (!labelMap.get(OBSERVER_PIPELINE_LABEL.toLowerCase())) {
+            log.warn(
+              { issueId: issue.identifier, label: OBSERVER_PIPELINE_LABEL },
+              "Tier 4 routing: '" + OBSERVER_PIPELINE_LABEL +
+                "' label not found in Linear — issue will move to Backlog without pipeline label and won't be routed by promote",
+            );
+          }
         }
 
         const labelIds = issueLabels
