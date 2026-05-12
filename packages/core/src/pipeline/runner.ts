@@ -57,6 +57,7 @@ import {
   checkDuplicateBranch,
   branchName,
   pruneWorktreesInRepoDirs,
+  gitExecSafe,
 } from "../repo/git.js";
 import {
   addPRComment,
@@ -109,6 +110,11 @@ import { matchesAnyPattern } from "../util/glob.js";
 import { findScratchFiles } from "./scratch-file-guard.js";
 import { runTypecheck } from "./typecheck-gate.js";
 import { checkSpecVsImpl } from "./spec-vs-impl-gate.js";
+import {
+  countNewPublicExports,
+  shouldAutoDeepReview,
+  DEFAULT_AUTO_DEEP_REVIEW_THRESHOLDS,
+} from "./auto-deep-review.js";
 import {
   startFeedbackPipeline,
   type FeedbackStartContext,
@@ -1463,13 +1469,75 @@ export class PipelineRunner {
       // run 3 parallel sub-agents (reuse, quality, efficiency) to harden code
       // quality. Configurable via deepReviewPasses (default 0/disabled) and
       // maxDeepReviewPasses (hard cap, default 3).
-      const effectiveDeepReviewPasses = isFeatureLicensed("deep-review")
+      let effectiveDeepReviewPasses = isFeatureLicensed("deep-review")
         ? config.deepReviewPasses ?? 0
         : 0;
-      const deepReviewPasses = effectiveDeepReviewPasses;
-      const maxDeepReviewPasses = config.maxDeepReviewPasses ?? 3;
       const hasReview = config.stages.includes("review");
       const hasImplement = config.stages.includes("implement");
+
+      // Tier 3 — auto-bump deepReviewPasses to ≥1 when the agent's diff trips
+      // any of the heuristic thresholds (newFiles / totalLines /
+      // newPublicExports). Requires OPENROUTER_API_KEY + REVIEW_MODELS for the
+      // fanout to actually be enabled; if they're not set, the bump is a no-op
+      // because the deep-review providers won't run anyway.
+      if (
+        isFeatureLicensed("deep-review") &&
+        process.env.OPENROUTER_API_KEY &&
+        process.env.REVIEW_MODELS &&
+        hasReview &&
+        hasImplement
+      ) {
+        try {
+          const diffOut = await gitExecSafe(
+            ["diff", "--stat", `origin/${repoConfig.defaultBranch}...HEAD`],
+            worktreePath!,
+          );
+          // "N files changed, X insertions(+), Y deletions(-)" — last line.
+          const tail = diffOut.split("\n").filter(Boolean).pop() ?? "";
+          const newFilesMatch = /^\s*(\d+)\s+files? changed/.exec(tail);
+          const insertionsMatch = /(\d+)\s+insertion/.exec(tail);
+          const deletionsMatch = /(\d+)\s+deletion/.exec(tail);
+          const newFiles = newFilesMatch ? Number(newFilesMatch[1]) : 0;
+          const totalLines =
+            (insertionsMatch ? Number(insertionsMatch[1]) : 0) +
+            (deletionsMatch ? Number(deletionsMatch[1]) : 0);
+
+          const fullDiff = await gitExecSafe(
+            ["diff", `origin/${repoConfig.defaultBranch}...HEAD`],
+            worktreePath!,
+          );
+          const newPublicExports = countNewPublicExports(fullDiff);
+
+          if (
+            shouldAutoDeepReview(
+              { newFiles, totalLines, newPublicExports },
+              config.autoDeepReviewThresholds ?? DEFAULT_AUTO_DEEP_REVIEW_THRESHOLDS,
+            )
+          ) {
+            const bumped = Math.max(effectiveDeepReviewPasses, 1);
+            if (bumped > effectiveDeepReviewPasses) {
+              runLog.info(
+                {
+                  metrics: { newFiles, totalLines, newPublicExports },
+                  thresholds: config.autoDeepReviewThresholds ?? DEFAULT_AUTO_DEEP_REVIEW_THRESHOLDS,
+                  from: effectiveDeepReviewPasses,
+                  to: bumped,
+                },
+                "auto-deep-review: thresholds tripped — forcing deepReviewPasses ≥ 1",
+              );
+              effectiveDeepReviewPasses = bumped;
+            }
+          }
+        } catch (autoErr) {
+          runLog.warn(
+            { err: autoErr },
+            "auto-deep-review: heuristic evaluation failed — proceeding with configured deepReviewPasses",
+          );
+        }
+      }
+
+      const deepReviewPasses = effectiveDeepReviewPasses;
+      const maxDeepReviewPasses = config.maxDeepReviewPasses ?? 3;
 
       if (deepReviewPasses > 0 && hasReview && hasImplement) {
         // Cap deep review iterations against maxReviewPasses
@@ -1655,17 +1723,34 @@ export class PipelineRunner {
 
           // Merge deep review findings into handoff context so downstream logic
           // (e.g. auto-merge gate) can see them as standard ReviewFindings.
+          //
+          // Tier 3 — when `deepReviewFindingsAreBlocking` is true (default),
+          // upgrade every deep-review finding's severity to "blocking" so it
+          // forces draft. Operators who want the pre-Tier-3 advisory behavior
+          // can set `deepReviewFindingsAreBlocking: false` per pipeline.
           if (handoff && deepResult.findings.length > 0) {
-            // deepResult.findings is already ReviewFinding[] (the agentic
-            // provider wrapper performs the conversion before returning).
+            const findingsAreBlocking =
+              config.deepReviewFindingsAreBlocking ?? true;
+            const incoming = findingsAreBlocking
+              ? deepResult.findings.map((f) => ({ ...f, severity: "blocking" as const }))
+              : deepResult.findings;
             const existingFindings = handoff.context.reviewFindings ?? [];
             handoff = {
               ...handoff,
               context: {
                 ...handoff.context,
-                reviewFindings: [...existingFindings, ...deepResult.findings],
+                reviewFindings: [...existingFindings, ...incoming],
               },
             };
+            if (findingsAreBlocking) {
+              runLog.info(
+                {
+                  drPass,
+                  upgraded: deepResult.findings.length,
+                },
+                "deep review: findings upgraded to blocking (Tier 3 deepReviewFindingsAreBlocking)",
+              );
+            }
           }
         }
       }
