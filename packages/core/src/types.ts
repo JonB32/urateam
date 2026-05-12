@@ -491,6 +491,9 @@ export const AuditEventTypeSchema = z.enum([
   "slack.post_failed",
   "qa.run_triggered", "qa.run_completed", "qa.gap_issue_filed",
   "review.fanout_fallback_used", "review.model_low_output_ratio",
+  /** Tier 1a — the scratch-file denylist gate fired on this run, forcing a
+   *  draft PR. Payload includes the matched paths. */
+  "pipeline.scratch_files_blocked",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 
