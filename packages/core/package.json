@@ -1,6 +1,6 @@
 {
   "name": "@urateam/core",
-  "version": "0.1.36",
+  "version": "0.1.37",
   "license": "BUSL-1.1",
   "type": "module",
   "main": "dist/index.js",

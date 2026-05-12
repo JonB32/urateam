@@ -17,6 +17,21 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+## [0.1.51] — 2026-05-12
+
+Bumps:
+- `@urateam/core`: 0.1.36 → 0.1.37
+- `@urateam/cli`: 0.1.38 → 0.1.39
+- `@urateam/dashboard`: 0.1.36 → 0.1.37
+- `create-urateam`: 0.1.39 → 0.1.40
+
+### Added (OSS+)
+- **Tier 4: triage produces a real design doc + open-questions gate** ([#290](https://github.com/JonB32/urateam/pull/290)) — the PM Agent triage prompt is extended to produce `approachSummary` (3-5 line sanity-checkable plan), `openQuestions` (must-answer-before-implement), and `antiAcceptanceCriteria` (anti-scope). When `openQuestions.length > 0`, the ticket is forced to the `needs-design` pipeline label regardless of complexity — same routing mechanism as the observer-marker gate. Linear comment includes all three new sections when non-empty. `TriageResult` gains optional fields.
+- **Tier 5: escalation on consecutive failures** ([#291](https://github.com/JonB32/urateam/pull/291)) — when `promoteReadyIssues` trips the circuit breaker for an issue that does NOT already carry `needs-design`, escalate: add the label (preserving existing), post a Linear comment summarizing the last failed run's `errorMessage` (truncated 500 chars), invoke the operator-supplied `slackPostAlert` callback, and emit a `pm.escalated_to_needs_design` audit event. Idempotent — subsequent ticks find the label already in place and skip re-escalation. The existing `pm.skipped_circuit_breaker` event still fires for observability. New `getLastFailureError(db, issueId)` helper in `pm/actions/db-queries.ts`.
+
+### Audit log
+- New event type `pm.escalated_to_needs_design` (Tier 5). Total audit event count: 44 → 45.
+
 ## [0.1.50] — 2026-05-12
 
 Bumps:
