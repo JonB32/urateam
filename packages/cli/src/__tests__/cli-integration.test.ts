@@ -5,7 +5,7 @@ import { Command } from "commander";
 // Command registration — all expected commands are registered
 // ---------------------------------------------------------------------------
 describe("command registration", () => {
-  it("registers all expected commands: run, dev, webhook, config, start", async () => {
+  it("registers all expected commands: run, dev, webhook, config, start, bootstrap", async () => {
     // We cannot import index.ts directly because it calls .parse() on import,
     // so we verify by importing each command and checking its name.
     const { runCommand } = await import("../commands/run.js");
@@ -13,6 +13,7 @@ describe("command registration", () => {
     const { webhookCommand } = await import("../commands/webhook.js");
     const { configCommand } = await import("../commands/config.js");
     const { startCommand } = await import("../commands/start.js");
+    const { bootstrapCommand } = await import("../commands/bootstrap.js");
 
     // Build a program the same way index.ts does
     const program = new Command();
@@ -22,6 +23,7 @@ describe("command registration", () => {
     program.addCommand(webhookCommand);
     program.addCommand(configCommand);
     program.addCommand(startCommand);
+    program.addCommand(bootstrapCommand);
 
     const commandNames = program.commands.map((c) => c.name());
     expect(commandNames).toContain("run");
@@ -29,7 +31,8 @@ describe("command registration", () => {
     expect(commandNames).toContain("webhook");
     expect(commandNames).toContain("config");
     expect(commandNames).toContain("start");
-    expect(commandNames).toHaveLength(5);
+    expect(commandNames).toContain("bootstrap");
+    expect(commandNames).toHaveLength(6);
   });
 
   it("each command has a non-empty description", async () => {
@@ -38,8 +41,9 @@ describe("command registration", () => {
     const { webhookCommand } = await import("../commands/webhook.js");
     const { configCommand } = await import("../commands/config.js");
     const { startCommand } = await import("../commands/start.js");
+    const { bootstrapCommand } = await import("../commands/bootstrap.js");
 
-    for (const cmd of [runCommand, devCommand, webhookCommand, configCommand, startCommand]) {
+    for (const cmd of [runCommand, devCommand, webhookCommand, configCommand, startCommand, bootstrapCommand]) {
       expect(cmd.description()).toBeTruthy();
     }
   });
