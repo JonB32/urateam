@@ -148,7 +148,7 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
 
         const sanitizedDesc = sanitize(issue.description ?? "");
         const prompt =
-          `Classify this software issue and generate acceptance criteria. Respond with ONLY a JSON object, no other text.\n\n` +
+          `Classify this software issue, generate acceptance criteria, and produce a design doc. Respond with ONLY a JSON object, no other text.\n\n` +
           `Issue: ${issue.identifier}\n` +
           `Title: ${sanitize(issue.title)}\n` +
           `Description: ${sanitizedDesc}\n\n` +
@@ -157,8 +157,12 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
           `2. DOCUMENTATION: If the change adds new configuration, public API, CLI flags, or changes behavior, include a criterion requiring updates to relevant documentation (CLAUDE.md, README.md, deploy/README.md, or inline JSDoc).\n` +
           `3. TESTING: Include a criterion for tests that exercise the integration path, not just the utility in isolation.\n` +
           `4. Each criterion must be concrete and verifiable by reading the code — avoid vague criteria like "works correctly" or "is implemented".\n\n` +
+          `Tier 4 — DESIGN DOC fields:\n` +
+          `- approachSummary: 3-5 lines describing what the implementation will do at a level the operator can sanity-check before spending implement-stage tokens. Concrete enough that someone reading it could predict the diff shape.\n` +
+          `- openQuestions: list of unknowns that the operator must answer before implement is safe — ambiguous requirements, missing API contracts, undecided trade-offs. EMPTY when the issue is clearly specified. NON-EMPTY forces routing to "needs-design" so a human answers before any implement-stage tokens are spent.\n` +
+          `- antiAcceptanceCriteria: list of "things this should NOT do" — explicit out-of-scope items so the agent doesn't drift (e.g. "must NOT change other pipelines' configs", "must NOT add new dependencies"). Helps the agent stay narrow.\n\n` +
           `Respond with exactly this JSON format (no markdown, no explanation, just the JSON):\n` +
-          `{"priority": <1-4 where 1=urgent>, "labels": [<"bug"|"feature"|"backend"|"frontend"|"infra"|"docs">], "complexity": <"trivial"|"small"|"medium"|"large">, "rationale": "<one sentence>", "acceptanceCriteria": ["<integration criterion — specifies call site in existing code>", "<behavior criterion — testable outcome>", "<documentation criterion — if applicable>", ...]}`;
+          `{"priority": <1-4 where 1=urgent>, "labels": [<"bug"|"feature"|"backend"|"frontend"|"infra"|"docs">], "complexity": <"trivial"|"small"|"medium"|"large">, "rationale": "<one sentence>", "approachSummary": "<3-5 lines>", "openQuestions": ["<question>", ...], "antiAcceptanceCriteria": ["<not-this>", ...], "acceptanceCriteria": ["<integration criterion — specifies call site in existing code>", "<behavior criterion — testable outcome>", "<documentation criterion — if applicable>", ...]}`;
 
         const response = await callClaude(prompt);
         const parsed = parseJsonObject(response);
@@ -173,9 +177,44 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
           return null;
         }
 
+        // Tier 4 — open-questions routing: if the agent flagged any
+        // unanswered questions, force the ticket to `needs-design` so the
+        // await-approval stage gates a human before any implement-stage
+        // tokens are spent. Mirrors the observer-marker gate at the top of
+        // this function. Empty / missing array means the issue is clearly
+        // specified and routes normally.
+        const openQuestions: string[] = Array.isArray(parsed.openQuestions)
+          ? parsed.openQuestions
+              .filter((q: any) => typeof q === "string" && q.trim().length > 0)
+              .map((q: string) => q.trim())
+          : [];
+        const antiAcceptanceCriteria: string[] = Array.isArray(parsed.antiAcceptanceCriteria)
+          ? parsed.antiAcceptanceCriteria
+              .filter((q: any) => typeof q === "string" && q.trim().length > 0)
+              .map((q: string) => q.trim())
+          : [];
+        const approachSummary: string =
+          typeof parsed.approachSummary === "string"
+            ? parsed.approachSummary.trim()
+            : "";
+
+        const forceNeedsDesign = openQuestions.length > 0;
         const hasBug = labels.some((l: string) => l.toLowerCase() === "bug");
-        const pipelineLabel = hasBug ? "bug" : (complexity === "trivial" ? "quick-fix" : "auto-implement");
+        const pipelineLabel = forceNeedsDesign
+          ? OBSERVER_PIPELINE_LABEL // "needs-design" — same routing as observer-origin gate
+          : hasBug
+          ? "bug"
+          : complexity === "trivial"
+          ? "quick-fix"
+          : "auto-implement";
         const issueLabels = [...new Set([...labels, pipelineLabel])];
+
+        if (forceNeedsDesign) {
+          log.warn(
+            { issueId: issue.identifier, openQuestionsCount: openQuestions.length },
+            "Tier 4 open-questions routing: ticket forced to needs-design (Claude flagged unanswered questions)",
+          );
+        }
 
         const labelIds = issueLabels
           .map((l: string) => labelMap.get(l.toLowerCase()))
@@ -204,20 +243,50 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
 
         await linearClient.updateIssue(issue.id, updatePayload);
 
+        // Tier 4 — comment includes the new design-doc fields so operators
+        // see the approach, open questions, and anti-scope before
+        // approving / unblocking a needs-design ticket.
+        const designDocBlock = [
+          approachSummary
+            ? `\n\n**Approach (Tier 4):**\n${approachSummary}`
+            : "",
+          openQuestions.length > 0
+            ? `\n\n**Open questions (must be answered before implement):**\n${openQuestions
+                .map((q) => `- ${q}`)
+                .join("\n")}`
+            : "",
+          antiAcceptanceCriteria.length > 0
+            ? `\n\n**Anti-acceptance criteria (this should NOT do):**\n${antiAcceptanceCriteria
+                .map((q) => `- ${q}`)
+                .join("\n")}`
+            : "",
+        ].join("");
+
         await linearClient.createComment({
           issueId: issue.id,
           body:
-            `🤖 **PM Agent — Triaged**\n\n` +
+            `🤖 **PM Agent — Triaged**${forceNeedsDesign ? " (routed to needs-design)" : ""}\n\n` +
             `**Priority:** ${priority} | **Complexity:** ${complexity}\n` +
             `**Labels:** ${issueLabels.join(", ")}\n` +
             `**Pipeline:** ${pipelineLabel}\n` +
             `**Rationale:** ${rationale}` +
             (acceptanceCriteria.length > 0
               ? `\n\n**Generated Acceptance Criteria:**\n${acceptanceCriteria.map((c: string) => `- ${c}`).join("\n")}`
-              : ""),
+              : "") +
+            designDocBlock,
         });
 
-        const result: TriageResult = { issueId: issue.identifier, priority, labels: issueLabels, complexity, rationale, acceptanceCriteria };
+        const result: TriageResult = {
+          issueId: issue.identifier,
+          priority,
+          labels: issueLabels,
+          complexity,
+          rationale,
+          acceptanceCriteria,
+          ...(approachSummary && { approachSummary }),
+          ...(openQuestions.length > 0 && { openQuestions }),
+          ...(antiAcceptanceCriteria.length > 0 && { antiAcceptanceCriteria }),
+        };
         if (input.db) {
           void logAuditEventUnchecked(input.db, pmTriageClassifiedEvent({
             issueId: issue.identifier,
