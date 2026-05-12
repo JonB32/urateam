@@ -279,12 +279,12 @@ export async function runWizard(arg: string): Promise<WizardResult | null> {
     if (Object.keys(agentProfiles).length === 0) {
       agentProfiles = undefined; // all stages skipped — don't write a `{}` JSON
     } else {
-      // Round-trip-validate the JSON we'd write so a typo doesn't get persisted as broken
-      // syntax that the agent would crash on at runtime.
+      // Validate that the profiles object is JSON-serializable so a typo doesn't
+      // get persisted as broken syntax that the agent would crash on at runtime.
       try {
-        JSON.parse(JSON.stringify(agentProfiles));
+        JSON.stringify(agentProfiles);
       } catch (e) {
-        console.error("Internal: agent profiles JSON failed to round-trip — skipping.", e);
+        console.error("Internal: agent profiles failed JSON serialization — skipping.", e);
         agentProfiles = undefined;
       }
     }

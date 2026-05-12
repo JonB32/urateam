@@ -72,15 +72,6 @@ async function main() {
   }
 
   if (result.todos.length > 0) {
-    console.log("  Still to do (edit .urateam/.env or run the noted commands):");
-    for (const todo of result.todos) {
-      console.log(`    • ${todo}`);
-    }
-    console.log("");
-  }
-
-  // Detail any .env updates the operator must do before bringing the stack up.
-  if (result.todos.length > 0) {
     console.log("  Before starting the stack, edit .urateam/.env to fill in:");
     for (const todo of result.todos) {
       console.log(`    • ${todo}`);
