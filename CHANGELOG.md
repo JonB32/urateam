@@ -17,6 +17,20 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+## [0.1.50] — 2026-05-12
+
+Bumps:
+- `@urateam/core`: 0.1.35 → 0.1.36
+- `@urateam/cli`: 0.1.37 → 0.1.38
+- `@urateam/dashboard`: 0.1.35 → 0.1.36
+- `create-urateam`: 0.1.38 → 0.1.39
+
+### Added (OSS+)
+- **Tier 3: auto-deep-review thresholds** ([#288](https://github.com/JonB32/urateam/pull/288)) — new `packages/core/src/pipeline/auto-deep-review.ts` promotes the deep-review fanout from opt-in to default-on for non-trivial PRs. After the review-fix loop, the runner computes diff metrics (`changedFiles`, `totalLines`, `newPublicExports`). If any trips `autoDeepReviewThresholds` (defaults `{ changedFiles: 5, totalLines: 200, newPublicExports: 2 }`) AND the `deep-review` license is active, `deepReviewPasses` is bumped to ≥1 (so the agentic Claude reviewer always activates; OpenRouter fanout is the optional additional layer). New `deepReviewFindingsAreBlocking` (default `true`) upgrades deep-review finding severity to blocking so it forces draft. Escape hatches: `URATEAM_DISABLE_AUTO_DEEP_REVIEW=true` (global) or per-pipeline thresholds set high. `countNewPublicExports` parses `+export (default ?)(async ?)(function|class|const|let|interface|type|enum|{|*) ...` lines under monorepo `packages/<pkg>/src/` AND repo-root `src/`, excluding `__tests__/`. **BC note:** operators with existing `deepReviewPasses: 1` will see warnings/suggestions become blocking unless they set `deepReviewFindingsAreBlocking: false`.
+
+### Audit log
+- New event type `pipeline.auto_deep_review_bumped` (Tier 3). Total audit event count: 43 → 44.
+
 ## [0.1.49] — 2026-05-12
 
 Bumps:
