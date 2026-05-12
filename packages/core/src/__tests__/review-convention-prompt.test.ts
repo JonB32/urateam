@@ -104,4 +104,61 @@ describe("reviewTemplate — assembles the convention checklist into the prompt"
     expect(prompt).toContain("SQL injection");
     expect(prompt).toContain("XSS");
   });
+
+  it("includes REVIEW_OUTPUT_FORMAT (anchor for the structured-output parser)", () => {
+    // The template uses `${REVIEW_OUTPUT_FORMAT}` then `.trim()` on the whole
+    // string, which strips the constant's trailing newline. Compare against
+    // the trimmed value so the assertion catches both missing-interpolation
+    // and accidental-removal but tolerates the .trim().
+    const prompt = reviewTemplate(stubIssue, stubRepo);
+    expect(prompt).toContain(REVIEW_OUTPUT_FORMAT.trim());
+  });
+});
+
+describe("OpenRouter fanout prompt — includes the convention checklist + enumerates Tier 2 categories", () => {
+  it("buildReviewPrompt's system message includes PROJECT_CONVENTION_CHECKLIST", async () => {
+    const { buildReviewPrompt } = await import("../executor/review/review-prompt.js");
+    const built = buildReviewPrompt({
+      handoff: {
+        runId: "r1",
+        issueId: "i1",
+        stage: "review",
+        timestamp: new Date().toISOString(),
+        summary: "stub",
+        filesChanged: [],
+        approach: "stub",
+        context: { issueIntent: "stub", constraints: [], assumptions: [] },
+        tokenBudget: { contextTokensUsed: 0, recommendedMaxTurns: 1 },
+      },
+      diff: "",
+      files: [],
+      maxInputTokens: 8000,
+    });
+    const system = built.messages.find((m) => m.role === "system");
+    expect(system?.content).toContain(PROJECT_CONVENTION_CHECKLIST);
+  });
+
+  it("buildReviewPrompt's system message enumerates every Tier 2 category", async () => {
+    const { buildReviewPrompt } = await import("../executor/review/review-prompt.js");
+    const built = buildReviewPrompt({
+      handoff: {
+        runId: "r1",
+        issueId: "i1",
+        stage: "review",
+        timestamp: new Date().toISOString(),
+        summary: "stub",
+        filesChanged: [],
+        approach: "stub",
+        context: { issueIntent: "stub", constraints: [], assumptions: [] },
+        tokenBudget: { contextTokensUsed: 0, recommendedMaxTurns: 1 },
+      },
+      diff: "",
+      files: [],
+      maxInputTokens: 8000,
+    });
+    const system = built.messages.find((m) => m.role === "system")?.content ?? "";
+    for (const cat of TIER_2_CATEGORIES) {
+      expect(system, `fanout system prompt must mention category "${cat}"`).toContain(cat);
+    }
+  });
 });

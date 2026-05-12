@@ -28,9 +28,15 @@ CODE_OF_CONDUCT.md, LICENSE.md, AUTHORS.md.
 
 ### category: "db-ddl-drift"
 If \`packages/core/src/db/migrations/{sqlite,postgres}/*.sql\` are added or
-modified, verify \`getCreateTablesDDL()\` in \`db/client.ts\` is updated to match.
-CLAUDE.md "DB schema changes" is the authority. Mismatch ships an installable
-release that's broken on fresh installs.
+modified, verify ALL THREE required sites are updated (CLAUDE.md "DB schema
+changes" is the authority):
+1. \`MIGRATION_COLUMNS\` array in \`db/client.ts\` — generates the ALTER TABLE
+   statements for existing installs on startup.
+2. \`getCreateTablesDDL()\` in \`db/client.ts\` — the CREATE TABLE template for
+   fresh installs.
+3. The Drizzle schema in \`db/schema.ts\` — keeps ORM types in sync.
+Mismatch in any of the three ships a release that's broken on fresh installs,
+broken on existing installs, or both.
 
 ### category: "audit-bypass-undocumented"
 If \`logAuditEventUnchecked\` is added to a new file, verify the file appears
@@ -59,9 +65,13 @@ Flag any \`console.log\` / \`console.error\` / etc. — structured logging via
 log or operator dashboards.
 
 ### category: "convention-throw"
-Flag bare \`throw\` statements inside the pipeline runner failure paths.
-Use \`failPipeline()\` so the error classification (transient vs permanent)
-and DB state stay consistent.
+Flag bare \`throw\` statements in ANY pipeline failure path — not only
+\`pipeline/runner.ts\`, but also \`executor/executor.ts\`, every module under
+\`pm/actions/\`, feedback-pipeline / RALPH / review-fix paths, and any other
+module that owns a pipeline-stage execution. Use \`failPipeline()\` so the
+error classification (transient vs permanent) and DB state stay consistent.
+Exception: re-throwing after \`failPipeline()\` to exit a push-queue / lock
+callback is allowed and documented in CLAUDE.md.
 
 ### category: "convention-as-any"
 Flag new \`as any\` casts outside the documented \`AnyDb\` / db-cast pattern
