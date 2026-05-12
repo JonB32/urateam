@@ -3,9 +3,11 @@
  *
  * Catches the failure mode where the autonomous agent writes a JSDoc that
  * references a config / option / env / deps / options field by name, but
- * never actually adds that field to any schema or implementation (PR #254
- * BEC-201 shipped `config.implementProviderFallback` in the docblock with no
- * Zod entry and no consumer).
+ * never actually adds that field to any schema or implementation. (The PR
+ * #254 failure mode is detailed in `docs/superpowers/plans/2026-05-11-
+ * pipeline-reliability-tiers.md`; we intentionally do NOT spell the
+ * canonical example symbol here so the corpus check doesn't launder it
+ * past the gate in regression tests.)
  *
  * Algorithm (per file in the agent's diff):
  *   1. Find every `/** ... *\/` block.
@@ -68,7 +70,8 @@ export function extractPromisedSymbols(content: string): PromisedSymbol[] {
 export interface SpecVsImplFinding {
   /** Worktree-relative path of the file that contains the JSDoc reference. */
   filePath: string;
-  /** The bare symbol promised in the docblock (e.g. `implementProviderFallback`). */
+  /** The bare symbol promised in the docblock (the part after the prefix —
+   *  e.g. `maxAttempts` for a docblock that referenced `config.maxAttempts`). */
   promisedSymbol: string;
   /** The prefix it was referenced under (e.g. `config`). */
   promisedPrefix: PromisedSymbol["prefix"];

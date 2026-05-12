@@ -49,16 +49,18 @@ export function doThing() {}
     ]);
   });
 
-  it("extracts the BEC-201 case: config.implementProviderFallback", () => {
+  it("extracts the BEC-201-style case (docblock promises a non-existent provider-fallback field)", () => {
+    // Synthetic symbol so the runtime corpus check isn't laundered by this
+    // test file itself appearing in the worktree's tracked-source corpus.
     const content = `
 /**
- * Configures the provider chain. When \`config.implementProviderFallback\` is
+ * Configures the provider chain. When \`config.aBec201RegressionField\` is
  * set, the secondary provider is used if the primary fails.
  */
 export const Schema = z.object({ implementProvider: z.string() });
 `;
     expect(extractPromisedSymbols(content)).toEqual([
-      { prefix: "config", symbol: "implementProviderFallback" },
+      { prefix: "config", symbol: "aBec201RegressionField" },
     ]);
   });
 
@@ -127,10 +129,12 @@ const x = 1;
 });
 
 describe("checkSpecVsImplFromContent — flags symbols not defined in any TS file", () => {
-  it("BEC-201 regression: config.implementProviderFallback in docs but absent from code → finding", () => {
+  it("BEC-201-style regression: docblock promises a config field absent from code → finding", () => {
+    // Uses a synthetic symbol (rather than the real BEC-201 string) so that
+    // the runtime corpus check is not laundered by this test file itself.
     const fileContent = `
 /**
- * Configures the provider chain. When \`config.implementProviderFallback\` is
+ * Configures the provider chain. When \`config.aBec201RegressionField\` is
  * set, the secondary provider is used if the primary fails.
  */
 export const Schema = z.object({
@@ -138,7 +142,7 @@ export const Schema = z.object({
 });
 `;
     // Pretend the worktree's TS corpus contains only `implementProvider`, not
-    // the promised `implementProviderFallback`.
+    // the promised `aBec201RegressionField`.
     const corpus = "implementProvider implementProvider implementProvider";
 
     const findings = checkSpecVsImplFromContent({
@@ -149,7 +153,7 @@ export const Schema = z.object({
     expect(findings).toHaveLength(1);
     expect(findings[0]).toMatchObject({
       filePath: "src/pipeline/config.ts",
-      promisedSymbol: "implementProviderFallback",
+      promisedSymbol: "aBec201RegressionField",
     });
   });
 
