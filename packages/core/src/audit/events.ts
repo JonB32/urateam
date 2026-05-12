@@ -697,3 +697,33 @@ export function pipelineTypecheckFailedEvent(args: {
     },
   });
 }
+
+/**
+ * Tier 1c — emitted when the spec-vs-impl gate detects JSDoc references to
+ * `config.X` / `opts.X` / etc. that aren't defined anywhere in the worktree.
+ * The runner pushes one `category: "spec-vs-impl"` blocking finding per
+ * undefined symbol; the audit event captures the list (capped at 20 tuples)
+ * for rate-tracking.
+ */
+export function pipelineSpecVsImplFailedEvent(args: {
+  runId: string;
+  issueId: string;
+  findings: Array<{
+    filePath: string;
+    promisedPrefix: string;
+    promisedSymbol: string;
+  }>;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.spec_vs_impl_failed",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      findings: args.findings.slice(0, 20),
+      truncated: args.findings.length > 20,
+      count: args.findings.length,
+    },
+  });
+}

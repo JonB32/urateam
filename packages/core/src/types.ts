@@ -499,6 +499,11 @@ export const AuditEventTypeSchema = z.enum([
    *  up to 5 first messages. The runner forces draft and surfaces the output
    *  in the PR body. */
   "pipeline.typecheck_failed",
+  /** Tier 1c — the spec-vs-impl JSDoc gate found one or more docblock
+   *  references to `config.X` / `opts.X` / etc. that aren't defined anywhere
+   *  in the worktree. Payload lists matched (file, prefix, symbol) tuples
+   *  (capped at 20). */
+  "pipeline.spec_vs_impl_failed",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 
