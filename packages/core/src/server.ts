@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import { createWebhookHandler } from "./webhook/handler.js";
 import { createGitHubWebhookHandler } from "./webhook/github-handler.js";
+import { createGitLabWebhookHandler } from "./webhook/gitlab-handler.js";
+import { createBitbucketWebhookHandler } from "./webhook/bitbucket-handler.js";
 import { createDb } from "./db/client.js";
 import { PipelineRunner } from "./pipeline/runner.js";
 import { CompositeNotifier } from "./notifier/composite.js";
@@ -11,6 +13,7 @@ import type { PipelineConfig, RepoConfig, TriggerMap } from "./types.js";
 import type { PmAgentConfig } from "./pm/types.js";
 import type { GitHubConfig } from "./repo/github.js";
 import type { GitLabConfig } from "./repo/gitlab.js";
+import type { BitbucketConfig } from "./repo/bitbucket.js";
 import { isFeatureLicensed, checkLicense } from "./license.js";
 import { createLogger } from "./logger.js";
 
@@ -41,6 +44,7 @@ export interface ServerConfig {
   repoCloneDir?: string;
   github?: GitHubConfig;
   gitlab?: GitLabConfig;
+  bitbucket?: BitbucketConfig;
   dashboardAuth?: { username: string; password: string };
   /** When provided, mounts Slack slash command + Events API endpoints for the PM Agent */
   pmSlack?: PmSlackInterfaceConfig;
@@ -50,6 +54,18 @@ export interface ServerConfig {
    * The secret here is the GitHub webhook secret (separate from the Linear webhook secret).
    */
   githubWebhookSecret?: string;
+  /**
+   * When provided, mounts the GitLab webhook handler at /webhooks/gitlab.
+   * Enables MR comment → review-feedback runs for GitLab repositories.
+   * Set this to the "Secret token" you configure in GitLab's webhook settings.
+   */
+  gitlabWebhookToken?: string;
+  /**
+   * When provided, mounts the Bitbucket webhook handler at /webhooks/bitbucket.
+   * Enables PR comment → review-feedback runs for Bitbucket repositories.
+   * Set this to the shared secret you configure in Bitbucket's webhook settings.
+   */
+  bitbucketWebhookSecret?: string;
   /**
    * PM Agent config. When provided, enables the 100% budget gate in the
    * webhook handler so new runs are refused when spend caps are exhausted.
@@ -94,6 +110,7 @@ export async function createApp(config: ServerConfig) {
     repoCloneDir: config.repoCloneDir,
     github: config.github,
     gitlab: config.gitlab,
+    bitbucket: config.bitbucket,
   });
 
   // Webhook handler
@@ -125,6 +142,37 @@ export async function createApp(config: ServerConfig) {
       notifier,
     });
     app.route("/", githubWebhookApp);
+  }
+
+  // GitLab webhook handler (optional — for MR comment → pipeline re-entry)
+  // Mount when a webhook token is configured. GitLab uses a plain shared secret
+  // in X-Gitlab-Token (not HMAC), so this also protects against unauthenticated access.
+  if (config.gitlabWebhookToken) {
+    const gitlabWebhookApp = createGitLabWebhookHandler({
+      webhookToken: config.gitlabWebhookToken,
+      runner,
+      pipelineConfigs: config.pipelineConfigs,
+      repoConfigs: config.repoConfigs,
+      db: db as any,
+      notifier,
+    });
+    app.route("/", gitlabWebhookApp);
+    log.info("GitLab webhook handler mounted at /webhooks/gitlab");
+  }
+
+  // Bitbucket webhook handler (optional — for PR comment → pipeline re-entry)
+  // Validates HMAC-SHA256 in X-Hub-Signature-256 (same scheme as GitHub).
+  if (config.bitbucketWebhookSecret) {
+    const bitbucketWebhookApp = createBitbucketWebhookHandler({
+      webhookSecret: config.bitbucketWebhookSecret,
+      runner,
+      pipelineConfigs: config.pipelineConfigs,
+      repoConfigs: config.repoConfigs,
+      db: db as any,
+      notifier,
+    });
+    app.route("/", bitbucketWebhookApp);
+    log.info("Bitbucket webhook handler mounted at /webhooks/bitbucket");
   }
 
   // PM Agent Slack interface (optional, license-gated)

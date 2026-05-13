@@ -69,8 +69,18 @@ import {
 import {
   createMR,
   buildAuthenticatedUrl,
+  addMRComment,
+  mergeMRWhenPipelineSucceeds,
   type GitLabConfig,
 } from "../repo/gitlab.js";
+import {
+  buildBitbucketAuthenticatedUrl,
+  createBitbucketPR,
+  addBitbucketPRComment,
+  mergeBitbucketPR,
+  parseBitbucketUrl,
+  type BitbucketConfig,
+} from "../repo/bitbucket.js";
 import { parseRepoUrl, parseGitLabUrl } from "../repo/config.js";
 import type { ReviewFeedbackComment } from "../webhook/github-handler.js";
 import { detectTechStack } from "../repo/tech-stack.js";
@@ -137,6 +147,7 @@ export interface PipelineRunnerConfig {
   repoCloneDir?: string; // default $HOME/work/repos
   github?: GitHubConfig; // optional — PR creation skipped if not provided
   gitlab?: GitLabConfig; // optional — GitLab MR creation
+  bitbucket?: BitbucketConfig; // optional — Bitbucket PR creation
   /**
    * Maximum time (ms) to wait for the distributed branch lock before failing
    * the pipeline.  Defaults to 120 000 ms (2 minutes).
@@ -172,6 +183,7 @@ export class PipelineRunner {
   private repoCloneDir: string;
   private githubConfig?: GitHubConfig;
   private gitlabConfig?: GitLabConfig;
+  private bitbucketConfig?: BitbucketConfig;
   private lockAdapter: LockAdapter;
   private prLockTimeoutMs: number;
   /** Memoised Octokit promise — created once per PipelineRunner instance. */
@@ -186,6 +198,7 @@ export class PipelineRunner {
     this.repoCloneDir = config.repoCloneDir ?? join(homedir(), "work", "repos");
     this.githubConfig = config.github;
     this.gitlabConfig = config.gitlab;
+    this.bitbucketConfig = config.bitbucket;
     this.lockAdapter = createBranchLockAdapter(config.db as AnyDb);
     this.prLockTimeoutMs = config.prLockTimeoutMs ?? 120_000;
   }
@@ -642,6 +655,7 @@ export class PipelineRunner {
       agentRunDir: this.agentRunDir,
       githubConfig: this.githubConfig,
       gitlabConfig: this.gitlabConfig,
+      bitbucketConfig: this.bitbucketConfig,
       pushQueue: this.pushQueue,
       lockAdapter: this.lockAdapter,
       prLockTimeoutMs: this.prLockTimeoutMs,
@@ -753,10 +767,12 @@ export class PipelineRunner {
         // Fresh start — clone repository, create worktree, run setup.
         // ---------------------------------------------------------------
         const repoDir = `${this.repoCloneDir}/${sanitizedIssue.slug}`;
-        // Inject credentials for GitLab private repos
+        // Inject credentials for GitLab / Bitbucket private repos
         const cloneUrl = (repoConfig.provider === "gitlab" && this.gitlabConfig)
           ? buildAuthenticatedUrl(repoConfig.url, this.gitlabConfig)
-          : repoConfig.url;
+          : (repoConfig.provider === "bitbucket" && this.bitbucketConfig)
+            ? buildBitbucketAuthenticatedUrl(repoConfig.url, this.bitbucketConfig)
+            : repoConfig.url;
         const logUrl = cloneUrl.replace(/:\/\/[^@]+@/, "://[redacted]@");
         runLog.info({ repoUrl: logUrl, repoDir }, "cloning repository");
         await cloneRepo(cloneUrl, repoDir);
@@ -2190,6 +2206,7 @@ export class PipelineRunner {
           agentCommits,
         });
         const isGitLab = repoConfig.provider === "gitlab";
+        const isBitbucket = repoConfig.provider === "bitbucket";
 
         // Mandatory reviewer request (enterprise feature 4.6). Only non-null
         // when the org-policy feature is licensed and the pipeline config
@@ -2216,7 +2233,25 @@ export class PipelineRunner {
           } catch (mrError) {
             runLog.error({ err: mrError }, "MR creation via GitLab API failed");
           }
-        } else if (!isGitLab && this.githubConfig) {
+        } else if (isBitbucket && this.bitbucketConfig) {
+          // Bitbucket — create PR via REST API
+          try {
+            const { workspace, repoSlug } = parseBitbucketUrl(repoConfig.url);
+            prUrl = await createBitbucketPR(this.bitbucketConfig, {
+              workspace,
+              repoSlug,
+              sourceBranch: branch,
+              targetBranch: repoConfig.defaultBranch,
+              title: sanitizedIssue.title,
+              description: prBody,
+              draft: shouldDraft,
+            });
+            run.prUrl = prUrl;
+            runLog.info({ prUrl }, "PR created via Bitbucket API");
+          } catch (prError) {
+            runLog.error({ err: prError }, "PR creation via Bitbucket API failed");
+          }
+        } else if (!isGitLab && !isBitbucket && this.githubConfig) {
           // GitHub App — use Octokit API
           try {
             const { owner, repo } = requireParsedRepoUrl();
@@ -2236,7 +2271,7 @@ export class PipelineRunner {
           } catch (prError) {
             runLog.error({ err: prError }, "PR creation via GitHub App failed");
           }
-        } else {
+        } else if (!isGitLab && !isBitbucket) {
           // No provider-specific config — use gh CLI
           runLog.info("creating PR via gh CLI");
           const ghOwner = parsedRepoUrl?.owner;
@@ -2272,11 +2307,12 @@ export class PipelineRunner {
 
         // BEC-134: Post fanout (per-model) review comments on the PR. Best-effort —
         // failures never block the pipeline. Requires the GitHub App for Octokit
-        // access; the gh-CLI/GitLab paths skip this (parity gap accepted for v1).
+        // access; the gh-CLI/GitLab/Bitbucket paths skip this (parity gap accepted for v1).
         if (
           prUrl &&
           pendingFanoutRuns.length > 0 &&
           !isGitLab &&
+          !isBitbucket &&
           this.githubConfig
         ) {
           const fanoutPrNumberMatch = prUrl.match(/\/pull\/(\d+)/);
@@ -2410,10 +2446,9 @@ export class PipelineRunner {
           );
         }
 
-        // 6. Auto-merge (skip drafts, unresolved conflicts, or GitLab)
+        // 6. Auto-merge (skip drafts, unresolved conflicts)
         const maxLines = config.autoMergeMaxLines ?? 200;
-        const isGitLabRepo = repoConfig.provider === "gitlab";
-        if (config.autoMerge && prUrl && !rebaseConflict && !isGitLabRepo && !shouldDraft) {
+        if (config.autoMerge && prUrl && !rebaseConflict && !shouldDraft) {
           const diffLines = await getDiffLineCount(wtPath, repoConfig.defaultBranch);
           const lastHandoff = handoff;
           const hasBlockingFindings = lastHandoff?.context?.reviewFindings?.some(
@@ -2446,7 +2481,7 @@ export class PipelineRunner {
           // Known limitation: the reviewer check requires an Octokit API
           // client (to call pulls.listReviews / teams.listMembersInOrg), so
           // it only fires when the GitHub App is configured. The `gh` CLI
-          // fallback and GitLab paths skip this check — documented in the
+          // fallback and GitLab/Bitbucket paths skip this check — documented in the
           // plan as acceptable because production deployments use the App.
           if (shouldMerge && isFeatureLicensed("org-policy")) {
             const policyReviewerRequest = buildReviewerRequest(config.policy);
@@ -2502,15 +2537,72 @@ export class PipelineRunner {
           }
 
           if (shouldMerge) {
-            runLog.info({ diffLines, maxLines }, "auto-merge eligible, merging PR");
-            autoMerged = await mergePRViaCli(wtPath, branch);
-            if (autoMerged) {
-              autoMergeReason = "PR auto-merged successfully";
-              runLog.info({ prUrl }, "PR auto-merged");
+            runLog.info({ diffLines, maxLines, provider: repoConfig.provider }, "auto-merge eligible, merging PR");
+            if (isGitLab && this.gitlabConfig) {
+              // GitLab: use merge_when_pipeline_succeeds API
+              try {
+                const { projectPath } = parseGitLabUrl(repoConfig.url);
+                // Extract MR IID from URL: .../-/merge_requests/42
+                const mrIidMatch = prUrl.match(/\/merge_requests\/(\d+)/);
+                const mrIid = mrIidMatch ? parseInt(mrIidMatch[1]!, 10) : null;
+                if (mrIid !== null) {
+                  autoMerged = await mergeMRWhenPipelineSucceeds(this.gitlabConfig, projectPath, mrIid);
+                  if (autoMerged) {
+                    autoMergeReason = "PR auto-merged via GitLab merge_when_pipeline_succeeds";
+                    runLog.info({ prUrl }, "GitLab MR queued for merge when pipeline succeeds");
+                  } else {
+                    autoMergeReason = "GitLab merge_when_pipeline_succeeds API call failed";
+                    runLog.warn("GitLab auto-merge failed, sending human review alert");
+                    await this.notifier.onHumanReviewNeeded?.(run, prUrl, "GitLab auto-merge failed — please merge manually");
+                  }
+                } else {
+                  autoMergeReason = "Could not parse MR IID from URL";
+                  runLog.warn({ prUrl }, "GitLab auto-merge: could not parse MR IID");
+                  await this.notifier.onHumanReviewNeeded?.(run, prUrl, "GitLab auto-merge failed — could not determine MR ID");
+                }
+              } catch (err) {
+                autoMergeReason = "GitLab auto-merge threw an error";
+                runLog.error({ err }, "GitLab auto-merge error");
+                await this.notifier.onHumanReviewNeeded?.(run, prUrl, "GitLab auto-merge failed — please merge manually");
+              }
+            } else if (isBitbucket && this.bitbucketConfig) {
+              // Bitbucket: use PR merge API
+              try {
+                const { workspace, repoSlug } = parseBitbucketUrl(repoConfig.url);
+                // Extract PR ID from URL: .../pull-requests/42
+                const prIdMatch = prUrl.match(/\/pull-requests\/(\d+)/);
+                const prId = prIdMatch ? parseInt(prIdMatch[1]!, 10) : null;
+                if (prId !== null) {
+                  autoMerged = await mergeBitbucketPR(this.bitbucketConfig, workspace, repoSlug, prId);
+                  if (autoMerged) {
+                    autoMergeReason = "PR auto-merged via Bitbucket API";
+                    runLog.info({ prUrl }, "Bitbucket PR merged");
+                  } else {
+                    autoMergeReason = "Bitbucket merge API call failed";
+                    runLog.warn("Bitbucket auto-merge failed, sending human review alert");
+                    await this.notifier.onHumanReviewNeeded?.(run, prUrl, "Bitbucket auto-merge failed — please merge manually");
+                  }
+                } else {
+                  autoMergeReason = "Could not parse PR ID from Bitbucket URL";
+                  runLog.warn({ prUrl }, "Bitbucket auto-merge: could not parse PR ID");
+                  await this.notifier.onHumanReviewNeeded?.(run, prUrl, "Bitbucket auto-merge failed — could not determine PR ID");
+                }
+              } catch (err) {
+                autoMergeReason = "Bitbucket auto-merge threw an error";
+                runLog.error({ err }, "Bitbucket auto-merge error");
+                await this.notifier.onHumanReviewNeeded?.(run, prUrl, "Bitbucket auto-merge failed — please merge manually");
+              }
             } else {
-              autoMergeReason = "Auto-merge command failed";
-              runLog.warn("auto-merge failed, sending human review alert");
-              await this.notifier.onHumanReviewNeeded?.(run, prUrl, "Auto-merge failed — please merge manually");
+              // GitHub / gh CLI fallback
+              autoMerged = await mergePRViaCli(wtPath, branch);
+              if (autoMerged) {
+                autoMergeReason = "PR auto-merged successfully";
+                runLog.info({ prUrl }, "PR auto-merged");
+              } else {
+                autoMergeReason = "Auto-merge command failed";
+                runLog.warn("auto-merge failed, sending human review alert");
+                await this.notifier.onHumanReviewNeeded?.(run, prUrl, "Auto-merge failed — please merge manually");
+              }
             }
           } else {
             runLog.info({ diffLines, maxLines, hasBlockingFindings, excludedFile }, `skipping auto-merge: ${autoMergeReason}`);
@@ -2567,89 +2659,111 @@ export class PipelineRunner {
 
       // BEC-175: optional per-PR cost summary comment. Opt-in via
       // URATEAM_PR_COST_SUMMARY=true. Best-effort — failures never block
-      // pipeline completion.
+      // pipeline completion. Supported on GitHub, GitLab, and Bitbucket.
+      // BEC-206: provider booleans must be local to this block — the
+      // declarations inside the push queue scope are not visible here.
+      const isGitLab = repoConfig.provider === "gitlab";
+      const isBitbucket = repoConfig.provider === "bitbucket";
       if (
         process.env.URATEAM_PR_COST_SUMMARY === "true" &&
-        prUrl &&
-        repoConfig.provider !== "gitlab" &&
-        this.githubConfig
+        prUrl
       ) {
         try {
-          const summaryPrMatch = prUrl.match(/\/pull\/(\d+)/);
-          const summaryPrNumber = summaryPrMatch
-            ? parseInt(summaryPrMatch[1]!, 10)
-            : null;
-          if (summaryPrNumber !== null) {
-            // Fetch stage runs first; reviewModelRuns query depends on the
-            // resulting stageIds so the two queries are necessarily sequential.
-            const stages = await (this.db as AnyDb)
-              .select()
-              .from(stageRuns)
-              .where(eq(stageRuns.pipelineRunId, runId));
-            const stageIds = stages.map((s: { id: string }) => s.id);
-            const modelRows =
-              stageIds.length > 0
-                ? await (this.db as AnyDb)
-                    .select()
-                    .from(reviewModelRuns)
-                    .where(inArray(reviewModelRuns.stageRunId, stageIds))
-                : [];
-            const modelsByStage = new Map<
-              string,
-              Array<{ modelId: string; inputTokens: number; outputTokens: number }>
-            >();
-            for (const mr of modelRows) {
-              const arr = modelsByStage.get(mr.stageRunId) ?? [];
-              arr.push({
-                modelId: mr.modelId,
-                inputTokens: mr.inputTokens,
-                outputTokens: mr.outputTokens,
-              });
-              modelsByStage.set(mr.stageRunId, arr);
-            }
-            const breakdown: StageCostBreakdown[] = stages.map((s: any) => ({
-              stage: s.stage,
-              inputTokens: s.inputTokens,
-              outputTokens: s.outputTokens,
-              cacheCreationInputTokens: s.cacheCreationInputTokens ?? 0,
-              cacheReadInputTokens: s.cacheReadInputTokens ?? 0,
-              modelRuns: modelsByStage.get(s.id),
-            }));
-            const body = formatPRCostSummary(breakdown, run.pipelineKey, {
-              pipelineConfigs: { [run.pipelineKey]: config },
+          // Build cost body regardless of provider
+          const stages = await (this.db as AnyDb)
+            .select()
+            .from(stageRuns)
+            .where(eq(stageRuns.pipelineRunId, runId));
+          const stageIds = stages.map((s: { id: string }) => s.id);
+          const modelRows =
+            stageIds.length > 0
+              ? await (this.db as AnyDb)
+                  .select()
+                  .from(reviewModelRuns)
+                  .where(inArray(reviewModelRuns.stageRunId, stageIds))
+              : [];
+          const modelsByStage = new Map<
+            string,
+            Array<{ modelId: string; inputTokens: number; outputTokens: number }>
+          >();
+          for (const mr of modelRows) {
+            const arr = modelsByStage.get(mr.stageRunId) ?? [];
+            arr.push({
+              modelId: mr.modelId,
+              inputTokens: mr.inputTokens,
+              outputTokens: mr.outputTokens,
             });
-            if (body) {
-              const { owner: summaryOwner, repo: summaryRepo } =
-                requireParsedRepoUrl();
-              const summaryOctokit = await this.getOctokit();
-              // Dedup: skip when a prior pipeline run on this PR already
-              // posted a cost summary. We use the markdown header as the
-              // sentinel so the check survives any token/dollar diff between
-              // runs.
-              const alreadyPosted = await prHasCommentStartingWith(
-                summaryOctokit,
-                summaryOwner,
-                summaryRepo,
-                summaryPrNumber,
-                "🤖 **Pipeline cost summary**",
-              );
-              if (alreadyPosted) {
-                runLog.info(
-                  { prNumber: summaryPrNumber },
-                  "BEC-175: cost summary already exists on PR — skipping",
-                );
-              } else {
-                await addPRComment(
+            modelsByStage.set(mr.stageRunId, arr);
+          }
+          const breakdown: StageCostBreakdown[] = stages.map((s: any) => ({
+            stage: s.stage,
+            inputTokens: s.inputTokens,
+            outputTokens: s.outputTokens,
+            cacheCreationInputTokens: s.cacheCreationInputTokens ?? 0,
+            cacheReadInputTokens: s.cacheReadInputTokens ?? 0,
+            modelRuns: modelsByStage.get(s.id),
+          }));
+          const costBody = formatPRCostSummary(breakdown, run.pipelineKey, {
+            pipelineConfigs: { [run.pipelineKey]: config },
+          });
+          if (costBody) {
+            if (isGitLab && this.gitlabConfig) {
+              // GitLab: post via REST API
+              const { projectPath } = parseGitLabUrl(repoConfig.url);
+              const mrIidMatch = prUrl.match(/\/merge_requests\/(\d+)/);
+              const mrIid = mrIidMatch ? parseInt(mrIidMatch[1]!, 10) : null;
+              if (mrIid !== null) {
+                await addMRComment(this.gitlabConfig, projectPath, mrIid, costBody);
+                runLog.info({ mrIid }, "BEC-175: posted GitLab MR cost summary");
+              }
+            } else if (isBitbucket && this.bitbucketConfig) {
+              // Bitbucket: post via REST API
+              const { workspace, repoSlug } = parseBitbucketUrl(repoConfig.url);
+              const prIdMatch = prUrl.match(/\/pull-requests\/(\d+)/);
+              const prId = prIdMatch ? parseInt(prIdMatch[1]!, 10) : null;
+              if (prId !== null) {
+                await addBitbucketPRComment(this.bitbucketConfig, workspace, repoSlug, prId, costBody);
+                runLog.info({ prId }, "BEC-175: posted Bitbucket PR cost summary");
+              }
+            } else if (this.githubConfig) {
+              // GitHub: use Octokit with dedup check
+              const summaryPrMatch = prUrl.match(/\/pull\/(\d+)/);
+              const summaryPrNumber = summaryPrMatch
+                ? parseInt(summaryPrMatch[1]!, 10)
+                : null;
+              if (summaryPrNumber !== null) {
+                const { owner: summaryOwner, repo: summaryRepo } =
+                  requireParsedRepoUrl();
+                const summaryOctokit = await this.getOctokit();
+                // Dedup: skip when a prior pipeline run on this PR already
+                // posted a cost summary. We use the markdown header as the
+                // sentinel so the check survives any token/dollar diff between
+                // runs.
+                const alreadyPosted = await prHasCommentStartingWith(
                   summaryOctokit,
                   summaryOwner,
                   summaryRepo,
                   summaryPrNumber,
-                  body,
+                  "🤖 **Pipeline cost summary**",
                 );
-                runLog.info(
-                  { prNumber: summaryPrNumber },
-                  "BEC-175: posted PR cost summary",
-                );
+                if (alreadyPosted) {
+                  runLog.info(
+                    { prNumber: summaryPrNumber },
+                    "BEC-175: cost summary already exists on PR — skipping",
+                  );
+                } else {
+                  await addPRComment(
+                    summaryOctokit,
+                    summaryOwner,
+                    summaryRepo,
+                    summaryPrNumber,
+                    costBody,
+                  );
+                  runLog.info(
+                    { prNumber: summaryPrNumber },
+                    "BEC-175: posted PR cost summary",
+                  );
+                }
               }
             }
           }
@@ -2663,38 +2777,84 @@ export class PipelineRunner {
 
       // PR change-summary comment for review-feedback runs. Always-on (no env
       // flag) — a review-feedback run only exists because a human asked for
-      // changes, so silent shipping is a bug.
-      if (
-        run.runType === "review-feedback" &&
-        prUrl &&
-        repoConfig.provider !== "gitlab" &&
-        this.githubConfig
-      ) {
+      // changes, so silent shipping is a bug. Supported on all providers.
+      if (run.runType === "review-feedback" && prUrl) {
         try {
-          const summaryPrMatch = prUrl.match(/\/pull\/(\d+)/);
-          const summaryPrNumber = summaryPrMatch
-            ? parseInt(summaryPrMatch[1]!, 10)
-            : null;
-          const { owner: csOwner, repo: csRepo } = requireParsedRepoUrl();
-          const csOctokit = await this.getOctokit();
-          await maybePostChangeSummary({
-            run: {
-              id: run.id,
-              runType: run.runType,
-              prUrl: run.prUrl,
-              feedbackContext: run.feedbackContext ?? null,
-              totalInputTokens: run.totalInputTokens,
-              totalOutputTokens: run.totalOutputTokens,
-            },
-            handoff: handoff ?? null,
-            prNumber: summaryPrNumber,
-            owner: csOwner,
-            repo: csRepo,
-            octokit: csOctokit,
-            postPRComment: addPRComment,
-            dashboardBaseUrl: process.env.URATEAM_DASHBOARD_URL ?? "",
-            logger: runLog,
-          });
+          if (isGitLab && this.gitlabConfig) {
+            // GitLab: build change summary and post via addMRComment
+            const { projectPath } = parseGitLabUrl(repoConfig.url);
+            const mrIidMatch = prUrl.match(/\/merge_requests\/(\d+)/);
+            const mrIid = mrIidMatch ? parseInt(mrIidMatch[1]!, 10) : null;
+            if (mrIid !== null && handoff) {
+              const { renderChangeSummary } = await import("./pr-change-summary.js");
+              let triggeringComments: any[] = [];
+              if (run.feedbackContext) {
+                try {
+                  const parsed = JSON.parse(run.feedbackContext) as unknown;
+                  if (Array.isArray(parsed)) triggeringComments = parsed as any[];
+                } catch { /* ignore */ }
+              }
+              const csBody = renderChangeSummary({
+                handoff,
+                run: { id: run.id, totalInputTokens: run.totalInputTokens, totalOutputTokens: run.totalOutputTokens },
+                triggeringComments,
+                dashboardBaseUrl: process.env.URATEAM_DASHBOARD_URL ?? "",
+                prUrl,
+              });
+              await addMRComment(this.gitlabConfig, projectPath, mrIid, csBody);
+              runLog.info({ mrIid }, "posted GitLab MR change summary for review-feedback run");
+            }
+          } else if (isBitbucket && this.bitbucketConfig) {
+            // Bitbucket: build change summary and post via addBitbucketPRComment
+            const { workspace, repoSlug } = parseBitbucketUrl(repoConfig.url);
+            const prIdMatch = prUrl.match(/\/pull-requests\/(\d+)/);
+            const prId = prIdMatch ? parseInt(prIdMatch[1]!, 10) : null;
+            if (prId !== null && handoff) {
+              const { renderChangeSummary } = await import("./pr-change-summary.js");
+              let triggeringComments: any[] = [];
+              if (run.feedbackContext) {
+                try {
+                  const parsed = JSON.parse(run.feedbackContext) as unknown;
+                  if (Array.isArray(parsed)) triggeringComments = parsed as any[];
+                } catch { /* ignore */ }
+              }
+              const csBody = renderChangeSummary({
+                handoff,
+                run: { id: run.id, totalInputTokens: run.totalInputTokens, totalOutputTokens: run.totalOutputTokens },
+                triggeringComments,
+                dashboardBaseUrl: process.env.URATEAM_DASHBOARD_URL ?? "",
+                prUrl,
+              });
+              await addBitbucketPRComment(this.bitbucketConfig, workspace, repoSlug, prId, csBody);
+              runLog.info({ prId }, "posted Bitbucket PR change summary for review-feedback run");
+            }
+          } else {
+            // GitHub: use existing maybePostChangeSummary helper
+            const summaryPrMatch = prUrl.match(/\/pull\/(\d+)/);
+            const summaryPrNumber = summaryPrMatch
+              ? parseInt(summaryPrMatch[1]!, 10)
+              : null;
+            const { owner: csOwner, repo: csRepo } = requireParsedRepoUrl();
+            const csOctokit = await this.getOctokit();
+            await maybePostChangeSummary({
+              run: {
+                id: run.id,
+                runType: run.runType,
+                prUrl: run.prUrl,
+                feedbackContext: run.feedbackContext ?? null,
+                totalInputTokens: run.totalInputTokens,
+                totalOutputTokens: run.totalOutputTokens,
+              },
+              handoff: handoff ?? null,
+              prNumber: summaryPrNumber,
+              owner: csOwner,
+              repo: csRepo,
+              octokit: csOctokit,
+              postPRComment: addPRComment,
+              dashboardBaseUrl: process.env.URATEAM_DASHBOARD_URL ?? "",
+              logger: runLog,
+            });
+          }
         } catch (err) {
           runLog.warn(
             { err: err instanceof Error ? err.message : String(err) },

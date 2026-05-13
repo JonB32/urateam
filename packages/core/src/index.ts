@@ -69,6 +69,7 @@ export { createGitHubClient } from "./repo/github.js";
 export { buildGitHubConfigFromEnv } from "./repo/github-from-env.js";
 export { postSlackMessage } from "./pm/slack-helpers.js";
 export type { GitLabConfig, CreateMROptions } from "./repo/gitlab.js";
+export type { BitbucketConfig, CreateBitbucketPROptions } from "./repo/bitbucket.js";
 export { createPmScheduler } from "./pm/scheduler.js";
 export type { PmAgentConfig, TickResult } from "./pm/types.js";
 export { PmAgentConfigSchema } from "./pm/types.js";
