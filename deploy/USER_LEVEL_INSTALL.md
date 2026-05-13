@@ -264,9 +264,33 @@ pm2 startup
 
 The MVP user-level path covers `init`, `repo {add,list,remove}`, `uninstall`, and the daemon-side config fallback. Planned follow-ups (each its own PR):
 
-- Hot-reload of `config.json` without restart.
-
 For now those steps are manual per the sections above.
+
+---
+
+## Config hot-reload
+
+`ura start` watches `~/.urateam/config.json` (or `$URATEAM_HOME/config.json`) and picks up changes from `ura repo add` / `ura repo remove` / hand-edits without a restart. Reloads are debounced (1 second) so editor double-saves coalesce into one apply.
+
+What can change live:
+
+| Change | Behavior |
+|---|---|
+| Add a repo | Registered immediately; webhook routes go live on the next inbound event |
+| Remove a repo | Entry removed immediately; in-flight pipeline runs continue uninterrupted (they hold their own snapshot of runner state); only NEW work is blocked |
+| Change `testCommand`, `buildCommand`, `labelPattern`, `teamId` | Applied live |
+| Change `url`, `path`, `defaultBranch` | Logs `restart required`; daemon keeps using the old values until you restart |
+| Schema error in the new config (e.g. invalid JSON) | Old config preserved; warning logged |
+
+An audit event `config.reloaded` is recorded for each applied reload (added / removed / modifiedSafe / modifiedUnsafe arrays + sha256 of the new config). Project-level (sidecar / docker-compose) installs are env-var driven and don't use hot-reload.
+
+To verify hot-reload is working, edit `~/.urateam/config.json` and watch the daemon log:
+
+```
+config: + https://github.com/new/repo.git (live)
+config: ~ https://github.com/existing/repo.git (testCommand) — applied live
+config: - https://github.com/old/repo.git (live; in-flight runs continue)
+```
 
 ---
 
