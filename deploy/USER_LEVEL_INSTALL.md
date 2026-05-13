@@ -19,18 +19,23 @@ ura init                              # creates ~/.urateam/{config.json,data/,re
 # ~/.urateam/.env is auto-loaded by `ura start` regardless of cwd.
 cat > ~/.urateam/.env <<'EOF'
 ANTHROPIC_API_KEY=sk-ant-...          # or CLAUDE_CODE_OAUTH_TOKEN=...
-LINEAR_API_KEY=lin_api_...
 LINEAR_WEBHOOK_SECRET=lin_whs_...
 DASHBOARD_USER=admin
 DASHBOARD_PASSWORD=$(openssl rand -hex 16)
+# LINEAR_API_KEY is set by `ura self-auth-linear` below — no need to paste it.
+LINEAR_CLIENT_ID=<oauth-app-client-id>
+LINEAR_CLIENT_SECRET=<oauth-app-client-secret>
 EOF
 
-# 4. Register a repo (clones into ~/.urateam/repos/<slug>)
+# 4. Authorize Linear (browser-based OAuth — writes LINEAR_API_KEY for you)
+ura self-auth-linear
+
+# 5. Register a repo (clones into ~/.urateam/repos/<slug>)
 ura repo add https://github.com/your-org/your-repo.git \
   --branch main \
   --team team-uuid-from-linear
 
-# 5. Start the daemon (reads ~/.urateam/config.json + ~/.urateam/.env automatically)
+# 6. Start the daemon (reads ~/.urateam/config.json + ~/.urateam/.env automatically)
 ura start
 ```
 
@@ -87,6 +92,7 @@ The daemon listens on `:3000` for the webhook receiver and `:3001` for the dashb
 | `ura uninstall --yes` | Deletes `~/.urateam/`. Run `npm uninstall -g @urateam/cli` afterwards to remove the binary. |
 | `ura service install` | Generates a launchd plist (macOS) or systemd-user unit (Linux) and starts the daemon. Idempotent. `--dry-run` prints without writing. |
 | `ura service uninstall` | Stops the service and removes its unit file. |
+| `ura self-auth-linear` | Browser-based Linear OAuth flow. Writes `LINEAR_API_KEY` to `~/.urateam/.env`. Options: `--timeout-ms`, `--scope`. |
 
 ---
 
@@ -238,8 +244,34 @@ pm2 startup
 
 The MVP user-level path covers `init`, `repo {add,list,remove}`, `uninstall`, and the daemon-side config fallback. Planned follow-ups (each its own PR):
 
-- `ura self-auth-linear` — browser-based OAuth flow (Cyrus-style), replaces hand-rolling the webhook secret.
 - Built-in tunnel manager — auto-launch Cloudflare Tunnel from `ura start`.
 - Hot-reload of `config.json` without restart.
 
 For now those steps are manual per the sections above.
+
+---
+
+## Linear OAuth setup
+
+`ura self-auth-linear` replaces the step of creating a personal API key in Linear.
+
+1. **Create a Linear OAuth app** — visit https://linear.app/settings/api/applications/new. Set the redirect URI to `http://127.0.0.1/callback` (Linear allows loopback redirects without exact port matches in dev mode; production OAuth apps must whitelist the exact port). Copy the **Client ID** and **Client Secret**.
+
+2. **Add the OAuth app credentials to `~/.urateam/.env`:**
+
+   ```
+   LINEAR_CLIENT_ID=<your-client-id>
+   LINEAR_CLIENT_SECRET=<your-client-secret>
+   ```
+
+3. **Run the OAuth flow:**
+
+   ```bash
+   ura self-auth-linear
+   ```
+
+   The CLI opens Linear in your browser; after you click "Authorize", the access token is written to `~/.urateam/.env` as `LINEAR_API_KEY`. The browser displays "Authorized" and you can close the tab.
+
+The access token never appears in console output or browser-visible HTML. An audit event `linear.oauth_completed` is recorded if the daemon SQLite already exists; payload contains workspaceId + workspaceName, never the token.
+
+**Webhook setup remains manual** — register the webhook in Linear's UI as before (see the "Webhook setup" section above). Linear's OAuth API doesn't expose existing webhook secrets to OAuth-authorized callers.
