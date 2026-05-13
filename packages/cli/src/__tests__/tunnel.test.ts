@@ -5,7 +5,7 @@ import {
   TunnelManager,
   CloudflaredMissingError,
   type TunnelManagerOpts,
-} from "../lib/tunnel.ts";
+} from "../lib/tunnel.js";
 
 /**
  * Build a mock child-process for cloudflared. We use a real EventEmitter +

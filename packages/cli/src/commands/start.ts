@@ -38,6 +38,11 @@ export const startCommand = new Command("start")
   .description("Start production server (webhook + dashboard)")
   .option("--port <port>", "Webhook server port", "3000")
   .option("--dashboard-port <port>", "Dashboard port", "3001")
+  .option(
+    "--tunnel <mode>",
+    "Auto-launch a Cloudflare tunnel: 'none' (default), 'cloudflare-quick' (free, ephemeral URL), or 'cloudflare-token' (requires CLOUDFLARE_TUNNEL_TOKEN + URATEAM_PUBLIC_URL)",
+    "none",
+  )
   .action(async (options) => {
     try {
     loadUserLevelEnv();
@@ -327,6 +332,63 @@ export const startCommand = new Command("start")
     const webhookServer = serve({ fetch: app.fetch, port });
     const dashServer = serve({ fetch: dashboardApp.fetch, port: dashboardPort });
 
+    // --- Optional tunnel (cloudflared) ---
+    // Brings a public URL up via cloudflared when `--tunnel <mode>` is set.
+    // "none" (default) is a no-op. The TunnelManager supervises the child
+    // with exponential-backoff restart; failures are logged but don't crash
+    // the daemon — the daemon stays up on the local ports so operators can
+    // still SSH in and debug.
+    let tunnelManager: import("../lib/tunnel.js").TunnelManager | undefined;
+    if (options.tunnel && options.tunnel !== "none") {
+      const mode = options.tunnel as "cloudflare-quick" | "cloudflare-token";
+      if (mode !== "cloudflare-quick" && mode !== "cloudflare-token") {
+        console.error(
+          `--tunnel: unknown mode '${options.tunnel}'. Allowed: none, cloudflare-quick, cloudflare-token`,
+        );
+        process.exit(1);
+      }
+      const { TunnelManager, CloudflaredMissingError } = await import(
+        "../lib/tunnel.js"
+      );
+      const token = process.env.CLOUDFLARE_TUNNEL_TOKEN;
+      const publicUrl = process.env.URATEAM_PUBLIC_URL;
+      tunnelManager = new TunnelManager({
+        mode,
+        localPort: port,
+        token,
+        publicUrl,
+      });
+      try {
+        const result = await tunnelManager.start();
+        process.env.URATEAM_PUBLIC_URL = result.publicUrl;
+        console.log(`Tunnel:    ${result.publicUrl} (${mode})`);
+        try {
+          const { logAuditEvent, tunnelStartedEvent } = await import(
+            "@urateam/core"
+          );
+          void logAuditEvent(
+            db,
+            tunnelStartedEvent({
+              provider: mode,
+              publicUrl: result.publicUrl,
+              restartCount: result.restartCount,
+            }),
+          );
+        } catch {
+          // audit must never crash startup
+        }
+      } catch (err) {
+        if (err instanceof CloudflaredMissingError) {
+          console.error(err.message);
+        } else {
+          console.error(
+            `Tunnel: failed to start (${(err as Error).message}); daemon will run on local ports only`,
+          );
+        }
+        tunnelManager = undefined;
+      }
+    }
+
     // --- Worktree cleanup cron ---
     // agentRunDir is already resolved above (before preflightClaudeAuth).
     const _parsedTtl = parseInt(process.env.WORKTREE_TTL_HOURS ?? "24", 10);
@@ -471,12 +533,40 @@ export const startCommand = new Command("start")
     }
 
     // --- Graceful shutdown ---
-    function shutdown() {
+    async function shutdown() {
       console.log("Shutting down...");
       clearInterval(cleanupInterval);
       clearInterval(branchSweepInterval);
       if (pmInterval) clearInterval(pmInterval);
       rmScheduler?.stop();
+      // Stop tunnel before closing HTTP servers so cloudflared sees clean
+      // disconnects instead of a half-open socket dance. Emit `tunnel.stopped`
+      // for observability of intentional shutdowns.
+      if (tunnelManager) {
+        try {
+          await tunnelManager.stop();
+          try {
+            const { logAuditEvent, tunnelStoppedEvent } = await import(
+              "@urateam/core"
+            );
+            void logAuditEvent(
+              db,
+              tunnelStoppedEvent({
+                provider: options.tunnel as
+                  | "cloudflare-quick"
+                  | "cloudflare-token",
+                restartCount: 0,
+                exitCode: 0,
+                signal: "SIGTERM",
+              }),
+            );
+          } catch {
+            // audit must never crash shutdown
+          }
+        } catch (err) {
+          console.error(`Tunnel shutdown error: ${(err as Error).message}`);
+        }
+      }
       let closed = 0;
       const onClose = () => { if (++closed === 2) process.exit(0); };
       dashServer.close(onClose);
