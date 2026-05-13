@@ -77,6 +77,28 @@ describe("parseBitbucketUrl", () => {
   it("throws for an unrecognised URL format", () => {
     expect(() => parseBitbucketUrl("not-a-valid-url")).toThrow("Unable to parse Bitbucket repo URL");
   });
+
+  it("parses slugs containing dots (HTTPS, no .git)", () => {
+    // Regression: the original regex used [^/.]+ which truncated `my.repo` to `my`.
+    expect(parseBitbucketUrl("https://bitbucket.org/ws/my.repo")).toEqual({
+      workspace: "ws",
+      repoSlug: "my.repo",
+    });
+  });
+
+  it("parses slugs containing dots (HTTPS with .git suffix)", () => {
+    expect(parseBitbucketUrl("https://bitbucket.org/ws/my.repo.git")).toEqual({
+      workspace: "ws",
+      repoSlug: "my.repo",
+    });
+  });
+
+  it("parses slugs containing dots (SSH with .git suffix)", () => {
+    expect(parseBitbucketUrl("git@bitbucket.org:ws/my.repo.git")).toEqual({
+      workspace: "ws",
+      repoSlug: "my.repo",
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

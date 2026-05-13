@@ -44,6 +44,8 @@ export {
   addBitbucketPRComment,
   mergeBitbucketPR,
   parseBitbucketUrl,
+  cloneBitbucketRepo,
+  pushBitbucketCode,
 } from "./bitbucket.js";
 export type { BitbucketConfig, CreateBitbucketPROptions } from "./bitbucket.js";
 

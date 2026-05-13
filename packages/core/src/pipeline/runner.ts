@@ -2660,6 +2660,10 @@ export class PipelineRunner {
       // BEC-175: optional per-PR cost summary comment. Opt-in via
       // URATEAM_PR_COST_SUMMARY=true. Best-effort — failures never block
       // pipeline completion. Supported on GitHub, GitLab, and Bitbucket.
+      // BEC-206: provider booleans must be local to this block — the
+      // declarations inside the push queue scope are not visible here.
+      const isGitLab = repoConfig.provider === "gitlab";
+      const isBitbucket = repoConfig.provider === "bitbucket";
       if (
         process.env.URATEAM_PR_COST_SUMMARY === "true" &&
         prUrl

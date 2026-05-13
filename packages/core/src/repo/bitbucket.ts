@@ -133,22 +133,85 @@ export function buildBitbucketAuthenticatedUrl(
  * Handles formats like:
  *   - https://bitbucket.org/workspace/repo
  *   - https://bitbucket.org/workspace/repo.git
+ *   - https://bitbucket.org/workspace/my.repo (slug containing dots)
  *   - git@bitbucket.org:workspace/repo.git
+ *
+ * The slug capture group accepts dots so repos like `my.repo` parse correctly;
+ * a trailing `.git` (if present) is stripped from the captured slug.
  */
 export function parseBitbucketUrl(
   url: string,
 ): { workspace: string; repoSlug: string } {
+  // Slug pattern: any chars except `/`, terminated by `/`, `?`, `#`, or end-of-string.
+  // We capture trailing `.git` if present and strip it below so dot-containing
+  // slugs (e.g. `my.repo`) round-trip correctly.
+  const stripGit = (s: string): string => (s.endsWith(".git") ? s.slice(0, -4) : s);
+
   // SSH format: git@bitbucket.org:workspace/repo.git
-  const sshMatch = url.match(/git@bitbucket\.org:([^/]+)\/([^/.]+)/);
+  const sshMatch = url.match(/git@bitbucket\.org:([^/]+)\/([^/?#]+?)(?:\.git)?(?:[/?#]|$)/);
   if (sshMatch) {
-    return { workspace: sshMatch[1], repoSlug: sshMatch[2] };
+    return { workspace: sshMatch[1], repoSlug: stripGit(sshMatch[2]) };
   }
   // HTTPS format: https://bitbucket.org/workspace/repo[.git]
-  const httpMatch = url.match(/bitbucket\.org\/([^/]+)\/([^/.]+)/);
+  const httpMatch = url.match(/bitbucket\.org\/([^/]+)\/([^/?#]+?)(?:\.git)?(?:[/?#]|$)/);
   if (httpMatch) {
-    return { workspace: httpMatch[1], repoSlug: httpMatch[2] };
+    return { workspace: httpMatch[1], repoSlug: stripGit(httpMatch[2]) };
   }
   throw new Error(`Unable to parse Bitbucket repo URL: ${url}`);
+}
+
+// ---------------------------------------------------------------------------
+// Thin wrappers around the generic git helpers, mirroring repo/gitlab.ts's
+// public surface (clone + push). Provided so callers can stay provider-aware
+// without reaching into both `repo/git.ts` and `repo/bitbucket.ts`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Clone a Bitbucket repository to the given directory using the provided
+ * BitbucketConfig credentials. Credentials are injected via
+ * `buildBitbucketAuthenticatedUrl()`; the result is delegated to the generic
+ * `cloneRepo()` helper from `repo/git.ts`.
+ *
+ * @param config - Bitbucket auth config (OAuth access token or App Password).
+ * @param repoUrl - Public Bitbucket repo URL (credentials will be injected).
+ * @param destDir - Local directory to clone into.
+ */
+export async function cloneBitbucketRepo(
+  config: BitbucketConfig,
+  repoUrl: string,
+  destDir: string,
+): Promise<void> {
+  const { cloneRepo } = await import("./git.js");
+  const authedUrl = buildBitbucketAuthenticatedUrl(repoUrl, config);
+  await cloneRepo(authedUrl, destDir);
+}
+
+/**
+ * Push a branch to a Bitbucket remote.
+ *
+ * Note: the actual `git push` reuses the remote configured on the worktree
+ * (which already carries the auth credentials from `cloneBitbucketRepo`).
+ * The `config` and `repoUrl` parameters are accepted for symmetry with the
+ * gitlab surface — they let callers stay provider-agnostic at the type level
+ * even though they aren't required for the underlying push operation.
+ *
+ * @param config - Bitbucket auth config (unused at runtime; see note above).
+ * @param repoUrl - Public Bitbucket repo URL (unused at runtime; see note above).
+ * @param worktreePath - Local worktree directory to push from.
+ * @param branch - Branch name to push.
+ */
+export async function pushBitbucketCode(
+  config: BitbucketConfig,
+  repoUrl: string,
+  worktreePath: string,
+  branch: string,
+): Promise<void> {
+  // Reference the parameters so unused-vars lint stays quiet without
+  // breaking the documented signature.
+  void config;
+  void repoUrl;
+  const { pushBranch } = await import("./git.js");
+  await pushBranch(worktreePath, branch);
 }
 
 /**
