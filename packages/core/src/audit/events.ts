@@ -769,6 +769,30 @@ export function pmEscalatedToNeedsDesignEvent(args: {
 }
 
 /**
+ * `ura self-auth-linear` completed — the operator authorized urateam in
+ * Linear and the CLI persisted the access token to `~/.urateam/.env`.
+ *
+ * Payload deliberately omits the access token. workspaceId / workspaceName
+ * are operational metadata; they're not sensitive in the same way the
+ * token is.
+ */
+export function linearOauthCompletedEvent(args: {
+  workspaceId: string;
+  workspaceName?: string;
+  actor: string;
+}): AuditEvent {
+  return base({
+    eventType: "linear.oauth_completed",
+    actor: args.actor,
+    actorType: "cli",
+    payload: {
+      workspaceId: args.workspaceId,
+      ...(args.workspaceName ? { workspaceName: args.workspaceName } : {}),
+    },
+  });
+}
+
+/**
  * `ura service install` succeeded — a platform service unit (launchd plist
  * or systemd-user .service) was written and loaded. Emitted opportunistically
  * from the CLI when the daemon DB already exists; never blocks the install.
