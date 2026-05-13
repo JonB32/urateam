@@ -17,6 +17,23 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+## [0.1.56] — 2026-05-13
+
+Bumps:
+- `@urateam/core`: 0.1.41 → 0.1.42
+- `@urateam/cli`: 0.1.43 → 0.1.44
+- `@urateam/dashboard`: 0.1.41 → 0.1.42
+- `create-urateam`: 0.1.44 → 0.1.45
+
+### Added (OSS+)
+- **`~/.urateam/config.json` hot-reload** ([#306](https://github.com/JonB32/urateam/pull/306)) — `ura start` now watches the user-level config file and applies changes from `ura repo add` / `ura repo remove` / hand-edits without a restart. Debounced (1s default). Safe fields (`labelPattern`, `testCommand`, `buildCommand`, `teamId`) apply in-place; unsafe fields (`url`, `path`, `defaultBranch`) log `restart required`. Removals delete the entry from the live `repoConfigs` immediately — in-flight pipeline runs hold their own snapshot of state and continue uninterrupted; only NEW work is blocked. Schema-validation failures keep the previous in-memory config and log a warning. `teamId` changes correctly re-key the entry under the new key (so webhook routing keeps working). New library: `packages/cli/src/lib/config-watcher.ts` (`ConfigWatcher`, `diffRepos`, `hashConfig`). Project-level (sidecar) installs are env-var driven and don't use hot-reload.
+
+### Audit log
+- One new event type: `config.reloaded`. Payload: `{ added, removed, modifiedSafe, modifiedUnsafe, sha256 }`. License-gated via `logAuditEvent`. CLAUDE.md count: 50 → 51.
+
+### Closed
+- This release completes the full deferred-list from the original user-level install PR (#296). All four follow-ups — `ura service install`, `ura self-auth-linear`, built-in tunnel manager, config.json hot-reload — are now shipped.
+
 ## [0.1.55] — 2026-05-13
 
 Bumps:
