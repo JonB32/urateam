@@ -171,6 +171,56 @@ describe("ura service install (unsupported platform)", () => {
   });
 });
 
+describe("ura service uninstall (linux)", () => {
+  let tmp: string;
+  let originalPlatform: PropertyDescriptor;
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "ura-service-"));
+    fakeHome = tmp;
+    mkdirSync(join(tmp, ".config", "systemd", "user"), { recursive: true });
+    originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "linux" });
+    execFileMock.mockClear();
+  });
+  afterEach(() => {
+    Object.defineProperty(process, "platform", originalPlatform);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("disables and deletes the unit when present", async () => {
+    const unit = join(tmp, ".config", "systemd", "user", "urateam.service");
+    writeFileSync(unit, "[Unit]\n");
+    await serviceCommand.parseAsync(["uninstall"], { from: "user" });
+    expect(existsSync(unit)).toBe(false);
+    expect(
+      execFileMock.mock.calls.some(
+        ([cmd, args]) =>
+          cmd === "systemctl" &&
+          args.includes("disable") &&
+          args.includes("urateam.service"),
+      ),
+    ).toBe(true);
+  });
+
+  it("is a no-op when the unit is already absent", async () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await serviceCommand.parseAsync(["uninstall"], { from: "user" });
+    expect(spy.mock.calls.flat().join("\n")).toMatch(/not installed/i);
+    expect(execFileMock).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("still deletes the unit when systemctl disable fails (best-effort stop)", async () => {
+    const unit = join(tmp, ".config", "systemd", "user", "urateam.service");
+    writeFileSync(unit, "[Unit]\n");
+    execFileMock.mockImplementationOnce(async () => {
+      throw new Error("Failed to disable urateam.service: not loaded");
+    });
+    await serviceCommand.parseAsync(["uninstall"], { from: "user" });
+    expect(existsSync(unit)).toBe(false);
+  });
+});
+
 describe("ura service uninstall (darwin)", () => {
   let tmp: string;
   let originalPlatform: PropertyDescriptor;
