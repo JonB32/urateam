@@ -769,6 +769,53 @@ export function pmEscalatedToNeedsDesignEvent(args: {
 }
 
 /**
+ * `ura start --tunnel <mode>` brought a public tunnel up. Emitted once per
+ * successful start (including restarts after a tunnel failure). Payload
+ * carries the public URL so operators can see what their daemon is
+ * reachable as.
+ */
+export function tunnelStartedEvent(args: {
+  provider: "cloudflare-quick" | "cloudflare-token";
+  publicUrl: string;
+  restartCount: number;
+}): AuditEvent {
+  return base({
+    eventType: "tunnel.started",
+    actor: "system",
+    actorType: "system",
+    payload: {
+      provider: args.provider,
+      publicUrl: args.publicUrl,
+      restartCount: args.restartCount,
+    },
+  });
+}
+
+/**
+ * Tunnel child process exited — either gracefully (operator stopped the
+ * daemon) or because the restart cap was hit. Payload carries the exit
+ * code / signal so operators can spot tunnel-flap loops in the audit log.
+ */
+export function tunnelStoppedEvent(args: {
+  provider: "cloudflare-quick" | "cloudflare-token";
+  restartCount: number;
+  exitCode: number | null;
+  signal: string | null;
+}): AuditEvent {
+  return base({
+    eventType: "tunnel.stopped",
+    actor: "system",
+    actorType: "system",
+    payload: {
+      provider: args.provider,
+      restartCount: args.restartCount,
+      exitCode: args.exitCode,
+      signal: args.signal,
+    },
+  });
+}
+
+/**
  * `ura self-auth-linear` completed — the operator authorized urateam in
  * Linear and the CLI persisted the access token to `~/.urateam/.env`.
  *
