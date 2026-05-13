@@ -92,7 +92,7 @@ The daemon listens on `:3000` for the webhook receiver and `:3001` for the dashb
 | `ura uninstall --yes` | Deletes `~/.urateam/`. Run `npm uninstall -g @urateam/cli` afterwards to remove the binary. |
 | `ura service install` | Generates a launchd plist (macOS) or systemd-user unit (Linux) and starts the daemon. Idempotent. `--dry-run` prints without writing. |
 | `ura service uninstall` | Stops the service and removes its unit file. |
-| `ura self-auth-linear` | Browser-based Linear OAuth flow. Writes `LINEAR_API_KEY` to `~/.urateam/.env`. Options: `--timeout-ms`, `--scope`. |
+| `ura self-auth-linear` | Browser-based Linear OAuth flow. Writes `LINEAR_API_KEY` to `~/.urateam/.env`. Options: `--timeout-ms`, `--scope`, `--port` (default 9898 — must match the redirect URI registered in your Linear OAuth app). |
 
 ---
 
@@ -255,7 +255,7 @@ For now those steps are manual per the sections above.
 
 `ura self-auth-linear` replaces the step of creating a personal API key in Linear.
 
-1. **Create a Linear OAuth app** — visit https://linear.app/settings/api/applications/new. Set the redirect URI to `http://127.0.0.1/callback` (Linear allows loopback redirects without exact port matches in dev mode; production OAuth apps must whitelist the exact port). Copy the **Client ID** and **Client Secret**.
+1. **Create a Linear OAuth app** — visit https://linear.app/settings/api/applications/new. Set the redirect URI to **`http://127.0.0.1:9898/callback`** (exact match — Linear requires this). Copy the **Client ID** and **Client Secret**. If port 9898 collides with something else on your machine, pick a different port (e.g., 19898) and pass `--port` to `ura self-auth-linear`; the registered redirect URI must match the port you pass.
 
 2. **Add the OAuth app credentials to `~/.urateam/.env`:**
 

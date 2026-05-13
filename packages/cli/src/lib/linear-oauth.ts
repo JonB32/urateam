@@ -23,6 +23,15 @@ export interface LinearOAuthDeps {
   scope: string;
   /** Total time to wait for the operator to authorize, in milliseconds. */
   timeoutMs: number;
+  /**
+   * Port to bind the local callback server to. Fixed because Linear requires
+   * the redirect URI registered in the OAuth app settings to match the URI
+   * sent in the authorize request EXACTLY (host + port + path), so a
+   * random port would force the operator to re-register every time.
+   * Pass `0` to bind a random free port (test-only — production code must
+   * pass a stable value).
+   */
+  port: number;
   /** Opens the authorize URL in the operator's browser. Pure-test override. */
   openBrowser: (url: string) => Promise<void>;
   /** Exchanges the code for an access token. */
@@ -145,10 +154,22 @@ export async function runLinearOAuth(
           redirect_uri: redirectUri,
           grant_type: "authorization_code",
         });
-        const viewer = await deps.fetchViewer(token.access_token);
 
+        // Render the success page IMMEDIATELY after token exchange succeeds.
+        // The operator's view of "Authorized" must not depend on the
+        // subsequent viewer fetch, which is only used for the audit event's
+        // display name. If `fetchViewer` fails (Linear GraphQL hiccup), we
+        // still resolve with the token — falling back to an "unknown"
+        // workspace placeholder.
         res.writeHead(200, { "content-type": "text/html" });
         res.end(SUCCESS_HTML);
+
+        let viewer: { workspaceId: string; workspaceName?: string };
+        try {
+          viewer = await deps.fetchViewer(token.access_token);
+        } catch {
+          viewer = { workspaceId: "unknown", workspaceName: undefined };
+        }
 
         if (!resolved) {
           resolved = true;
@@ -178,7 +199,26 @@ export async function runLinearOAuth(
       }
     });
 
-    server.listen(0, "127.0.0.1", async () => {
+    server.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EADDRINUSE") {
+        finalize(
+          () => {},
+          (e) => reject(e),
+          new Error(
+            `ura self-auth-linear: port ${deps.port} is already in use. ` +
+              `Pass --port <other-port> and register the matching redirect URI in your Linear OAuth app.`,
+          ),
+        );
+        return;
+      }
+      finalize(
+        () => {},
+        (e) => reject(e),
+        err instanceof Error ? err : new Error(String(err)),
+      );
+    });
+
+    server.listen(deps.port, "127.0.0.1", async () => {
       try {
         const port = (server!.address() as { port: number }).port;
         const redirectUri = `http://127.0.0.1:${port}/callback`;

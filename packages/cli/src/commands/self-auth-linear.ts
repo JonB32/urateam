@@ -40,6 +40,16 @@ import { upsertEnvFile } from "../lib/env-file.js";
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_SCOPE = "read,write";
+/**
+ * Fixed default port for the callback server. Linear's OAuth flow requires
+ * the redirect URI in the authorize request to EXACTLY match the URI
+ * registered in the OAuth app settings (host + port + path), so a random
+ * port would force the operator to re-register every time. 9898 is
+ * unprivileged and unlikely to collide with common dev-server ports. The
+ * `--port` flag overrides it when 9898 is taken — but the operator then
+ * has to register the new URI in Linear.
+ */
+const DEFAULT_PORT = 9898;
 
 async function tryEmitAuditEvent(args: {
   workspaceId: string;
@@ -77,7 +87,12 @@ export const selfAuthLinearCommand = new Command("self-auth-linear")
     "OAuth scopes to request (comma-separated)",
     DEFAULT_SCOPE,
   )
-  .action(async (opts: { timeoutMs: string; scope: string }) => {
+  .option(
+    "--port <port>",
+    "Local port for the callback server (must match the redirect URI registered in Linear)",
+    String(DEFAULT_PORT),
+  )
+  .action(async (opts: { timeoutMs: string; scope: string; port: string }) => {
     const home = resolveUserLevelHome();
     if (!existsSync(home)) {
       throw new Error(
@@ -97,12 +112,21 @@ export const selfAuthLinearCommand = new Command("self-auth-linear")
       );
     }
 
-    console.log("ura self-auth-linear: opening Linear in your browser…");
+    const port = Number(opts.port);
+    if (!Number.isInteger(port) || port < 0 || port > 65535) {
+      throw new Error(
+        `ura self-auth-linear: --port must be an integer between 0 and 65535 (got '${opts.port}')`,
+      );
+    }
+    console.log(
+      `ura self-auth-linear: opening Linear in your browser (callback on http://127.0.0.1:${port}/callback)…`,
+    );
     const result = await runLinearOAuth({
       clientId,
       clientSecret,
       scope: opts.scope,
       timeoutMs: Number(opts.timeoutMs),
+      port,
       openBrowser: defaultBrowserOpen,
       fetchTokenEndpoint: defaultFetchTokenEndpoint,
       fetchViewer: defaultFetchViewer,

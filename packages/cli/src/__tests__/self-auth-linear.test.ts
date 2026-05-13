@@ -56,7 +56,7 @@ describe("ura self-auth-linear", () => {
   });
 
   it("writes LINEAR_API_KEY to ~/.urateam/.env on success", async () => {
-    await selfAuthLinearCommand.parseAsync([], { from: "user" });
+    await selfAuthLinearCommand.parseAsync(["--port", "0"], { from: "user" });
     const raw = readFileSync(join(tmp, ".env"), "utf8");
     expect(raw).toContain("LINEAR_API_KEY=lin_oauth_TOKEN");
   });
@@ -66,7 +66,7 @@ describe("ura self-auth-linear", () => {
       join(tmp, ".env"),
       "ANTHROPIC_API_KEY=sk-ant-xyz\nLINEAR_API_KEY=lin_api_old\n",
     );
-    await selfAuthLinearCommand.parseAsync([], { from: "user" });
+    await selfAuthLinearCommand.parseAsync(["--port", "0"], { from: "user" });
     const raw = readFileSync(join(tmp, ".env"), "utf8");
     expect(raw).toContain("ANTHROPIC_API_KEY=sk-ant-xyz");
     expect(raw).toContain("LINEAR_API_KEY=lin_oauth_TOKEN");
@@ -75,7 +75,7 @@ describe("ura self-auth-linear", () => {
 
   it("never logs the token to console", async () => {
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});
-    await selfAuthLinearCommand.parseAsync([], { from: "user" });
+    await selfAuthLinearCommand.parseAsync(["--port", "0"], { from: "user" });
     const out = spy.mock.calls.flat().join("\n");
     expect(out).not.toContain("lin_oauth_TOKEN");
     spy.mockRestore();
@@ -83,7 +83,7 @@ describe("ura self-auth-linear", () => {
 
   it("logs the workspace name on success (operator-friendly confirmation)", async () => {
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});
-    await selfAuthLinearCommand.parseAsync([], { from: "user" });
+    await selfAuthLinearCommand.parseAsync(["--port", "0"], { from: "user" });
     const out = spy.mock.calls.flat().join("\n");
     expect(out).toMatch(/Test Workspace/);
     spy.mockRestore();
@@ -101,6 +101,17 @@ describe("ura self-auth-linear", () => {
     await expect(
       selfAuthLinearCommand.parseAsync([], { from: "user" }),
     ).rejects.toThrow(/LINEAR_CLIENT_SECRET/);
+  });
+
+  it("rejects an out-of-range --port", async () => {
+    await expect(
+      selfAuthLinearCommand.parseAsync(["--port", "999999"], { from: "user" }),
+    ).rejects.toThrow(/--port must be an integer between 0 and 65535/);
+    await expect(
+      selfAuthLinearCommand.parseAsync(["--port", "not-a-number"], {
+        from: "user",
+      }),
+    ).rejects.toThrow(/--port must be an integer/);
   });
 
   it("fails when URATEAM_HOME does not exist (operator forgot 'ura init')", async () => {
