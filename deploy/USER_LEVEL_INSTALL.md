@@ -15,7 +15,8 @@ npm install -g @urateam/cli
 # 2. Bootstrap state directory
 ura init                              # creates ~/.urateam/{config.json,data/,repos/}
 
-# 3. Add the secrets the daemon needs (~/.urateam/.env is auto-loaded by `ura start`)
+# 3. Add the secrets the daemon needs.
+# ~/.urateam/.env is auto-loaded by `ura start` regardless of cwd.
 cat > ~/.urateam/.env <<'EOF'
 ANTHROPIC_API_KEY=sk-ant-...          # or CLAUDE_CODE_OAUTH_TOKEN=...
 LINEAR_API_KEY=lin_api_...
@@ -29,8 +30,8 @@ ura repo add https://github.com/your-org/your-repo.git \
   --branch main \
   --team team-uuid-from-linear
 
-# 5. Start the daemon (reads ~/.urateam/config.json automatically)
-cd ~/.urateam && ura start
+# 5. Start the daemon (reads ~/.urateam/config.json + ~/.urateam/.env automatically)
+ura start
 ```
 
 The daemon listens on `:3000` for the webhook receiver and `:3001` for the dashboard by default.

@@ -152,3 +152,49 @@ describe("buildRepoConfigsFromEnv — user-level fallback", () => {
     expect(Object.keys(configs).sort()).toEqual(["team-a", "team-b"]);
   });
 });
+
+describe("requireRepoConfigs — branched error messages", () => {
+  let tmp: string;
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "ura-req-"));
+    process.env.URATEAM_HOME = tmp;
+  });
+  afterEach(() => {
+    delete process.env.URATEAM_HOME;
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("prints a 'ura repo add' hint when ~/.urateam/config.json exists but has no repos", async () => {
+    writeUserLevelConfig({ version: 1, repos: [] });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
+      throw new Error("exit");
+    }) as any);
+    const { requireRepoConfigs } = await import("../lib/build-repo-configs.js");
+    expect(() => requireRepoConfigs({}, "ura start")).toThrow();
+    const msg = errSpy.mock.calls.flat().join("\n");
+    expect(msg).toContain("ura repo add");
+    expect(msg).not.toContain("REPO_TEAM_ID and REPO_URL in .urateam/.env"); // user-level branch
+    errSpy.mockRestore();
+    exitSpy.mockRestore();
+  });
+
+  it("prints both install paths when no ~/.urateam/config.json exists yet", async () => {
+    // Don't write a config — exercises the `userConfig === null` branch
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
+      throw new Error("exit");
+    }) as any);
+    const { requireRepoConfigs } = await import("../lib/build-repo-configs.js");
+    expect(() => requireRepoConfigs({}, "ura start")).toThrow();
+    const msg = errSpy.mock.calls.flat().join("\n");
+    expect(msg).toContain("REPO_TEAM_ID");
+    expect(msg).toContain("ura init");
+    expect(msg).toContain("ura repo add");
+    errSpy.mockRestore();
+    exitSpy.mockRestore();
+  });
+});
+
+// vi needs to be available — re-import at top-level for the new tests
+import { vi } from "vitest";

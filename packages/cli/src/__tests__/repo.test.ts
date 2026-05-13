@@ -220,4 +220,29 @@ describe("ura repo remove", () => {
       repoCommand.parseAsync(["remove", "nonexistent"], { from: "user" }),
     ).rejects.toThrow(/not found/i);
   });
+
+  it("refuses to --purge a path outside URATEAM_HOME (hand-edited config safety)", async () => {
+    // Simulate a hand-edited config.json with a dangerous path. The path's
+    // basename ("etc-fake-sensitive") must match the slug arg so the entry
+    // is found; the test exercises the path-safety guard, not the
+    // slug-lookup path.
+    writeUserLevelConfig({
+      version: 1,
+      repos: [
+        {
+          url: "https://github.com/a/etc-fake-sensitive.git",
+          path: "/tmp/SAFETY_TEST_DO_NOT_DELETE/etc-fake-sensitive",
+          defaultBranch: "main",
+          testCommand: "pnpm test",
+          buildCommand: "pnpm build",
+        },
+      ],
+    });
+    await expect(
+      repoCommand.parseAsync(
+        ["remove", "etc-fake-sensitive", "--purge"],
+        { from: "user" },
+      ),
+    ).rejects.toThrow(/refusing to delete/i);
+  });
 });

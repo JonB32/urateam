@@ -5,6 +5,7 @@ import { cloneRepo } from "@urateam/core";
 import {
   readUserLevelConfig,
   writeUserLevelConfig,
+  resolveUserLevelHome,
   userLevelReposDir,
   type UserLevelRepo,
 } from "../lib/user-level-config.js";
@@ -129,6 +130,18 @@ repoCommand
     const [removed] = cfg.repos.splice(idx, 1);
     writeUserLevelConfig(cfg);
     if (opts.purge && removed) {
+      // Path-safety guard: `config.json` is a plain file an operator can
+      // hand-edit. Without this check, a config entry with `"path": "/"` or
+      // `"path": "/home/operator"` would silently `rm -rf` that path on
+      // `--purge`. Restrict purges to descendants of URATEAM_HOME (the
+      // directory `ura repo add` writes into by construction).
+      const home = resolveUserLevelHome();
+      if (!removed.path.startsWith(home + "/")) {
+        throw new Error(
+          `ura repo remove --purge: refusing to delete '${removed.path}' — ` +
+            `path is not under ${home}. (Config entry may have been hand-edited.)`,
+        );
+      }
       rmSync(removed.path, { recursive: true, force: true });
     }
     console.log(

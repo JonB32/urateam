@@ -116,13 +116,34 @@ export function requireRepoConfigs(
   command: "ura dev" | "ura start",
 ): void {
   if (Object.keys(repoConfigs).length > 0) return;
-  console.error(
-    "Error: no repoConfigs could be built from environment variables.\n" +
-      "Set REPO_TEAM_ID and REPO_URL in .urateam/.env and restart.\n" +
-      "Example:\n" +
-      "  REPO_TEAM_ID=<your Linear team UUID — usually the same as LINEAR_TEAM_ID>\n" +
-      `  REPO_URL=https://github.com/org/repo\n` +
-      `\n(command: ${command})\n`,
-  );
+  // Branch the error message based on whether `ura init` has been run.
+  // Users on the user-level install path who forgot `ura repo add` need
+  // very different advice than project-level operators who forgot the
+  // env vars.
+  const userConfig = readUserLevelConfig();
+  if (userConfig) {
+    // `ura init` has run; they just need to add a repo.
+    console.error(
+      `Error: no repos configured in ${process.env.URATEAM_HOME ?? "~/.urateam"}/config.json.\n` +
+        "Run 'ura repo add <url> [--team <linear-team-id>]' to register a repo.\n" +
+        "Example:\n" +
+        "  ura repo add https://github.com/org/repo.git --team team-uuid\n" +
+        `\n(command: ${command})\n`,
+    );
+  } else {
+    console.error(
+      "Error: no repoConfigs could be built.\n" +
+        "Two install paths exist:\n\n" +
+        "  Project-level (sidecar, env-var-driven):\n" +
+        "    Set REPO_TEAM_ID and REPO_URL in .urateam/.env and restart.\n" +
+        "    Example:\n" +
+        "      REPO_TEAM_ID=<your Linear team UUID — usually the same as LINEAR_TEAM_ID>\n" +
+        "      REPO_URL=https://github.com/org/repo\n\n" +
+        "  User-level (~/.urateam config-file-driven):\n" +
+        "    Run 'ura init' then 'ura repo add <url> --team <id>'.\n" +
+        "    See deploy/USER_LEVEL_INSTALL.md.\n" +
+        `\n(command: ${command})\n`,
+    );
+  }
   process.exit(1);
 }

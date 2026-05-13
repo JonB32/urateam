@@ -5,6 +5,34 @@ import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
 import { preflightClaudeAuth } from "../lib/preflight-claude-auth.js";
 import { preflightDirs } from "../lib/preflight-dirs.js";
 import { buildRepoConfigsFromEnv, requireRepoConfigs } from "../lib/build-repo-configs.js";
+import { resolveUserLevelHome } from "../lib/user-level-config.js";
+
+/**
+ * User-level: also load `~/.urateam/.env` (or `$URATEAM_HOME/.env`) so secrets
+ * load regardless of cwd. Node's `loadEnvFile()` in `index.ts` already loads
+ * `<cwd>/.env` — that covers the project-level case where operators run
+ * `ura start` from the project root. For user-level installs the operator
+ * shouldn't need to `cd ~/.urateam` first; this is the fallback.
+ *
+ * Existing env vars win (loadEnvFile never overrides), so the cwd-side `.env`
+ * is still authoritative when both are present.
+ */
+function loadUserLevelEnv(): void {
+  const home = resolveUserLevelHome();
+  const path = join(home, ".env");
+  try {
+    process.loadEnvFile(path);
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "ENOENT") {
+      console.warn(
+        `warning: failed to load ${path}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+}
 
 export const startCommand = new Command("start")
   .description("Start production server (webhook + dashboard)")
@@ -12,6 +40,7 @@ export const startCommand = new Command("start")
   .option("--dashboard-port <port>", "Dashboard port", "3001")
   .action(async (options) => {
     try {
+    loadUserLevelEnv();
     const { createApp, defaultConfigs, applyDeepReviewPassesOverride, applyAutoMergeOverride, cleanupWorktrees, runAgentBranchSweep, addLogStream, initSlackAlertManager, createSlackAlertStream, validateReviewModels } = await import("@urateam/core");
 
     // --- Slack error alerts (opt-in) ---
