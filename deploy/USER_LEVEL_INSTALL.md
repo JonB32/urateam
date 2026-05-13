@@ -85,6 +85,8 @@ The daemon listens on `:3000` for the webhook receiver and `:3001` for the dashb
 | `ura repo list` | Prints the configured repos. |
 | `ura repo remove <slug>` | Removes a repo from `config.json`. Pass `--purge` to also delete the clone on disk. |
 | `ura uninstall --yes` | Deletes `~/.urateam/`. Run `npm uninstall -g @urateam/cli` afterwards to remove the binary. |
+| `ura service install` | Generates a launchd plist (macOS) or systemd-user unit (Linux) and starts the daemon. Idempotent. `--dry-run` prints without writing. |
+| `ura service uninstall` | Stops the service and removes its unit file. |
 
 ---
 
@@ -120,9 +122,38 @@ Once you have a public URL, register it in Linear's webhook settings as `<URL>/w
 
 ## Running as a service
 
-`ura start` runs in the foreground. For an always-on install you have a few options.
+`ura start` runs in the foreground. For an always-on install, use `ura service install`:
 
-### macOS — launchd
+```bash
+# Auto-detects platform: macOS → launchd, Linux → systemd-user
+ura service install
+```
+
+This writes a platform service unit and starts the daemon:
+
+- **macOS:** `~/Library/LaunchAgents/com.urateam.daemon.plist` + `launchctl load -w`
+- **Linux:** `~/.config/systemd/user/urateam.service` + `systemctl --user enable --now`
+
+It is idempotent — re-running on an existing install prints "already exists" and exits 0. `--dry-run` prints the unit content without writing or loading anything:
+
+```bash
+ura service install --dry-run
+```
+
+Reverse with:
+
+```bash
+ura service uninstall
+```
+
+Audit events `service.installed` and `service.uninstalled` are recorded when the daemon DB exists and the `audit-log` Enterprise feature is licensed.
+
+### Manual setup (other platforms or custom paths)
+
+For Windows, BSD, or custom log destinations, write the unit by hand using the snippets below.
+
+<details>
+<summary>macOS — launchd (manual)</summary>
 
 Save to `~/Library/LaunchAgents/com.urateam.daemon.plist`:
 
@@ -150,7 +181,10 @@ Save to `~/Library/LaunchAgents/com.urateam.daemon.plist`:
 
 Then `launchctl load ~/Library/LaunchAgents/com.urateam.daemon.plist`.
 
-### Linux — systemd user service
+</details>
+
+<details>
+<summary>Linux — systemd user service (manual)</summary>
 
 Save to `~/.config/systemd/user/urateam.service`:
 
@@ -173,13 +207,18 @@ WantedBy=default.target
 
 Then `systemctl --user enable --now urateam.service`.
 
-### pm2 (any platform)
+</details>
+
+<details>
+<summary>pm2 (any platform)</summary>
 
 ```bash
 pm2 start ura --name urateam -- start
 pm2 save
 pm2 startup
 ```
+
+</details>
 
 ---
 
@@ -202,6 +241,5 @@ The MVP user-level path covers `init`, `repo {add,list,remove}`, `uninstall`, an
 - `ura self-auth-linear` — browser-based OAuth flow (Cyrus-style), replaces hand-rolling the webhook secret.
 - Built-in tunnel manager — auto-launch Cloudflare Tunnel from `ura start`.
 - Hot-reload of `config.json` without restart.
-- Service-unit generators (`ura service install`) for launchd / systemd.
 
 For now those steps are manual per the sections above.
