@@ -327,6 +327,10 @@ Known limitations being addressed (don't compound these):
 - `getChangedFiles()` in `git.ts` logs warnings on failure (fail-open but visible)
 - Optional notifier methods use `?.` convention
 - All `console.log/error` replaced with structured logger
+- **`create-urateam` package is exempt from `convention-console` and `credential-in-interface`** — this is the standalone interactive-install CLI binary (think `create-react-app`) where:
+  1. `console.log` IS the operator interface (TTY-facing output for the install wizard); structured-pino logging would be wrong here.
+  2. The wizard's entire job is to collect credentials (Linear API key, Slack bot token, etc.) and write them to a fresh `.env` — `*Token`, `*Secret`, `*Key`, `*Password` fields on `PmAgentOptions` / `ScaffoldOptions` / `ScaffoldResult.generatedSecrets` are inherent. Mark such interfaces with `/** @internal */` JSDoc so consumers know they're package-private.
+  Review-stage `convention-console` / `credential-in-interface` findings inside `packages/create-urateam/**` should be acknowledged and dismissed; the convention applies to daemon and library code.
 - Pipeline labels must match keys in `pipeline/config.ts`: `auto-implement`, `bug`, `quick-fix`, `needs-design`
 - Slack url_verification challenge must be handled before signature verification
 - Redact credentials from URLs before logging: `url.replace(/:\/\/[^@]+@/, "://[redacted]@")`
