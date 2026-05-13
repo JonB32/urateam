@@ -51,7 +51,7 @@ export {
   type DevcontainerSession,
 } from "./repo/devcontainer.js";
 export { checkRequirements, buildRalphContext, type RalphCheckResult } from "./executor/ralph.js";
-export { cleanupWorktrees } from "./repo/git.js";
+export { cleanupWorktrees, cloneRepo } from "./repo/git.js";
 export {
   sweepStaleAgentBranches,
   type SweepInput,

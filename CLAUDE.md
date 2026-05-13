@@ -34,7 +34,7 @@ It is a pnpm monorepo with 4 packages:
 
 - `packages/core/` — Core library (types, webhook, pipeline, executor, DB, notifiers, security)
 - `packages/dashboard/` — Dashboard server and HTMX templates
-- `packages/cli/` — CLI entry point
+- `packages/cli/` — CLI entry point. **User-level install path** (`ura init` → `ura repo add` → `ura start`) reads `~/.urateam/config.json` via `buildRepoConfigsFromEnv` when no `REPO_*` env vars are set. See `deploy/USER_LEVEL_INSTALL.md`. Project-level (sidecar) install stays env-var-driven for back-compat.
 - `packages/observers/` — Quality observer (first-tick dedup seeding, GitHub Issues filing, SQLite store)
 - `deploy/` — Docker, Caddy, setup script, env example, CLAUDE.md template
 - `examples/` — Example configurations (basic, monorepo, multi-repo, custom stages)

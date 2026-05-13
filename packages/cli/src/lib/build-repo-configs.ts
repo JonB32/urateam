@@ -6,6 +6,7 @@
  */
 import type { RepoConfig } from "@urateam/core";
 import { repoPluginsFromEnv } from "./repo-plugins-from-env.js";
+import { readUserLevelConfig } from "./user-level-config.js";
 
 function parseCsv(raw: string): string[] {
   return raw.split(",").filter(Boolean);
@@ -33,33 +34,72 @@ function parseCsv(raw: string): string[] {
  */
 export function buildRepoConfigsFromEnv(): Record<string, RepoConfig> {
   const repoConfigs: Record<string, RepoConfig> = {};
-  if (!process.env.REPO_TEAM_ID || !process.env.REPO_URL) return repoConfigs;
-
-  const repoEntry: RepoConfig = {
-    url: process.env.REPO_URL,
-    defaultBranch: process.env.REPO_DEFAULT_BRANCH ?? "main",
-    testCommand: process.env.REPO_TEST_CMD ?? "pnpm test",
-    buildCommand: process.env.REPO_BUILD_CMD ?? "pnpm build",
-  };
-
-  if (process.env.GITHUB_WEBHOOK_SECRET) {
-    repoEntry.githubFeedback = {
-      autoTrigger: process.env.GITHUB_FEEDBACK_AUTO_TRIGGER !== "false",
-      triggerKeyword: process.env.GITHUB_FEEDBACK_TRIGGER_KEYWORD,
-      allowedReviewers: process.env.GITHUB_FEEDBACK_ALLOWED_REVIEWERS
-        ? parseCsv(process.env.GITHUB_FEEDBACK_ALLOWED_REVIEWERS)
-        : undefined,
-      botLogins: process.env.GITHUB_FEEDBACK_BOT_LOGINS
-        ? parseCsv(process.env.GITHUB_FEEDBACK_BOT_LOGINS)
-        : undefined,
+  if (process.env.REPO_TEAM_ID && process.env.REPO_URL) {
+    const repoEntry: RepoConfig = {
+      url: process.env.REPO_URL,
+      defaultBranch: process.env.REPO_DEFAULT_BRANCH ?? "main",
+      testCommand: process.env.REPO_TEST_CMD ?? "pnpm test",
+      buildCommand: process.env.REPO_BUILD_CMD ?? "pnpm build",
     };
+
+    if (process.env.GITHUB_WEBHOOK_SECRET) {
+      repoEntry.githubFeedback = {
+        autoTrigger: process.env.GITHUB_FEEDBACK_AUTO_TRIGGER !== "false",
+        triggerKeyword: process.env.GITHUB_FEEDBACK_TRIGGER_KEYWORD,
+        allowedReviewers: process.env.GITHUB_FEEDBACK_ALLOWED_REVIEWERS
+          ? parseCsv(process.env.GITHUB_FEEDBACK_ALLOWED_REVIEWERS)
+          : undefined,
+        botLogins: process.env.GITHUB_FEEDBACK_BOT_LOGINS
+          ? parseCsv(process.env.GITHUB_FEEDBACK_BOT_LOGINS)
+          : undefined,
+      };
+    }
+
+    const pluginCfg = repoPluginsFromEnv();
+    if (pluginCfg) repoEntry.plugins = pluginCfg;
+
+    repoConfigs[process.env.REPO_TEAM_ID] = repoEntry;
+    return repoConfigs;
   }
 
-  const pluginCfg = repoPluginsFromEnv();
-  if (pluginCfg) repoEntry.plugins = pluginCfg;
+  // User-level fallback: when no REPO_* env vars produced anything, try
+  // ~/.urateam/config.json (or $URATEAM_HOME/config.json). This is what
+  // makes the `ura init` + `ura repo add` path usable end-to-end without
+  // operators having to hand-craft env vars.
+  //
+  // Read failures (malformed JSON, schema-validation error) bubble up —
+  // the operator should see the error explicitly rather than silently get
+  // an unconfigured daemon.
+  const userConfig = readUserLevelConfig();
+  if (!userConfig || userConfig.repos.length === 0) return repoConfigs;
 
-  repoConfigs[process.env.REPO_TEAM_ID] = repoEntry;
+  for (const repo of userConfig.repos) {
+    const entry: RepoConfig = {
+      url: repo.url,
+      defaultBranch: repo.defaultBranch,
+      testCommand: repo.testCommand,
+      buildCommand: repo.buildCommand,
+      ...(repo.labelPattern && { labelPattern: repo.labelPattern }),
+    };
+    // Key by teamId when present (matches the existing env-var schema);
+    // fall back to a slug derived from the URL so config.json entries
+    // without a teamId still get a stable key.
+    const key = repo.teamId ?? deriveKeyFromUrl(repo.url);
+    repoConfigs[key] = entry;
+  }
   return repoConfigs;
+}
+
+/**
+ * Derive a synthetic Record key from a repo URL when the user-level config
+ * entry omits `teamId`. Mirrors the slug logic in `commands/repo.ts` but
+ * lives here too so this file doesn't import from a sibling that pulls in
+ * commander.
+ */
+function deriveKeyFromUrl(url: string): string {
+  const stripped = url.replace(/\.git$/, "");
+  const last = stripped.split(/[/:]/).filter(Boolean).pop() ?? "repo";
+  return last.replace(/[^A-Za-z0-9._-]/g, "-");
 }
 
 /**
