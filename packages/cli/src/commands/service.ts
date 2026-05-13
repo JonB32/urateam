@@ -87,7 +87,7 @@ async function tryEmitAuditEvent(args: {
     const dbPath = join(userLevelDataDir(), "urateam.db");
     if (!existsSync(dbPath)) return;
     const core: any = await import("@urateam/core");
-    if (!core.createDb || !core.logAuditEventUnchecked) return;
+    if (!core.createDb || !core.logAuditEvent) return;
     const db = await core.createDb(`file:${dbPath}`);
     const actor = `cli:${userInfo().username ?? "unknown"}`;
     const builder =
@@ -100,7 +100,10 @@ async function tryEmitAuditEvent(args: {
       unitPath: args.unitPath,
       actor,
     });
-    await core.logAuditEventUnchecked(db, evt);
+    // License-gated path — `logAuditEvent` is a no-op when `audit-log` is
+    // unlicensed. Service-install events are an Enterprise-tier operational
+    // signal; OSS / Pro deployments simply drop them.
+    await core.logAuditEvent(db, evt);
   } catch {
     // Audit must never crash the install — swallow.
   }
