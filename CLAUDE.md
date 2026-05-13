@@ -301,6 +301,18 @@ Known limitations being addressed (don't compound these):
 - `removeActiveWork` called in runner's `finally` block and `abort()` method
 - `checkFileOverlap` compares candidate files against active runs
 
+### Bootstrap Command (`packages/cli/src/commands/bootstrap.ts`)
+- `ura bootstrap` — one-command self-hosted onboarding wizard (BEC-205)
+- `preflightChecks(deps?)` — verifies Docker daemon, ports 3000/3001 free, tools present (curl/openssl/jq). Throws descriptive `Error` on failure; the command action calls `process.exit(1)`.
+- `createGitHubApp(opts)` — GitHub App manifest flow: starts local HTTP callback server, opens browser to GitHub's manifest endpoint, waits for OAuth redirect, exchanges code for app credentials (`appId`, `privateKey`, `webhookSecret`, etc.). Timeout: 30s default.
+- `registerLinearWebhook(apiKey, webhookUrl, teamId?, deps?)` — registers Linear webhook via GraphQL `webhookCreate` mutation. Scoped to `teamId` when provided; workspace-wide otherwise.
+- `generateEnvFile(ctx, outputDir?, deps?)` — writes `.env` with all required vars: `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `LINEAR_API_KEY`, `LINEAR_WEBHOOK_SECRET`, `WEBHOOK_URL`, `DATABASE_URL`, `DASHBOARD_USER`, `DASHBOARD_PASSWORD`.
+- `generateDockerCompose(ctx, outputDir?, deps?)` — writes `docker-compose.dogfood.yml` with `app` (port 3000) and `dashboard` (port 3001) services, both using `env_file: .env` and a shared `urateam_data` volume.
+- `generateReverseProxyConfig(domain, type, outputDir?, deps?)` — writes `Caddyfile` for `"caddy"` or prints the `cloudflared tunnel` command for `"cloudflared"`. No file written for cloudflared.
+- `validateSetup(port?, timeoutMs?, deps?)` — POSTs synthetic Linear webhook to `http://localhost:{port}/webhooks/linear`, polls every 2s for up to 30s for a 2xx response. Throws on timeout.
+- All functions accept an optional `deps` parameter (`BootstrapDeps`) for testability (injectable `execFile`, `fetch`, `writeFile`, `log`, `openBrowser`).
+- Command options: `--skip-github-app`, `--skip-linear`, `--validate`, `--domain`, `--proxy` (caddy/cloudflared, default: caddy), `--output-dir`, `--port` (default: 3000).
+
 ### Quality Observer (`packages/observers/`)
 - Module: `packages/observers/src/` — `engine.ts` (isFirstTick, seedDedupOnFirstTick, processFindings), `scheduler.ts` (createObserverScheduler), `store.ts` (SQLite-backed ObserverStore), `types.ts`
 - **First-tick dedup seeding (BEC-172):** On a fresh deploy the observer's SQLite store is empty. Without special handling, the 24h lookback window causes every historical pattern to be filed as a GitHub Issue at once. `scheduler.tick()` calls `isFirstTick(store)` before computing findings. If true (and `QUALITY_OBSERVER_FIRST_TICK_FILE` is not set), calls `seedDedupOnFirstTick(store, computeFindings)` which writes fingerprints without filing issues, then logs `"first-tick seed: N findings registered for dedup; not filed (observer is fresh-installed)"`.
