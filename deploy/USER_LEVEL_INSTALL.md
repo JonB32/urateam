@@ -114,13 +114,33 @@ Rule of thumb: project-level if you're running urateam as production infra for a
 
 ## Webhook setup
 
-Linear (and GitHub, if enabled) need a public URL to reach the daemon. On a laptop or non-public server, use a tunnel:
+Linear (and GitHub, if enabled) need a public URL to reach the daemon. On a laptop or non-public server, use a tunnel. The recommended path is `ura start --tunnel cloudflare-quick`, which auto-launches `cloudflared` from the daemon process:
 
-| Tunnel | Best for | Cost |
-|---|---|---|
-| Cloudflare Tunnel | Production / always-on | Free with a Cloudflare account; permanent URL |
-| ngrok | Dev / evaluation | Free tier includes one static domain |
-| Tailscale Funnel | Always-on on a Tailnet device | Free with a Tailscale account |
+```bash
+brew install cloudflared          # macOS — Linux/other: see https://pkg.cloudflare.com/index.html
+ura start --tunnel cloudflare-quick
+```
+
+This prints the public URL (e.g. `🌐 Public URL: https://abc123.trycloudflare.com`) and exports it as `URATEAM_PUBLIC_URL` so OAuth callbacks and webhook configuration pick it up automatically. The supervisor restarts cloudflared on unexpected exit (exponential backoff, max 10 attempts). Stopping the daemon (SIGTERM / Ctrl+C) gracefully terminates the tunnel.
+
+For a permanent named tunnel (production), use `--tunnel cloudflare-token` with `CLOUDFLARE_TUNNEL_TOKEN` + `URATEAM_PUBLIC_URL` env vars:
+
+```bash
+# In ~/.urateam/.env:
+CLOUDFLARE_TUNNEL_TOKEN=<from-cloudflare-zero-trust>
+URATEAM_PUBLIC_URL=https://urateam.your-domain.com
+
+ura start --tunnel cloudflare-token
+```
+
+If you prefer to manage the tunnel yourself, `--tunnel none` (default) keeps the daemon on local ports only — you can run `cloudflared`, `ngrok`, Tailscale Funnel, etc. in a separate terminal as before.
+
+| Tunnel | Best for | Cost | Built-in? |
+|---|---|---|---|
+| Cloudflare quick tunnel | Dev / evaluation | Free; ephemeral URL | Yes (`--tunnel cloudflare-quick`) |
+| Cloudflare named tunnel | Production / always-on | Free with a Cloudflare account; permanent URL | Yes (`--tunnel cloudflare-token`) |
+| ngrok | Dev / evaluation | Free tier includes one static domain | No (run separately) |
+| Tailscale Funnel | Always-on on a Tailnet device | Free with a Tailscale account | No (run separately) |
 
 Once you have a public URL, register it in Linear's webhook settings as `<URL>/webhooks/linear`. The `LINEAR_WEBHOOK_SECRET` you put in `~/.urateam/.env` must match what Linear shows after you create the webhook.
 
@@ -244,7 +264,6 @@ pm2 startup
 
 The MVP user-level path covers `init`, `repo {add,list,remove}`, `uninstall`, and the daemon-side config fallback. Planned follow-ups (each its own PR):
 
-- Built-in tunnel manager — auto-launch Cloudflare Tunnel from `ura start`.
 - Hot-reload of `config.json` without restart.
 
 For now those steps are manual per the sections above.

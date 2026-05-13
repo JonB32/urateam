@@ -547,6 +547,13 @@ export const AuditEventTypeSchema = z.enum([
    *  `LINEAR_API_KEY`. Payload includes the Linear workspace ID (never the
    *  token itself). */
   "linear.oauth_completed",
+  /** `ura start --tunnel <mode>` brought a public tunnel up; the daemon
+   *  now has a reachable URL. Payload: provider, publicUrl, restartCount. */
+  "tunnel.started",
+  /** The tunnel child process exited — either gracefully (operator stopped
+   *  the daemon) or because the restart cap was hit. Payload: provider,
+   *  restartCount, exitCode, signal. */
+  "tunnel.stopped",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 
