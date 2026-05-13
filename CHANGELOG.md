@@ -17,6 +17,20 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+## [0.1.55] — 2026-05-13
+
+Bumps:
+- `@urateam/core`: 0.1.40 → 0.1.41
+- `@urateam/cli`: 0.1.42 → 0.1.43
+- `@urateam/dashboard`: 0.1.40 → 0.1.41
+- `create-urateam`: 0.1.43 → 0.1.44
+
+### Added (OSS+)
+- **`ura start --tunnel <mode>`** ([#304](https://github.com/JonB32/urateam/pull/304)) — built-in Cloudflare tunnel manager. Three modes: `none` (default — daemon stays on local ports), `cloudflare-quick` (spawns `cloudflared tunnel --url http://localhost:<port>`, parses the `*.trycloudflare.com` URL from cloudflared's stderr — free, ephemeral), `cloudflare-token` (spawns `cloudflared tunnel --token <token> run` — requires `CLOUDFLARE_TUNNEL_TOKEN` + `URATEAM_PUBLIC_URL` env vars for a persistent named tunnel). New `TunnelManager` class in `packages/cli/src/lib/tunnel.ts` supervises cloudflared with exponential-backoff restart (1s → 30s capped, 10 attempts max) and graceful SIGTERM shutdown. On startup, the detected public URL is exported as `URATEAM_PUBLIC_URL` so OAuth callbacks and webhook handlers see it. When `cloudflared` isn't on `$PATH`, `CloudflaredMissingError` surfaces brew/apt/release-page install hints; tunnel failures never crash the daemon — it stays on local ports. Audit-event observability via `tunnel.started` and `tunnel.stopped`.
+
+### Audit log
+- Two new event types: `tunnel.started` (provider, publicUrl, restartCount), `tunnel.stopped` (provider, restartCount, exitCode, signal). CLAUDE.md count: 48 → 50.
+
 ## [0.1.54] — 2026-05-13
 
 Bumps:
