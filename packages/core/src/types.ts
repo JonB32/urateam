@@ -542,6 +542,11 @@ export const AuditEventTypeSchema = z.enum([
   /** `ura service uninstall` succeeded — the unit file was removed and the
    *  service stopped. */
   "service.uninstalled",
+  /** `ura self-auth-linear` completed: the operator authorized urateam in
+   *  Linear and the CLI persisted the access token to `~/.urateam/.env` as
+   *  `LINEAR_API_KEY`. Payload includes the Linear workspace ID (never the
+   *  token itself). */
+  "linear.oauth_completed",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 

@@ -33,6 +33,7 @@ import { initCommand } from "./commands/init.js";
 import { repoCommand } from "./commands/repo.js";
 import { uninstallCommand } from "./commands/uninstall.js";
 import { serviceCommand } from "./commands/service.js";
+import { selfAuthLinearCommand } from "./commands/self-auth-linear.js";
 
 const program = new Command();
 
@@ -55,5 +56,6 @@ program.addCommand(initCommand);
 program.addCommand(repoCommand);
 program.addCommand(uninstallCommand);
 program.addCommand(serviceCommand);
+program.addCommand(selfAuthLinearCommand);
 
 program.parse();
