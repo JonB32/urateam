@@ -4,7 +4,9 @@ import { Command } from "commander";
 // ---------------------------------------------------------------------------
 // Command registration — all expected commands are registered
 // ---------------------------------------------------------------------------
-describe("command registration", () => {
+// Dynamic imports of 6 commands each pull in @urateam/core (which is heavy);
+// the default 5s timeout is too tight for a cold first-import on slower hosts.
+describe("command registration", { timeout: 30_000 }, () => {
   it("registers all expected commands: run, dev, webhook, config, start, bootstrap", async () => {
     // We cannot import index.ts directly because it calls .parse() on import,
     // so we verify by importing each command and checking its name.
