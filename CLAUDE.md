@@ -250,6 +250,8 @@ DB-backed `active_work` table tracks files modified by in-flight runs. `upsertAc
 - **Redact credentials from URLs before logging**: `url.replace(/:\/\/[^@]+@/, "://[redacted]@")`
 
 <!-- SPECKIT START -->
-For additional context about technologies to be used, project structure,
-shell commands, and other important information, read the current plan
+**Active spec**: [`specs/001-triage-v2/`](./specs/001-triage-v2/) — Tier 6
+triage upgrade. Read [`plan.md`](./specs/001-triage-v2/plan.md) for the
+implementation strategy; [`spec.md`](./specs/001-triage-v2/spec.md) for the
+user-facing requirements.
 <!-- SPECKIT END -->
