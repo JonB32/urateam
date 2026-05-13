@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ReleaseManagerConfigSchema } from "./release-manager/types.js";
 
 // --- Stage Types ---
-export const StageTypeSchema = z.enum([
+const StageTypeSchema = z.enum([
   "triage", "await-approval", "reproduce", "implement", "test", "review",
 ]);
 export type StageType = z.infer<typeof StageTypeSchema>;
@@ -12,10 +12,10 @@ export const AGENT_STAGES: StageType[] = [
 ];
 
 // --- Pipeline Config ---
-export const RetryStrategySchema = z.enum(["fix-and-retry", "escalate", "fail-fast"]);
+const RetryStrategySchema = z.enum(["fix-and-retry", "escalate", "fail-fast"]);
 export type RetryStrategy = z.infer<typeof RetryStrategySchema>;
 
-export const RetryConfigSchema = z.object({
+const RetryConfigSchema = z.object({
   maxAttempts: z.number().int().min(0),
   strategy: RetryStrategySchema,
 });
@@ -143,16 +143,16 @@ export const DEFAULT_TRIGGER_MAP: TriggerMap = {
 // --- Repo Config ---
 // Each setup command is [command, ...args] to avoid shell parsing.
 // Example: ["pnpm", "install", "--frozen-lockfile"]
-export const SetupCommandSchema = z.array(z.string()).min(1);
+const SetupCommandSchema = z.array(z.string()).min(1);
 export type SetupCommand = z.infer<typeof SetupCommandSchema>;
 
-export const McpServerEntrySchema = z.object({
+const McpServerEntrySchema = z.object({
   command: z.string(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
 });
 
-export const PluginEntrySchema = z.object({
+const PluginEntrySchema = z.object({
   type: z.literal("local"),
   path: z.string(),
 });
@@ -171,7 +171,7 @@ export const PluginConfigSchema = z.object({
 });
 export type PluginConfig = z.infer<typeof PluginConfigSchema>;
 
-export const DevcontainerConfigSchema = z.object({
+const DevcontainerConfigSchema = z.object({
   /** Enable devcontainer usage. Default: "auto" (use if .devcontainer exists) */
   mode: z.enum(["auto", "always", "never"]).optional(),
   /** Override path to devcontainer config */
@@ -181,7 +181,7 @@ export const DevcontainerConfigSchema = z.object({
 });
 export type DevcontainerConfig = z.infer<typeof DevcontainerConfigSchema>;
 
-export const GitHubFeedbackConfigSchema = z.object({
+const GitHubFeedbackConfigSchema = z.object({
   /**
    * GitHub logins allowed to trigger feedback runs.
    * If empty/omitted, any reviewer can trigger.
@@ -243,7 +243,7 @@ export const RepoConfigSchema = z.object({
 export type RepoConfig = z.infer<typeof RepoConfigSchema>;
 
 // --- Handoff Artifact ---
-export const TestResultSchema = z.object({
+const TestResultSchema = z.object({
   passed: z.number().int().min(0),
   failed: z.number().int().min(0),
   firstFailure: z.object({
@@ -325,7 +325,7 @@ export type ReviewFeedbackContext = z.infer<typeof ReviewFeedbackContextSchema>;
 // "resolve conflicts and continue rebase" prompt instead of the standard
 // "implement issue from scratch" path that confuses the agent into burning
 // all 50 turns without making progress.
-export const MergeConflictContextSchema = z.object({
+const MergeConflictContextSchema = z.object({
   /** The base branch name being rebased onto (e.g. "main"). */
   defaultBranch: z.string(),
 });

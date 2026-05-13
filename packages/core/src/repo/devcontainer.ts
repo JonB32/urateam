@@ -92,28 +92,6 @@ export async function devcontainerUp(
 }
 
 /**
- * Execute a command inside the devcontainer.
- */
-export async function devcontainerExecCommand(
-  session: DevcontainerSession,
-  command: string[],
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const args = [
-    "exec",
-    "--workspace-folder", session.worktreePath,
-    ...command,
-  ];
-
-  try {
-    const result = await devcontainerExec(args, session.worktreePath);
-    return { ...result, exitCode: 0 };
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    return { stdout: "", stderr: msg, exitCode: 1 };
-  }
-}
-
-/**
  * Stop and remove the devcontainer.
  */
 export async function devcontainerDown(

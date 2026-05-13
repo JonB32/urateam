@@ -23,7 +23,7 @@ const DEFAULT_MAX_RUNS = 10_000;
 
 const UNASSIGNED_TEAM = "(unassigned)";
 
-export function normalizeTeamId(id: string | null | undefined): { key: string; label: string } {
+function normalizeTeamId(id: string | null | undefined): { key: string; label: string } {
   if (id === null || id === undefined || id === "") {
     return { key: "team:unassigned", label: UNASSIGNED_TEAM };
   }
@@ -57,7 +57,7 @@ function finalizeRoi(row: { dollars: number; timeSavedHours: number }, hourlyRat
   return (row.timeSavedHours * hourlyRate) / row.dollars;
 }
 
-export async function aggregateAll(
+async function aggregateAll(
   db: AnyDb,
   filters: AggregateFilters,
   config: CostConfig,
