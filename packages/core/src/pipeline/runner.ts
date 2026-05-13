@@ -2064,6 +2064,10 @@ export class PipelineRunner {
       // Parse the repo URL once here — repoConfig.url is constant for the
       // lifetime of this pipeline run. All GitHub/gh-CLI call sites below
       // consume parsedRepoUrl instead of re-parsing the same string.
+      // Null on parse failure so the gh-CLI fallback path (which tolerates
+      // a missing owner) keeps working; GitHub-App paths use
+      // requireParsedRepoUrl() below to surface a clear error instead of
+      // crashing on a non-null assertion.
       const parsedRepoUrl = (() => {
         try {
           return parseRepoUrl(repoConfig.url);
@@ -2071,6 +2075,14 @@ export class PipelineRunner {
           return null;
         }
       })();
+      const requireParsedRepoUrl = (): { owner: string; repo: string } => {
+        if (!parsedRepoUrl) {
+          throw new Error(
+            `PipelineRunner: failed to parse repo URL '${repoConfig.url}' — cannot interact with GitHub API`,
+          );
+        }
+        return parsedRepoUrl;
+      };
 
       let prUrl = "";
       let autoMerged = false;
@@ -2207,7 +2219,7 @@ export class PipelineRunner {
         } else if (!isGitLab && this.githubConfig) {
           // GitHub App — use Octokit API
           try {
-            const { owner, repo } = parsedRepoUrl!;
+            const { owner, repo } = requireParsedRepoUrl();
             const octokit = await this.getOctokit();
             prUrl = await createPR(octokit, {
               owner,
@@ -2273,7 +2285,8 @@ export class PipelineRunner {
             : null;
           if (fanoutPrNumber !== null) {
             try {
-              const { owner: fanoutOwner, repo: fanoutRepo } = parsedRepoUrl!;
+              const { owner: fanoutOwner, repo: fanoutRepo } =
+                requireParsedRepoUrl();
               const fanoutOctokit = await this.getOctokit();
               const fanoutResult = await postFanoutCommentsToPR(
                 fanoutOctokit,
@@ -2606,7 +2619,8 @@ export class PipelineRunner {
               pipelineConfigs: { [run.pipelineKey]: config },
             });
             if (body) {
-              const { owner: summaryOwner, repo: summaryRepo } = parsedRepoUrl!;
+              const { owner: summaryOwner, repo: summaryRepo } =
+                requireParsedRepoUrl();
               const summaryOctokit = await this.getOctokit();
               // Dedup: skip when a prior pipeline run on this PR already
               // posted a cost summary. We use the markdown header as the
@@ -2661,7 +2675,7 @@ export class PipelineRunner {
           const summaryPrNumber = summaryPrMatch
             ? parseInt(summaryPrMatch[1]!, 10)
             : null;
-          const { owner: csOwner, repo: csRepo } = parsedRepoUrl!;
+          const { owner: csOwner, repo: csRepo } = requireParsedRepoUrl();
           const csOctokit = await this.getOctokit();
           await maybePostChangeSummary({
             run: {
