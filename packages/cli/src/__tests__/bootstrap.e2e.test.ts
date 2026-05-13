@@ -181,6 +181,7 @@ describe("Bootstrap e2e — registerLinearWebhook with mocked fetch", () => {
       "lin_api_e2e",
       "https://hooks.e2e.example.com/webhooks/linear",
       "team_e2e",
+      undefined,
       { fetch: mockFetch as typeof fetch },
     );
 
@@ -202,6 +203,7 @@ describe("Bootstrap e2e — registerLinearWebhook with mocked fetch", () => {
       "lin_api_e2e",
       "https://hooks.e2e.example.com/webhooks/linear",
       "team_e2e",
+      undefined,
       { fetch: mockFetch as typeof fetch },
     );
 

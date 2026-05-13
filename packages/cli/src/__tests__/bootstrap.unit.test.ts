@@ -7,6 +7,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs/promises";
+import type { PathLike } from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 
@@ -99,9 +100,13 @@ describe("registerLinearWebhook()", () => {
     });
 
     await expect(
-      registerLinearWebhook("lin_api_test", "https://example.com/webhooks/linear", undefined, {
-        fetch: mockFetch,
-      }),
+      registerLinearWebhook(
+        "lin_api_test",
+        "https://example.com/webhooks/linear",
+        undefined,
+        undefined,
+        { fetch: mockFetch },
+      ),
     ).resolves.toBeUndefined();
 
     expect(mockFetch).toHaveBeenCalledOnce();
@@ -124,12 +129,39 @@ describe("registerLinearWebhook()", () => {
       "lin_api_test",
       "https://example.com/webhooks/linear",
       "team_123",
+      undefined,
       { fetch: mockFetch },
     );
 
     const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(init.body as string);
     expect(body.variables.teamId).toBe("team_123");
+  });
+
+  it("forwards the signing secret to Linear when secret is provided", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: { webhookCreate: { success: true, webhook: { id: "wh3", url: "https://x.com" } } },
+      }),
+      text: async () => "",
+    });
+
+    await registerLinearWebhook(
+      "lin_api_test",
+      "https://example.com/webhooks/linear",
+      undefined,
+      "linear_wh_secret_abc123",
+      { fetch: mockFetch },
+    );
+
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body.variables.secret).toBe("linear_wh_secret_abc123");
+    // The mutation must reference $secret to actually consume it.
+    expect(body.query).toContain("$secret: String");
+    expect(body.query).toContain("secret: $secret");
   });
 
   it("throws when the HTTP response is not ok", async () => {
@@ -141,9 +173,13 @@ describe("registerLinearWebhook()", () => {
     });
 
     await expect(
-      registerLinearWebhook("bad_key", "https://example.com/webhooks/linear", undefined, {
-        fetch: mockFetch,
-      }),
+      registerLinearWebhook(
+        "bad_key",
+        "https://example.com/webhooks/linear",
+        undefined,
+        undefined,
+        { fetch: mockFetch },
+      ),
     ).rejects.toThrow(/401/);
   });
 
@@ -159,9 +195,13 @@ describe("registerLinearWebhook()", () => {
     });
 
     await expect(
-      registerLinearWebhook("lin_api_test", "https://example.com/webhooks/linear", undefined, {
-        fetch: mockFetch,
-      }),
+      registerLinearWebhook(
+        "lin_api_test",
+        "https://example.com/webhooks/linear",
+        undefined,
+        undefined,
+        { fetch: mockFetch },
+      ),
     ).rejects.toThrow(/not authorized/i);
   });
 
@@ -176,9 +216,13 @@ describe("registerLinearWebhook()", () => {
     });
 
     await expect(
-      registerLinearWebhook("lin_api_test", "https://example.com/webhooks/linear", undefined, {
-        fetch: mockFetch,
-      }),
+      registerLinearWebhook(
+        "lin_api_test",
+        "https://example.com/webhooks/linear",
+        undefined,
+        undefined,
+        { fetch: mockFetch },
+      ),
     ).rejects.toThrow(/success=false/);
   });
 });
@@ -214,7 +258,7 @@ describe("generateEnvFile()", () => {
     const ctx = makeCtx();
     // Use a mock writeFile that writes to tmpDir.
     const writtenFiles: Record<string, string> = {};
-    const mockWriteFile = vi.fn(async (filePath: fs.PathLike | fs.FileHandle, data: unknown) => {
+    const mockWriteFile = vi.fn(async (filePath: PathLike | fs.FileHandle, data: unknown) => {
       writtenFiles[filePath.toString()] = data as string;
     });
 
@@ -235,7 +279,7 @@ describe("generateEnvFile()", () => {
   it("includes GITHUB_PRIVATE_KEY with escaped newlines", async () => {
     const ctx = makeCtx({ privateKey: "-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----" });
     const writtenFiles: Record<string, string> = {};
-    const mockWriteFile = vi.fn(async (filePath: fs.PathLike | fs.FileHandle, data: unknown) => {
+    const mockWriteFile = vi.fn(async (filePath: PathLike | fs.FileHandle, data: unknown) => {
       writtenFiles[filePath.toString()] = data as string;
     });
 
@@ -250,7 +294,7 @@ describe("generateEnvFile()", () => {
   it("uses default databaseUrl when not provided in ctx", async () => {
     const ctx = makeCtx({ databaseUrl: undefined });
     const writtenFiles: Record<string, string> = {};
-    const mockWriteFile = vi.fn(async (filePath: fs.PathLike | fs.FileHandle, data: unknown) => {
+    const mockWriteFile = vi.fn(async (filePath: PathLike | fs.FileHandle, data: unknown) => {
       writtenFiles[filePath.toString()] = data as string;
     });
 
@@ -263,7 +307,7 @@ describe("generateEnvFile()", () => {
   it("writes the file to the specified outputDir", async () => {
     const ctx = makeCtx();
     const writtenPaths: string[] = [];
-    const mockWriteFile = vi.fn(async (filePath: fs.PathLike | fs.FileHandle, _data: unknown) => {
+    const mockWriteFile = vi.fn(async (filePath: PathLike | fs.FileHandle, _data: unknown) => {
       writtenPaths.push(filePath.toString());
     });
 
@@ -292,7 +336,7 @@ describe("generateDockerCompose()", () => {
 
   it("writes docker-compose.dogfood.yml with correct content", async () => {
     const writtenFiles: Record<string, string> = {};
-    const mockWriteFile = vi.fn(async (filePath: fs.PathLike | fs.FileHandle, data: unknown) => {
+    const mockWriteFile = vi.fn(async (filePath: PathLike | fs.FileHandle, data: unknown) => {
       writtenFiles[filePath.toString()] = data as string;
     });
 
@@ -318,7 +362,7 @@ describe("generateDockerCompose()", () => {
 
   it("writes to docker-compose.dogfood.yml filename", async () => {
     const writtenPaths: string[] = [];
-    const mockWriteFile = vi.fn(async (filePath: fs.PathLike | fs.FileHandle, _data: unknown) => {
+    const mockWriteFile = vi.fn(async (filePath: PathLike | fs.FileHandle, _data: unknown) => {
       writtenPaths.push(filePath.toString());
     });
 
@@ -337,7 +381,7 @@ describe("generateDockerCompose()", () => {
 describe("generateReverseProxyConfig()", () => {
   it("writes a Caddyfile when choice is 'caddy'", async () => {
     const writtenFiles: Record<string, string> = {};
-    const mockWriteFile = vi.fn(async (filePath: fs.PathLike | fs.FileHandle, data: unknown) => {
+    const mockWriteFile = vi.fn(async (filePath: PathLike | fs.FileHandle, data: unknown) => {
       writtenFiles[filePath.toString()] = data as string;
     });
     const logs: string[] = [];

@@ -131,7 +131,12 @@ export interface BootstrapContext {
   githubWebhookSecret: string;
   /** @internal Linear API key — never log */
   linearApiKey: string;
-  /** @internal Linear webhook secret (from registration response) — never log */
+  /**
+   * @internal Linear webhook signing secret — never log.
+   * Generated locally by the bootstrap action and sent to Linear as
+   * `webhookCreate.secret` so the urateam handler can verify HMAC
+   * signatures on incoming events.
+   */
   linearWebhookSecret: string;
   /** Public webhook URL (e.g. https://hooks.example.com). */
   webhookUrl: string;
@@ -536,25 +541,35 @@ export async function createGitHubApp(
  * supplied the webhook is scoped to that team; otherwise it applies
  * workspace-wide (requires admin privileges).
  *
+ * **Important**: when `secret` is provided, it is sent to Linear as the
+ * webhook signing secret. The caller MUST persist the same value (e.g. in
+ * `.env` as `LINEAR_WEBHOOK_SECRET`) so the urateam handler can verify
+ * incoming webhook signatures. Omitting `secret` leaves Linear's webhook
+ * unsigned — incoming events will not carry a verifiable signature.
+ *
  * @param apiKey     - Linear API key (starts with `lin_api_`).
  * @param webhookUrl - Publicly reachable URL for the webhook endpoint.
  * @param teamId     - Optional Linear team ID to scope the webhook.
+ * @param secret     - Optional HMAC signing secret sent to Linear; must match
+ *                     the `LINEAR_WEBHOOK_SECRET` env var used by the handler.
  * @param deps       - Optional injectable dependencies (for testing).
  */
 export async function registerLinearWebhook(
   apiKey: string,
   webhookUrl: string,
   teamId?: string,
+  secret?: string,
   deps?: BootstrapDeps,
 ): Promise<void> {
   const fetchFn = getFetch(deps);
 
   const query = `
-    mutation CreateWebhook($url: String!, $enabled: Boolean!, $teamId: String, $resourceTypes: [String!]!) {
+    mutation CreateWebhook($url: String!, $enabled: Boolean!, $teamId: String, $secret: String, $resourceTypes: [String!]!) {
       webhookCreate(input: {
         url: $url
         enabled: $enabled
         teamId: $teamId
+        secret: $secret
         resourceTypes: $resourceTypes
       }) {
         success
@@ -572,6 +587,7 @@ export async function registerLinearWebhook(
     resourceTypes: ["Issue"],
   };
   if (teamId) variables.teamId = teamId;
+  if (secret) variables.secret = secret;
 
   const resp = await fetchFn("https://api.linear.app/graphql", {
     method: "POST",
@@ -980,7 +996,12 @@ export const bootstrapCommand = new Command("bootstrap")
     } else {
       logger.info({ webhookUrl }, "[4/7] Registering Linear webhook...");
       try {
-        await registerLinearWebhook(linearApiKey, webhookUrl, linearTeamId);
+        await registerLinearWebhook(
+          linearApiKey,
+          webhookUrl,
+          linearTeamId,
+          linearWebhookSecret,
+        );
         logger.info("[4/7] Linear webhook registered.");
       } catch (err) {
         exitWithError("Linear webhook registration failed", err);
