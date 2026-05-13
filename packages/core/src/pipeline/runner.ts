@@ -174,6 +174,8 @@ export class PipelineRunner {
   private gitlabConfig?: GitLabConfig;
   private lockAdapter: LockAdapter;
   private prLockTimeoutMs: number;
+  /** Memoised Octokit promise — created once per PipelineRunner instance. */
+  private _octokitPromise?: ReturnType<typeof createGitHubClient>;
 
   constructor(config: PipelineRunnerConfig) {
     this.db = config.db;
@@ -186,6 +188,20 @@ export class PipelineRunner {
     this.gitlabConfig = config.gitlab;
     this.lockAdapter = createBranchLockAdapter(config.db as AnyDb);
     this.prLockTimeoutMs = config.prLockTimeoutMs ?? 120_000;
+  }
+
+  /**
+   * Lazy-memoised Octokit instance — created at most once per PipelineRunner.
+   * Multiple concurrent callers share the same Promise so construction happens
+   * exactly once even under parallel await.
+   */
+  private getOctokit(): ReturnType<typeof createGitHubClient> {
+    if (!this._octokitPromise) {
+      if (!this.githubConfig) throw new Error("githubConfig required for Octokit");
+      this._octokitPromise = createGitHubClient(this.githubConfig);
+    }
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    return this._octokitPromise!;
   }
 
   async start(
@@ -2044,6 +2060,30 @@ export class PipelineRunner {
       // via a DB advisory lock (Postgres) so they can't race on PR creation for
       // the same branch.  If the lock cannot be acquired within prLockTimeoutMs,
       // the pipeline fails with a LockTimeoutError.
+
+      // Parse the repo URL once here — repoConfig.url is constant for the
+      // lifetime of this pipeline run. All GitHub/gh-CLI call sites below
+      // consume parsedRepoUrl instead of re-parsing the same string.
+      // Null on parse failure so the gh-CLI fallback path (which tolerates
+      // a missing owner) keeps working; GitHub-App paths use
+      // requireParsedRepoUrl() below to surface a clear error instead of
+      // crashing on a non-null assertion.
+      const parsedRepoUrl = (() => {
+        try {
+          return parseRepoUrl(repoConfig.url);
+        } catch {
+          return null;
+        }
+      })();
+      const requireParsedRepoUrl = (): { owner: string; repo: string } => {
+        if (!parsedRepoUrl) {
+          throw new Error(
+            `PipelineRunner: failed to parse repo URL '${repoConfig.url}' — cannot interact with GitHub API`,
+          );
+        }
+        return parsedRepoUrl;
+      };
+
       let prUrl = "";
       let autoMerged = false;
 
@@ -2179,8 +2219,8 @@ export class PipelineRunner {
         } else if (!isGitLab && this.githubConfig) {
           // GitHub App — use Octokit API
           try {
-            const { owner, repo } = parseRepoUrl(repoConfig.url);
-            const octokit = await createGitHubClient(this.githubConfig);
+            const { owner, repo } = requireParsedRepoUrl();
+            const octokit = await this.getOctokit();
             prUrl = await createPR(octokit, {
               owner,
               repo,
@@ -2199,13 +2239,7 @@ export class PipelineRunner {
         } else {
           // No provider-specific config — use gh CLI
           runLog.info("creating PR via gh CLI");
-          const { owner: ghOwner } = (() => {
-            try {
-              return parseRepoUrl(repoConfig.url);
-            } catch {
-              return { owner: undefined as string | undefined };
-            }
-          })();
+          const ghOwner = parsedRepoUrl?.owner;
           prUrl = await createPRViaCli({
             worktreePath: wtPath,
             branch,
@@ -2251,10 +2285,9 @@ export class PipelineRunner {
             : null;
           if (fanoutPrNumber !== null) {
             try {
-              const { owner: fanoutOwner, repo: fanoutRepo } = parseRepoUrl(
-                repoConfig.url,
-              );
-              const fanoutOctokit = await createGitHubClient(this.githubConfig);
+              const { owner: fanoutOwner, repo: fanoutRepo } =
+                requireParsedRepoUrl();
+              const fanoutOctokit = await this.getOctokit();
               const fanoutResult = await postFanoutCommentsToPR(
                 fanoutOctokit,
                 fanoutOwner,
@@ -2435,7 +2468,7 @@ export class PipelineRunner {
 
                 if (owner && repo && prNumber) {
                   try {
-                    const octokit = await createGitHubClient(this.githubConfig);
+                    const octokit = await this.getOctokit();
                     const check = await verifyApprovalsReceived(
                       octokit as any,
                       owner,
@@ -2586,10 +2619,9 @@ export class PipelineRunner {
               pipelineConfigs: { [run.pipelineKey]: config },
             });
             if (body) {
-              const { owner: summaryOwner, repo: summaryRepo } = parseRepoUrl(
-                repoConfig.url,
-              );
-              const summaryOctokit = await createGitHubClient(this.githubConfig);
+              const { owner: summaryOwner, repo: summaryRepo } =
+                requireParsedRepoUrl();
+              const summaryOctokit = await this.getOctokit();
               // Dedup: skip when a prior pipeline run on this PR already
               // posted a cost summary. We use the markdown header as the
               // sentinel so the check survives any token/dollar diff between
@@ -2643,8 +2675,8 @@ export class PipelineRunner {
           const summaryPrNumber = summaryPrMatch
             ? parseInt(summaryPrMatch[1]!, 10)
             : null;
-          const { owner: csOwner, repo: csRepo } = parseRepoUrl(repoConfig.url);
-          const csOctokit = await createGitHubClient(this.githubConfig);
+          const { owner: csOwner, repo: csRepo } = requireParsedRepoUrl();
+          const csOctokit = await this.getOctokit();
           await maybePostChangeSummary({
             run: {
               id: run.id,
