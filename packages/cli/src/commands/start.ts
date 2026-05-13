@@ -5,7 +5,11 @@ import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
 import { preflightClaudeAuth } from "../lib/preflight-claude-auth.js";
 import { preflightDirs } from "../lib/preflight-dirs.js";
 import { buildRepoConfigsFromEnv, requireRepoConfigs } from "../lib/build-repo-configs.js";
-import { resolveUserLevelHome } from "../lib/user-level-config.js";
+import {
+  resolveUserLevelHome,
+  userLevelConfigPath,
+  readUserLevelConfig,
+} from "../lib/user-level-config.js";
 
 /**
  * User-level: also load `~/.urateam/.env` (or `$URATEAM_HOME/.env`) so secrets
@@ -398,6 +402,118 @@ export const startCommand = new Command("start")
       }
     }
 
+    // --- Optional user-level config hot-reload ---
+    // Watches ~/.urateam/config.json (or $URATEAM_HOME/config.json) and
+    // applies safe changes without a daemon restart. Activates only when
+    // we're in user-level mode (no REPO_* env vars AND config.json exists);
+    // project-level (sidecar) installs are env-var driven and don't need
+    // hot-reload. Unsafe field changes (url, path, defaultBranch) log a
+    // "restart required" warning. Removals with in-flight pipeline runs
+    // are deferred to the next reload to avoid mid-flight interruption.
+    let configWatcher: import("../lib/config-watcher.js").ConfigWatcher | undefined;
+    const userLevelMode =
+      !process.env.REPO_TEAM_ID &&
+      !process.env.REPO_URL &&
+      readUserLevelConfig() !== null;
+    if (userLevelMode) {
+      const { ConfigWatcher, hashConfig } = await import(
+        "../lib/config-watcher.js"
+      );
+      const initial = readUserLevelConfig()!;
+      configWatcher = new ConfigWatcher(initial, {
+        path: userLevelConfigPath(),
+      });
+
+      const deriveKeyFromUrl = (url: string): string => {
+        const stripped = url.replace(/\.git$/, "");
+        const last =
+          stripped.split(/[/:]/).filter(Boolean).pop() ?? "repo";
+        return last.replace(/[^A-Za-z0-9._-]/g, "-");
+      };
+
+      configWatcher.on("applied", async (diff: import("../lib/config-watcher.js").ConfigDiff) => {
+        for (const r of diff.added) {
+          const key = r.teamId ?? deriveKeyFromUrl(r.url);
+          config.repoConfigs[key] = {
+            url: r.url,
+            defaultBranch: r.defaultBranch,
+            testCommand: r.testCommand,
+            buildCommand: r.buildCommand,
+            ...(r.labelPattern && { labelPattern: r.labelPattern }),
+          };
+          console.log(`config: + ${r.url} (live)`);
+        }
+        for (const m of diff.modifiedSafe) {
+          const key = m.repo.teamId ?? deriveKeyFromUrl(m.repo.url);
+          const existing = config.repoConfigs[key];
+          if (existing) {
+            if (m.fields.includes("testCommand")) {
+              existing.testCommand = m.repo.testCommand;
+            }
+            if (m.fields.includes("buildCommand")) {
+              existing.buildCommand = m.repo.buildCommand;
+            }
+            if (m.fields.includes("labelPattern")) {
+              (existing as { labelPattern?: string }).labelPattern =
+                m.repo.labelPattern;
+            }
+            if (m.fields.includes("teamId")) {
+              // teamId change is treated as safe at the field-data level,
+              // but the map-key changes too — re-key the entry.
+              delete config.repoConfigs[key];
+              const newKey = m.repo.teamId ?? deriveKeyFromUrl(m.repo.url);
+              config.repoConfigs[newKey] = existing;
+            }
+            console.log(
+              `config: ~ ${m.repo.url} (${m.fields.join(",")}) — applied live`,
+            );
+          }
+        }
+        for (const m of diff.modifiedUnsafe) {
+          console.warn(
+            `config: ! ${m.repo.url} unsafe field change (${m.fields.join(",")}) — restart required to apply`,
+          );
+        }
+        // Removal: delete the entry from the live repoConfigs immediately.
+        // In-flight pipeline runs hold their own snapshot of the runner state
+        // and continue uninterrupted — removing the entry only stops the
+        // webhook/PM router from sending NEW work to the repo. Operators
+        // who need to forcibly stop in-flight runs should use `ura stop`
+        // or `ura halt`.
+        for (const r of diff.removed) {
+          const key = r.teamId ?? deriveKeyFromUrl(r.url);
+          delete config.repoConfigs[key];
+          console.log(`config: - ${r.url} (live; in-flight runs continue)`);
+        }
+        try {
+          const { logAuditEvent, configReloadedEvent } = await import(
+            "@urateam/core"
+          );
+          void logAuditEvent(
+            db,
+            configReloadedEvent({
+              added: diff.added.map((r) => r.url),
+              removed: diff.removed.map((r) => r.url),
+              modifiedSafe: diff.modifiedSafe.map((m) => m.repo.url),
+              modifiedUnsafe: diff.modifiedUnsafe.map((m) => m.repo.url),
+              sha256: hashConfig(configWatcher!.getCurrent()),
+            }),
+          );
+        } catch {
+          // audit must never crash the watcher loop
+        }
+      });
+
+      configWatcher.on("error", (err) => {
+        console.warn(
+          `config-watcher: ${err.message}; keeping previous in-memory config`,
+        );
+      });
+
+      configWatcher.start();
+      console.log(`Config:    watching ${userLevelConfigPath()} (live reload)`);
+    }
+
     // --- Worktree cleanup cron ---
     // agentRunDir is already resolved above (before preflightClaudeAuth).
     const _parsedTtl = parseInt(process.env.WORKTREE_TTL_HOURS ?? "24", 10);
@@ -548,6 +664,7 @@ export const startCommand = new Command("start")
       clearInterval(branchSweepInterval);
       if (pmInterval) clearInterval(pmInterval);
       rmScheduler?.stop();
+      configWatcher?.stop();
       // Stop tunnel before closing HTTP servers so cloudflared sees clean
       // disconnects instead of a half-open socket dance. Emit `tunnel.stopped`
       // for observability of intentional shutdowns.
