@@ -46,6 +46,12 @@ Autonomous backlog manager in `packages/core/src/pm/`:
 - `slack-interface.ts` — bidirectional Slack bot: slash commands, @mentions, natural language via Haiku
 - `coordination.ts` — DB-backed active work tracking for parallel conflict detection
 
+## OpenRouter Multi-Model Review Fanout (BEC-134)
+- When `REVIEW_MODELS` and `OPENROUTER_API_KEY` are both set, each comma-separated model produces an advisory review alongside the Claude Agent SDK deep-review
+- Symmetric requirement: both must be set or both unset (enforced at startup)
+- Env vars: `REVIEW_MODELS`, `OPENROUTER_API_KEY`, `REVIEW_MODELS_TIMEOUT_MS` (default 300000), `REVIEW_MODELS_MAX_INPUT_TOKENS` (default 150000), `REVIEW_MODELS_MAX_OUTPUT_TOKENS` (BEC-164: optional cap on `max_tokens`; unset = model provider default, which can be 65536 for gemini-2.5-pro; ≤0 or non-integer → warn + treat as unset), `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`)
+- Module: `packages/core/src/executor/review/` — `review-provider.ts` (env parsing, `getEnabledProviders()`), `openrouter-fanout.ts` (parallel fan-out), `openrouter-client.ts` (HTTP client)
+
 ## Webhooks
 - **Linear webhook** (`/webhooks/linear`): state changes trigger pipeline actions (Todo→start, Approved→resume, Blocked→pause, Canceled→abort)
 - **GitHub webhook** (`/webhooks/github`): handles three event categories:
