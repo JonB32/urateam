@@ -212,6 +212,39 @@ describe("TunnelManager — restart-on-exit + graceful shutdown", () => {
     }
   });
 
+  it("getRestartCount() reflects supervisor restart attempts", async () => {
+    vi.useFakeTimers();
+    try {
+      const spawnedChildren: ReturnType<typeof makeFakeChild>[] = [];
+      const spawnMock = vi.fn(() => {
+        const c = makeFakeChild();
+        spawnedChildren.push(c);
+        return c.child as any;
+      });
+      const mgr = new TunnelManager(
+        makeOpts({
+          spawn: spawnMock as any,
+          initialRestartDelayMs: 10,
+          maxRestartAttempts: 5,
+          urlDetectTimeoutMs: 9999,
+        }),
+      );
+      const startPromise = mgr.start();
+      spawnedChildren[0]!.emitStderr(
+        "Your quick tunnel is up at https://a.trycloudflare.com",
+      );
+      await startPromise;
+      expect(mgr.getRestartCount()).toBe(0);
+      spawnedChildren[0]!.emitExit(1, null);
+      await vi.advanceTimersByTimeAsync(10);
+      // Restart-attempt 1 has fired and spawned a new child.
+      expect(spawnMock).toHaveBeenCalledTimes(2);
+      expect(mgr.getRestartCount()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("gives up after maxRestartAttempts and emits 'error'", async () => {
     vi.useFakeTimers();
     try {

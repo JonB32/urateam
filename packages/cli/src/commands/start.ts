@@ -362,6 +362,15 @@ export const startCommand = new Command("start")
         const result = await tunnelManager.start();
         process.env.URATEAM_PUBLIC_URL = result.publicUrl;
         console.log(`Tunnel:    ${result.publicUrl} (${mode})`);
+        // Attach a runtime error handler BEFORE any subsequent restart can
+        // exhaust the cap. EventEmitter throws if "error" emits without a
+        // listener; without this, a flapping cloudflared would crash the
+        // daemon when the restart cap is hit.
+        tunnelManager.on("error", (err: Error) => {
+          console.error(
+            `Tunnel: supervisor gave up (${err.message}); daemon continues on local ports`,
+          );
+        });
         try {
           const { logAuditEvent, tunnelStartedEvent } = await import(
             "@urateam/core"
@@ -543,6 +552,10 @@ export const startCommand = new Command("start")
       // disconnects instead of a half-open socket dance. Emit `tunnel.stopped`
       // for observability of intentional shutdowns.
       if (tunnelManager) {
+        // Capture restartCount BEFORE stop() — the count reflects how many
+        // times cloudflared crashed during the daemon's life, which is the
+        // metric operators want to see for "did this tunnel flap?".
+        const restartCount = tunnelManager.getRestartCount();
         try {
           await tunnelManager.stop();
           try {
@@ -555,8 +568,8 @@ export const startCommand = new Command("start")
                 provider: options.tunnel as
                   | "cloudflare-quick"
                   | "cloudflare-token",
-                restartCount: 0,
-                exitCode: 0,
+                restartCount,
+                exitCode: null,
                 signal: "SIGTERM",
               }),
             );

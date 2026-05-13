@@ -296,4 +296,15 @@ export class TunnelManager extends EventEmitter {
   getPublicUrl(): string | null {
     return this.publicUrl;
   }
+
+  /**
+   * Total restart attempts made since `start()`. Never resets within the
+   * lifetime of a single TunnelManager — so even a long stable period
+   * followed by a single new failure still incurs the cap-tier delay.
+   * Operators who care can construct a fresh manager. Used by the
+   * `tunnel.stopped` audit event to attribute flap loops correctly.
+   */
+  getRestartCount(): number {
+    return this.restartCount;
+  }
 }
