@@ -20,6 +20,13 @@ import { randomBytes } from "crypto";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+/**
+ * @internal
+ * Carries the credentials the wizard collected for the PM agent. This is a
+ * standalone interactive-install CLI binary whose entire purpose is to
+ * gather secrets and write them to `.env`, so `*Token` / `*Secret` fields
+ * are inherent — see the create-urateam exemption in CLAUDE.md Conventions.
+ */
 export interface PmAgentOptions {
   slackBotToken: string;
   slackSigningSecret: string;
@@ -40,6 +47,12 @@ export interface GithubFeedbackOptions {
   autoTrigger?: boolean;
 }
 
+/**
+ * @internal
+ * Wizard-collected options that drive scaffold(). Contains *Key / *Secret /
+ * *Password fields by design — see the create-urateam exemption in CLAUDE.md
+ * Conventions. Never logged; written directly to the scaffolded `.env`.
+ */
 export interface ScaffoldOptions {
   /** The project root directory. `.urateam/` will be created inside it. */
   projectDir: string;
@@ -106,6 +119,14 @@ export interface LicenseInfo {
   expiresAt?: Date;
 }
 
+/**
+ * @internal
+ * Result returned to the wizard for the next-steps printout. `generatedSecrets`
+ * is intentionally exposed so the wizard can show the operator the freshly-
+ * generated passwords on first run — but the wizard never persists these to
+ * disk beyond the `.env` write that scaffold() does. See the create-urateam
+ * exemption in CLAUDE.md Conventions.
+ */
 export interface ScaffoldResult {
   /** Absolute path to the created `.urateam/` directory. */
   urateamDir: string;
