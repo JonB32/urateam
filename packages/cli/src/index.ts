@@ -29,6 +29,9 @@ import { getPackageVersion } from "./version.js";
 import { licenseCommand } from "./commands/license.js";
 import { adminCommand } from "./commands/admin.js";
 import { stopCommand, haltCommand } from "./commands/control.js";
+import { initCommand } from "./commands/init.js";
+import { repoCommand } from "./commands/repo.js";
+import { uninstallCommand } from "./commands/uninstall.js";
 
 const program = new Command();
 
@@ -47,5 +50,8 @@ program.addCommand(licenseCommand, { hidden: true });
 program.addCommand(adminCommand);
 program.addCommand(stopCommand);
 program.addCommand(haltCommand);
+program.addCommand(initCommand);
+program.addCommand(repoCommand);
+program.addCommand(uninstallCommand);
 
 program.parse();
