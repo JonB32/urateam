@@ -93,6 +93,160 @@ export interface TriageResult {
   /** Tier 4 — "things this should NOT do" — anti-acceptance criteria the
    *  agent must respect to stay in scope. */
   antiAcceptanceCriteria?: string[];
+  /** Tier 6b — assumptions the agent will take for granted. Operator-
+   *  correctable via the Linear comment before implement burns tokens.
+   *  Max 10. */
+  assumptions?: string[];
+  /** Tier 6b — concrete input/output pairs that ground the implement
+   *  agent's generation. Max 3. */
+  examples?: Array<{ scenario: string; expected: string }>;
+  /** Tier 6b — best-guess paths the implementation will touch. Compared
+   *  against the actual diff at review time as a quality signal (Tier 6e
+   *  consumer). Max 20. */
+  affectedFiles?: string[];
+  /** Tier 6b — which test file(s) the implement agent should start from
+   *  and what shape of assertions to write. */
+  testStrategy?: { unit?: string; integration?: string };
+  /** Tier 6b — severity classification + the subsystems triage thinks
+   *  the change touches. Feeds the cost gate and the auto-deep-review
+   *  default. `areas` max 5. */
+  riskAssessment?: {
+    severity: "low" | "medium" | "high";
+    areas: string[];
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Tier 6b — TriageV2 extensions: zod schema + tolerant parser.
+//
+// The schema is `.optional()` per FR-003 so a partial Haiku response still
+// produces a valid v1-shaped TriageResult. `parseTriageV2Extensions()` is a
+// pre-zod filter that truncates excess list entries and drops malformed
+// inner shapes, then runs zod for type-safety on what remains. This shape
+// is the contract between the triage Haiku call and downstream consumers
+// (see specs/001-triage-v2/contracts/triage-result.schema.md).
+// ---------------------------------------------------------------------------
+
+/** Per-field caps from data-model.md. Tunable in one place. */
+const TRIAGE_V2_CAPS = {
+  assumptions: 10,
+  examples: 3,
+  affectedFiles: 20,
+  riskAssessmentAreas: 5,
+} as const;
+
+export const TriageV2ExtensionsSchema = z
+  .object({
+    assumptions: z.array(z.string().min(1)).max(TRIAGE_V2_CAPS.assumptions).optional(),
+    examples: z
+      .array(
+        z.object({
+          scenario: z.string().min(1),
+          expected: z.string().min(1),
+        }),
+      )
+      .max(TRIAGE_V2_CAPS.examples)
+      .optional(),
+    affectedFiles: z.array(z.string().min(1)).max(TRIAGE_V2_CAPS.affectedFiles).optional(),
+    testStrategy: z
+      .object({
+        unit: z.string().min(1).optional(),
+        integration: z.string().min(1).optional(),
+      })
+      .optional(),
+    riskAssessment: z
+      .object({
+        severity: z.enum(["low", "medium", "high"]),
+        areas: z.array(z.string().min(1)).max(TRIAGE_V2_CAPS.riskAssessmentAreas),
+      })
+      .optional(),
+  })
+  .strict();
+
+export type TriageV2Extensions = z.infer<typeof TriageV2ExtensionsSchema>;
+
+/**
+ * Tolerant pre-zod normaliser. Filters non-string elements from string
+ * arrays, drops examples missing `scenario` or `expected`, truncates list
+ * fields to their caps, and trims whitespace. Returns only the v2 fields
+ * present in `raw`; absent fields are absent from the result (not set to
+ * empty arrays).
+ *
+ * Drops the entire `riskAssessment` block when the severity enum fails so
+ * the caller falls back to the v1 shape rather than partially-populated
+ * v2.
+ */
+export function parseTriageV2Extensions(raw: unknown): TriageV2Extensions {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return {};
+  }
+  const r = raw as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+
+  // string-array fields with truncate + filter + trim.
+  const collectStringArray = (
+    field: "assumptions" | "affectedFiles",
+    cap: number,
+  ): string[] | undefined => {
+    const value = r[field];
+    if (!Array.isArray(value)) return undefined;
+    const cleaned = value
+      .filter((v): v is string => typeof v === "string")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    return cleaned.length === 0 ? undefined : cleaned.slice(0, cap);
+  };
+  const assumptions = collectStringArray("assumptions", TRIAGE_V2_CAPS.assumptions);
+  if (assumptions) out.assumptions = assumptions;
+  const affectedFiles = collectStringArray("affectedFiles", TRIAGE_V2_CAPS.affectedFiles);
+  if (affectedFiles) out.affectedFiles = affectedFiles;
+
+  // examples — drop entries missing either field.
+  if (Array.isArray(r.examples)) {
+    const cleaned = r.examples
+      .filter(
+        (e): e is { scenario: string; expected: string } =>
+          typeof e === "object" &&
+          e !== null &&
+          typeof (e as { scenario?: unknown }).scenario === "string" &&
+          typeof (e as { expected?: unknown }).expected === "string" &&
+          ((e as { scenario: string }).scenario.trim().length > 0) &&
+          ((e as { expected: string }).expected.trim().length > 0),
+      )
+      .map((e) => ({ scenario: e.scenario.trim(), expected: e.expected.trim() }));
+    if (cleaned.length > 0) {
+      out.examples = cleaned.slice(0, TRIAGE_V2_CAPS.examples);
+    }
+  }
+
+  // testStrategy — keep whichever sub-fields are present and string-typed.
+  if (typeof r.testStrategy === "object" && r.testStrategy !== null && !Array.isArray(r.testStrategy)) {
+    const ts = r.testStrategy as { unit?: unknown; integration?: unknown };
+    const out2: { unit?: string; integration?: string } = {};
+    if (typeof ts.unit === "string" && ts.unit.trim().length > 0) out2.unit = ts.unit.trim();
+    if (typeof ts.integration === "string" && ts.integration.trim().length > 0) {
+      out2.integration = ts.integration.trim();
+    }
+    if (Object.keys(out2).length > 0) out.testStrategy = out2;
+  }
+
+  // riskAssessment — strict severity enum check; drop block on miss.
+  if (typeof r.riskAssessment === "object" && r.riskAssessment !== null && !Array.isArray(r.riskAssessment)) {
+    const ra = r.riskAssessment as { severity?: unknown; areas?: unknown };
+    if (ra.severity === "low" || ra.severity === "medium" || ra.severity === "high") {
+      const rawAreas = Array.isArray(ra.areas) ? ra.areas : [];
+      const cleanedAreas = rawAreas
+        .filter((v): v is string => typeof v === "string")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+        .slice(0, TRIAGE_V2_CAPS.riskAssessmentAreas);
+      out.riskAssessment = { severity: ra.severity, areas: cleanedAreas };
+    }
+  }
+
+  // Final zod safety net — should always succeed at this point.
+  const parsed = TriageV2ExtensionsSchema.safeParse(out);
+  return parsed.success ? parsed.data : {};
 }
 
 export interface ConflictCheckResult {
