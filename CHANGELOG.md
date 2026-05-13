@@ -17,6 +17,17 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+## [0.1.52] — 2026-05-13
+
+Bumps:
+- `@urateam/core`: 0.1.37 → 0.1.38
+- `@urateam/cli`: 0.1.39 → 0.1.40
+- `@urateam/dashboard`: 0.1.37 → 0.1.38
+- `create-urateam`: 0.1.40 → 0.1.41
+
+### Added (OSS+)
+- **User-level install path (Cyrus-style)** ([#296](https://github.com/JonB32/urateam/pull/296)) — new minimum-effort onboarding for operators evaluating urateam on a single machine. Five new CLI commands: `ura init` (bootstraps `~/.urateam/{config.json,data/,repos/}`), `ura repo add <url>` (clones into `~/.urateam/repos/<slug>` and registers in `config.json` — options: `--branch`, `--test-command`, `--build-command`, `--team`, `--label-pattern`), `ura repo list`, `ura repo remove <slug> [--purge]` (with path-safety guard refusing to delete outside `URATEAM_HOME`), `ura uninstall --yes`. `ura start` now reads `~/.urateam/config.json` (or `$URATEAM_HOME/config.json`) as a fallback when no `REPO_*` env vars are set, and explicitly loads `~/.urateam/.env` regardless of cwd so secrets work without `cd ~/.urateam`. Project-level (sidecar / docker-compose) install is unchanged — env vars win when both are present. New schema lives in `packages/cli/src/lib/user-level-config.ts` (Zod, JSON file). Public API: `cloneRepo` is now re-exported from `@urateam/core`. Full operator doc: `deploy/USER_LEVEL_INSTALL.md`.
+
 ## [0.1.51] — 2026-05-12
 
 Bumps:
