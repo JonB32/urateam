@@ -792,6 +792,31 @@ export function tunnelStartedEvent(args: {
 }
 
 /**
+ * `ura start` reloaded the user-level config without a restart. Payload
+ * lists what changed so operators can spot unexpected mutations.
+ */
+export function configReloadedEvent(args: {
+  added: string[];
+  removed: string[];
+  modifiedSafe: string[];
+  modifiedUnsafe: string[];
+  sha256: string;
+}): AuditEvent {
+  return base({
+    eventType: "config.reloaded",
+    actor: "system",
+    actorType: "system",
+    payload: {
+      added: args.added,
+      removed: args.removed,
+      modifiedSafe: args.modifiedSafe,
+      modifiedUnsafe: args.modifiedUnsafe,
+      sha256: args.sha256,
+    },
+  });
+}
+
+/**
  * Tunnel child process exited — either gracefully (operator stopped the
  * daemon) or because the restart cap was hit. Payload carries the exit
  * code / signal so operators can spot tunnel-flap loops in the audit log.

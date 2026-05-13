@@ -554,6 +554,11 @@ export const AuditEventTypeSchema = z.enum([
    *  the daemon) or because the restart cap was hit. Payload: provider,
    *  restartCount, exitCode, signal. */
   "tunnel.stopped",
+  /** `ura start` reloaded `~/.urateam/config.json` without restart. Payload
+   *  carries added / removed / modifiedSafe / modifiedUnsafe arrays + diff
+   *  hash, so operators can audit which repos came/went without grepping
+   *  the daemon log. */
+  "config.reloaded",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 
