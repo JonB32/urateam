@@ -32,6 +32,7 @@ import { stopCommand, haltCommand } from "./commands/control.js";
 import { initCommand } from "./commands/init.js";
 import { repoCommand } from "./commands/repo.js";
 import { uninstallCommand } from "./commands/uninstall.js";
+import { serviceCommand } from "./commands/service.js";
 
 const program = new Command();
 
@@ -53,5 +54,6 @@ program.addCommand(haltCommand);
 program.addCommand(initCommand);
 program.addCommand(repoCommand);
 program.addCommand(uninstallCommand);
+program.addCommand(serviceCommand);
 
 program.parse();

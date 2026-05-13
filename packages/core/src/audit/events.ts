@@ -768,6 +768,41 @@ export function pmEscalatedToNeedsDesignEvent(args: {
   });
 }
 
+/**
+ * `ura service install` succeeded — a platform service unit (launchd plist
+ * or systemd-user .service) was written and loaded. Emitted opportunistically
+ * from the CLI when the daemon DB already exists; never blocks the install.
+ */
+export function serviceInstalledEvent(args: {
+  platform: "darwin" | "linux";
+  unitPath: string;
+  actor: string;
+}): AuditEvent {
+  return base({
+    eventType: "service.installed",
+    actor: args.actor,
+    actorType: "cli",
+    payload: { platform: args.platform, unitPath: args.unitPath },
+  });
+}
+
+/**
+ * `ura service uninstall` succeeded — the unit file was removed and the
+ * service stopped. Counterpart to `serviceInstalledEvent`.
+ */
+export function serviceUninstalledEvent(args: {
+  platform: "darwin" | "linux";
+  unitPath: string;
+  actor: string;
+}): AuditEvent {
+  return base({
+    eventType: "service.uninstalled",
+    actor: args.actor,
+    actorType: "cli",
+    payload: { platform: args.platform, unitPath: args.unitPath },
+  });
+}
+
 export function pipelineSpecVsImplFailedEvent(args: {
   runId: string;
   issueId: string;

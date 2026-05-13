@@ -535,6 +535,13 @@ export const AuditEventTypeSchema = z.enum([
    *  comment with the last failure's error message, and sending a Slack
    *  alert. Payload includes failureCount and a truncated errorMessage. */
   "pm.escalated_to_needs_design",
+  /** `ura service install` succeeded — a launchd plist (macOS) or systemd-user
+   *  unit (Linux) was written and the service was started. Operational signal
+   *  so operators can audit unattended provisioning. */
+  "service.installed",
+  /** `ura service uninstall` succeeded — the unit file was removed and the
+   *  service stopped. */
+  "service.uninstalled",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 

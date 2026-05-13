@@ -15,7 +15,7 @@ This file provides guidance to Claude Code when working on urateam.
 pnpm monorepo with 4 packages:
 - `@urateam/core` — webhook receiver, pipeline runner, agent executor, DB, notifiers, PM Agent
 - `@urateam/dashboard` — Hono+HTMX ops dashboard (security-hardened: CSP, CSRF, rate limiting, credential redaction)
-- `@urateam/cli` — `ura dev` for local development, `ura start` for production
+- `@urateam/cli` — `ura dev` for local development, `ura start` for production. User-level surface: `ura init` / `ura repo {add,list,remove}` / `ura uninstall` / `ura service {install,uninstall}` (auto-start via launchd or systemd-user).
 - `@urateam/observers` — quality observer with first-tick dedup seeding (BEC-172); SQLite-backed fingerprint store, pluggable `computeFindings`/`fileGithubIssue` deps
 
 ## Key Patterns
