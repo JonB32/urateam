@@ -17,6 +17,20 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+## [0.1.53] — 2026-05-13
+
+Bumps:
+- `@urateam/core`: 0.1.38 → 0.1.39
+- `@urateam/cli`: 0.1.40 → 0.1.41
+- `@urateam/dashboard`: 0.1.38 → 0.1.39
+- `create-urateam`: 0.1.41 → 0.1.42
+
+### Added (OSS+)
+- **`ura service install` / `ura service uninstall`** ([#300](https://github.com/JonB32/urateam/pull/300)) — auto-generate and install a platform service unit so the user-level daemon auto-starts on login. Auto-detects platform: macOS → launchd plist at `~/Library/LaunchAgents/com.urateam.daemon.plist` + `launchctl load -w`; Linux → systemd-user unit at `~/.config/systemd/user/urateam.service` + `systemctl --user daemon-reload + enable --now`. Idempotent — refuses to overwrite an existing unit, prints "already exists" instead. `--dry-run` prints the unit content without writing. Other platforms fail with a clear pointer to the manual snippets in `deploy/USER_LEVEL_INSTALL.md`. Pure I/O-free unit-file generators live in `packages/cli/src/lib/service-unit.ts` (`renderLaunchdPlist`, `renderSystemdUserUnit`) and are snapshot-tested.
+
+### Audit log
+- Two new event types: `service.installed`, `service.uninstalled`. Emitted opportunistically from the CLI when the daemon SQLite DB exists. Routed through the license-gated `logAuditEvent` — Enterprise-tier `audit-log` deployments record them; OSS / Pro drop them silently. CLAUDE.md count: 45 → 47.
+
 ## [0.1.52] — 2026-05-13
 
 Bumps:
