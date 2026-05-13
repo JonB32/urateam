@@ -53,13 +53,25 @@ describe("diffRepos", () => {
     expect(d.added).toEqual([]);
   });
 
-  it("detects safe-field modifications", () => {
+  it("detects safe-field modifications and carries prev + next entries", () => {
     const prev = cfg([repo({ testCommand: "pnpm test" })]);
     const next = cfg([repo({ testCommand: "pnpm test --changed" })]);
     const d = diffRepos(prev, next);
     expect(d.modifiedSafe).toHaveLength(1);
     expect(d.modifiedSafe[0]!.fields).toContain("testCommand");
+    expect(d.modifiedSafe[0]!.prev.testCommand).toBe("pnpm test");
+    expect(d.modifiedSafe[0]!.repo.testCommand).toBe("pnpm test --changed");
     expect(d.modifiedUnsafe).toEqual([]);
+  });
+
+  it("detects teamId change (safe) and the diff carries the old teamId for re-keying", () => {
+    const prev = cfg([repo({ teamId: "team-old" })]);
+    const next = cfg([repo({ teamId: "team-new" })]);
+    const d = diffRepos(prev, next);
+    expect(d.modifiedSafe).toHaveLength(1);
+    expect(d.modifiedSafe[0]!.fields).toContain("teamId");
+    expect(d.modifiedSafe[0]!.prev.teamId).toBe("team-old");
+    expect(d.modifiedSafe[0]!.repo.teamId).toBe("team-new");
   });
 
   it("detects unsafe-field modifications (defaultBranch)", () => {
@@ -185,28 +197,27 @@ describe("ConfigWatcher", () => {
     expect(w.getCurrent()).toBe(initial);
   });
 
-  it("debounces rapid fs.watch firings into a single reload", async () => {
+  it("debounces 5 rapid scheduleReload calls into exactly one reload", async () => {
     vi.useFakeTimers();
     try {
       const initial = cfg([]);
       const next = cfg([repo({})]);
-      let calls = 0;
-      const reader = vi.fn(() => {
-        calls += 1;
-        return calls === 1 ? initial : next;
-      });
+      const reader = vi.fn(() => next);
       const w = new ConfigWatcher(initial, {
         path: configPath,
         debounceMs: 100,
         reader,
         log: () => {},
       });
-      w.start();
-      // Simulate 5 fs.watch firings in quick succession.
-      for (let i = 0; i < 5; i++) writeFileSync(configPath, "{}");
-      await vi.advanceTimersByTimeAsync(200);
-      expect(reader.mock.calls.length).toBeLessThanOrEqual(1);
-      w.stop();
+      // Don't call start() — fs.watch fires on OS time and can't be driven
+      // by fake timers. Instead exercise scheduleReload() directly so the
+      // debounce + setTimeout chain runs entirely under our control.
+      for (let i = 0; i < 5; i++) w.scheduleReload();
+      expect(reader).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(99);
+      expect(reader).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(reader).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }

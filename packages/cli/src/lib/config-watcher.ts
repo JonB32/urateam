@@ -48,11 +48,20 @@ export interface ConfigDiff {
   removed: UserLevelRepo[];
   /**
    * Repos present in both, with at least one safe field changed.
-   * Carries the new repo entry plus the list of changed safe-field names.
+   * Carries the previous entry (so the caller can derive the OLD map key)
+   * and the new entry plus the list of changed safe-field names.
    */
-  modifiedSafe: Array<{ repo: UserLevelRepo; fields: string[] }>;
+  modifiedSafe: Array<{
+    prev: UserLevelRepo;
+    repo: UserLevelRepo;
+    fields: string[];
+  }>;
   /** Same as modifiedSafe but for unsafe-field changes (restart required). */
-  modifiedUnsafe: Array<{ repo: UserLevelRepo; fields: string[] }>;
+  modifiedUnsafe: Array<{
+    prev: UserLevelRepo;
+    repo: UserLevelRepo;
+    fields: string[];
+  }>;
 }
 
 /**
@@ -86,10 +95,10 @@ export function diffRepos(
       if (prev[f] !== next[f]) unsafeChanged.push(f);
     }
     if (safeChanged.length > 0) {
-      modifiedSafe.push({ repo: next, fields: safeChanged });
+      modifiedSafe.push({ prev, repo: next, fields: safeChanged });
     }
     if (unsafeChanged.length > 0) {
-      modifiedUnsafe.push({ repo: next, fields: unsafeChanged });
+      modifiedUnsafe.push({ prev, repo: next, fields: unsafeChanged });
     }
   }
   for (const [url, prev] of prevByUrl) {
@@ -99,11 +108,16 @@ export function diffRepos(
   return { added, removed, modifiedSafe, modifiedUnsafe };
 }
 
-/** SHA-256 of the canonical-JSON-stringified config, for audit observability. */
+/**
+ * SHA-256 of the JSON-stringified config, for audit observability.
+ *
+ * Used only for the `config.reloaded` audit event payload — advisory, not
+ * load-bearing for any routing decision. The hash assumes both inputs come
+ * from `JSON.parse(readFileSync(...))` so key insertion order matches the
+ * file's; we don't normalise nested key ordering here.
+ */
 export function hashConfig(cfg: UserLevelConfig): string {
-  return createHash("sha256")
-    .update(JSON.stringify(cfg, Object.keys(cfg).sort()))
-    .digest("hex");
+  return createHash("sha256").update(JSON.stringify(cfg)).digest("hex");
 }
 
 export interface ConfigWatcherOpts {
@@ -142,13 +156,21 @@ export class ConfigWatcher extends EventEmitter {
 
   start(): void {
     if (this.watcher) return;
-    this.watcher = watch(this.opts.path, () => {
-      if (this.debounceTimer) clearTimeout(this.debounceTimer);
-      this.debounceTimer = setTimeout(
-        () => this.handleChange(),
-        this.debounceMs,
-      );
-    });
+    this.watcher = watch(this.opts.path, () => this.scheduleReload());
+  }
+
+  /**
+   * Cancels any pending debounce timer and schedules a fresh one. Called
+   * internally by `start()`'s fs.watch handler and exposed publicly so the
+   * unit tests can exercise debounce coalescing deterministically (fake
+   * timers can't drive fs.watch on the OS).
+   */
+  scheduleReload(): void {
+    if (this.debounceTimer) clearTimeout(this.debounceTimer);
+    this.debounceTimer = setTimeout(
+      () => this.handleChange(),
+      this.debounceMs,
+    );
   }
 
   stop(): void {

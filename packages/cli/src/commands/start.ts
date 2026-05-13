@@ -444,8 +444,11 @@ export const startCommand = new Command("start")
           console.log(`config: + ${r.url} (live)`);
         }
         for (const m of diff.modifiedSafe) {
-          const key = m.repo.teamId ?? deriveKeyFromUrl(m.repo.url);
-          const existing = config.repoConfigs[key];
+          // Look up the OLD entry using the previous teamId / URL slug —
+          // not the new ones — so we find the entry even when teamId
+          // itself changed.
+          const oldKey = m.prev.teamId ?? deriveKeyFromUrl(m.prev.url);
+          const existing = config.repoConfigs[oldKey];
           if (existing) {
             if (m.fields.includes("testCommand")) {
               existing.testCommand = m.repo.testCommand;
@@ -454,15 +457,17 @@ export const startCommand = new Command("start")
               existing.buildCommand = m.repo.buildCommand;
             }
             if (m.fields.includes("labelPattern")) {
-              (existing as { labelPattern?: string }).labelPattern =
-                m.repo.labelPattern;
+              existing.labelPattern = m.repo.labelPattern;
             }
             if (m.fields.includes("teamId")) {
-              // teamId change is treated as safe at the field-data level,
-              // but the map-key changes too — re-key the entry.
-              delete config.repoConfigs[key];
-              const newKey = m.repo.teamId ?? deriveKeyFromUrl(m.repo.url);
-              config.repoConfigs[newKey] = existing;
+              // The map-key changes when teamId changes — re-key the entry
+              // under the new key so webhook routing keeps working.
+              const newKey =
+                m.repo.teamId ?? deriveKeyFromUrl(m.repo.url);
+              if (newKey !== oldKey) {
+                delete config.repoConfigs[oldKey];
+                config.repoConfigs[newKey] = existing;
+              }
             }
             console.log(
               `config: ~ ${m.repo.url} (${m.fields.join(",")}) — applied live`,
@@ -542,11 +547,12 @@ export const startCommand = new Command("start")
         ? _parsedAgentBranchTtl
         : 7;
 
-    const repoUrls = Object.values(config.repoConfigs).map(
-      (r) => (r as { url: string }).url,
-    );
-
+    // Compute repoUrls per-tick so hot-reloaded additions/removals are
+    // picked up by the branch sweep without requiring a daemon restart.
     async function runBranchSweepTick() {
+      const repoUrls = Object.values(config.repoConfigs).map(
+        (r) => (r as { url: string }).url,
+      );
       try {
         await runAgentBranchSweep({
           db,
