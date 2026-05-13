@@ -17,6 +17,20 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+## [0.1.54] — 2026-05-13
+
+Bumps:
+- `@urateam/core`: 0.1.39 → 0.1.40
+- `@urateam/cli`: 0.1.41 → 0.1.42
+- `@urateam/dashboard`: 0.1.39 → 0.1.40
+- `create-urateam`: 0.1.42 → 0.1.43
+
+### Added (OSS+)
+- **`ura self-auth-linear`** ([#302](https://github.com/JonB32/urateam/pull/302)) — browser-based Linear OAuth flow. Spins up an ephemeral `127.0.0.1:9898` HTTP server (port configurable via `--port`), opens Linear's authorize URL in the operator's browser via `open` (macOS) / `xdg-open` (Linux) / printed-URL fallback, verifies the HMAC-signed `state` parameter (per-invocation 32-byte random secret; constant-time `timingSafeEqual`), exchanges the code at `https://api.linear.app/oauth/token`, fetches workspace metadata via Linear GraphQL, and writes `LINEAR_API_KEY=<access_token>` into `~/.urateam/.env` via the new atomic `upsertEnvFile()` helper (rename-after-write; preserves comments, blank lines, and unrelated keys). Flags: `--timeout-ms` (default 5min), `--scope` (default `read,write`), `--port` (default 9898). New library helpers: `lib/oauth-state.ts`, `lib/env-file.ts`, `lib/linear-oauth.ts` (DI-able orchestrator), `lib/linear-oauth-deps.ts` (default real-world fetch + browser-open shims). Token preservation: if Linear's GraphQL metadata endpoint hiccups after a successful token exchange, the success page still renders and the token is still written; workspace metadata falls back to a placeholder. Token NEVER appears in console output, the success-page HTML, or the audit payload.
+
+### Audit log
+- One new event type: `linear.oauth_completed`. Emitted opportunistically from the CLI when the daemon SQLite DB exists. Routed through license-gated `logAuditEvent` (Enterprise tier). Payload carries `workspaceId` + `workspaceName`, never the token. CLAUDE.md count: 47 → 48.
+
 ## [0.1.53] — 2026-05-13
 
 Bumps:
