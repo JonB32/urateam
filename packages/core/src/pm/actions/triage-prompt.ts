@@ -206,3 +206,8 @@ input/output examples ground the work? (5) what risk class is this?
 
 {`;
 }
+
+// `parseTriageV2Extensions` lives in pm/types.ts. Consumers in triage.ts
+// import it directly; the seam is the prompt builder above, not a
+// parse re-export.
+
