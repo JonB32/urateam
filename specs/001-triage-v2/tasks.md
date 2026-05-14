@@ -106,13 +106,13 @@ prerequisites for any user-story phase.
 EOF
 )"` returns a PR URL; the PR body contains the 9-category convention checklist per Constitution Principle III workflow
 
-- [ ] **T015** Dispatch Sonnet `feature-dev:code-reviewer` (model: sonnet) with the spec + plan + contracts as the brief. Address every BLOCKING finding before lifting draft status (if any). — Verification: `gh pr view <num> --comments` shows the reviewer's `VERDICT: READY TO MERGE`; if `VERDICT: REQUIRES CHANGES`, the BLOCKING findings have been addressed in follow-up commits
+- [X] **T015** Dispatch Sonnet `feature-dev:code-reviewer` (model: sonnet) with the spec + plan + contracts as the brief. Address every BLOCKING finding before lifting draft status (if any). — Verification: `gh pr view <num> --comments` shows the reviewer's `VERDICT: READY TO MERGE`; if `VERDICT: REQUIRES CHANGES`, the BLOCKING findings have been addressed in follow-up commits
 
-- [ ] **T016** Merge PR after CI green. — Verification: `gh pr view <num> --json state` returns `"MERGED"`
+- [X] **T016** Merge PR after CI green. — Verification: `gh pr view <num> --json state` returns `"MERGED"`
 
-- [ ] **T017** Cut v0.1.57 release. — Verification: `pnpm cut-release patch` succeeds and creates the release branch + tag candidate
+- [X] **T017** Cut v0.1.57 release. — Verification: `pnpm cut-release patch` succeeds and creates the release branch + tag candidate
 
-- [ ] **T018** Publish + deploy to dogfood. — Verification: `npm view @urateam/cli@<new-version> version` confirms the publish; `ssh deploy@178.156.149.132 'docker exec urateam-dogfood ura --version'` confirms the new version is running
+- [X] **T018** Publish + deploy to dogfood. — Verification: `npm view @urateam/cli@<new-version> version` confirms the publish; `ssh deploy@178.156.149.132 'docker exec urateam-dogfood ura --version'` confirms the new version is running
 
 ---
 
