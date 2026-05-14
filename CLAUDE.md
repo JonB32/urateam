@@ -199,6 +199,13 @@ budget check → **recover retriable runs** → recover stuck In Progress → **
 - Use `isolation: "worktree"` — locked HEAD per agent
 - Never instruct agents to `git checkout <other-branch>` inside their worktree
 - For fully isolated parallel work with no `.git` sharing, use separate repo clones
+
+**Recovering from contaminated branches (cherry-pick procedure):**
+1. Identify the correct SHAs: `git log --oneline --all | grep "<issue-id>"` to find commits that landed on the wrong branch.
+2. Check out the correct target branch: `git checkout agent/<correct-issue>-<slug>`.
+3. Cherry-pick the stray commit: `git cherry-pick <sha>`.
+4. Force-push the corrected branch: `git push --force-with-lease origin agent/<correct-issue>-<slug>`.
+5. On the contaminated branch, remove the stray commit: `git rebase -i --onto <parent-sha> <stray-sha> HEAD` or `git reset --hard <pre-stray-sha>`, then `git push --force-with-lease`.
 - Do **not** reuse branch names across concurrent runs (`-B` resets the ref to HEAD)
 
 **Recovering from contaminated branches**: cherry-pick from contaminated branch onto correct branch, force-push-with-lease both branches, then `git rebase -i --onto <parent> <stray> HEAD` on the contaminated side.
