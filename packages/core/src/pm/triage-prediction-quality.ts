@@ -60,3 +60,14 @@ export function computeAffectedFilesPredictionQuality(
   };
 }
 
+/**
+ * Returns true iff the env explicitly disables Tier 6e triage quality
+ * score emission. Strict equality on the string `"true"` — mirrors
+ * `isV2Disabled` in `pm/actions/triage-prompt.ts`.
+ *
+ * Reads at call time so operators can flip the env var and have the next
+ * pipeline run honor it without a daemon restart.
+ */
+export function isTier6eDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.URATEAM_DISABLE_TIER_6E === "true";
+}

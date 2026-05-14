@@ -118,7 +118,10 @@ import {
   pipelineAutoDeepReviewBumpedEvent,
   pmTriageQualityScoreEvent,
 } from "../audit/index.js";
-import { computeAffectedFilesPredictionQuality } from "../pm/triage-prediction-quality.js";
+import {
+  computeAffectedFilesPredictionQuality,
+  isTier6eDisabled,
+} from "../pm/triage-prediction-quality.js";
 import { getTriageResult } from "../pm/triage-results-store.js";
 import { matchesAnyPattern } from "../util/glob.js";
 import { findScratchFiles } from "./scratch-file-guard.js";
@@ -2628,7 +2631,11 @@ export class PipelineRunner {
       // agent). The previous parse-from-description path was bricked by the
       // 4000-char description cap in schema-mapper, which sliced off the
       // appended v2 sections for realistic issues.
-      if (worktreePath) {
+      //
+      // Escape hatch (BEC-218): URATEAM_DISABLE_TIER_6E=true skips the entire
+      // block (no DB read, no getChangedFiles, no DB write). Read at call time
+      // so flipping the var takes effect without a daemon restart.
+      if (worktreePath && !isTier6eDisabled()) {
         try {
           const stored = await getTriageResult(this.db as AnyDb, sanitizedIssue.id);
           const predicted = stored?.affectedFiles;
