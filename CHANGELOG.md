@@ -28,6 +28,28 @@ notes call out when a change affects only a single package.
 - **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
 - **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
 
+## [0.1.58] — 2026-05-14
+
+Bumps:
+- `@urateam/core`: 0.1.43 → 0.1.44
+- `@urateam/cli`: 0.1.45 → 0.1.46
+- `@urateam/dashboard`: 0.1.43 → 0.1.44
+- `create-urateam`: 0.1.46 → 0.1.47
+
+### Fixed (PR #312)
+
+- **Critical**: `parseJsonObject` (`executor/agent-stream.ts`) used non-greedy regex `\{[\s\S]*?\}` which truncates at the first inner `}`. The v2 triage prompt (shipped in v0.1.57) asks Haiku for nested objects (`riskAssessment`, `examples`, `testStrategy`), so production triage-v2 was silently skipping every issue with nested fields. Replaced with a string-aware bracket-counting extractor that handles nested objects/arrays correctly. Affects all 3 callers: `triage.ts`, `conflict.ts`, `slack-interface.ts`.
+
+### Chore (PR #312)
+
+- Tightened `issue: any` callback cascade in `pm/actions/triage.ts:103` to `Issue` from `@linear/sdk` (now possible after the `linearClient: LinearClient` fix in v0.1.57).
+- Added a code comment explaining why `parsed.pipelineLabel` from the Haiku response is intentionally discarded (routing is authoritative from `forceNeedsDesign` / `hasBug` / `complexity`).
+
+### Tests
+
+- 8 new `parseJsonObject` regression tests (flat, nested, array-of-objects, surrounded-by-prose, brace-in-string, escaped-quote, no-match, malformed).
+- 1 new `triageNewIssues` integration test asserting `URATEAM_DISABLE_TRIAGE_V2=true` produces a description with only `**Acceptance Criteria:**` (no v2 sections leak through).
+- Full sweep: 1957 core tests pass.
 ## [0.1.57] — 2026-05-14
 
 Bumps:
