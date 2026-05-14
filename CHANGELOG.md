@@ -28,6 +28,17 @@ notes call out when a change affects only a single package.
 - **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
 - **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
 
+## [0.1.60] — 2026-05-14
+
+Bumps:
+- `@urateam/core`: 0.1.45 → 0.1.46
+- `@urateam/cli`: 0.1.47 → 0.1.48
+- `@urateam/dashboard`: 0.1.45 → 0.1.46
+- `create-urateam`: 0.1.48 → 0.1.49
+
+### Fixed
+- **Triage v2 affectedFiles bullet/backtick contamination** (#318): When Haiku occasionally echoed the surrounding markdown list style into the `affectedFiles` JSON array (e.g. `"* CLAUDE.md"`), the downstream `computeAffectedFilesPredictionQuality` string-equality compare produced `intersection=0` even when the prediction was accurate. The first real `pm.triage_quality_score` event from the v0.1.59 soak (BEC-218: predicted=5, actual=4, intersection=0) surfaced this. `parseTriageV2Extensions` (`pm/types.ts`) now strips leading `-`/`*`/`+`/`N.`/`N)` bullets and surrounding backticks from each entry before Zod validation, dropping entries that normalize to empty. `parseAffectedFilesFromDescription` (`pm/triage-prediction-quality.ts`) applies the same normalization as defense-in-depth so descriptions on disk from pre-fix runs still parse cleanly.
+
 ## [0.1.59] — 2026-05-14
 
 Bumps:
