@@ -70,7 +70,11 @@ export function computeAffectedFilesPredictionQuality(
  */
 export function parseAffectedFilesFromDescription(description: string): string[] | undefined {
   // Match the **Affected Files:** section. Ends at: blank line, next **header**, or end.
-  const match = /\*\*Affected Files:\*\*\s*\n([\s\S]*?)(?:\n\n|\n\*\*|$)/.exec(description);
+  // Use `[ \t]*\r?\n` (horizontal whitespace + line ending) for the header-line consumer,
+  // not `\s*\n` — `\s*` is greedy and would eat the blank-line newline that should
+  // serve as the section terminator, causing an empty section to capture all the way
+  // to EOF.
+  const match = /\*\*Affected Files:\*\*[ \t]*\r?\n([\s\S]*?)(?:\n\n|\n\*\*|$)/.exec(description);
   if (!match) return undefined;
 
   const block = match[1] ?? "";
