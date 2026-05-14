@@ -52,6 +52,30 @@ describe("parseAffectedFilesFromDescription", () => {
       "src/beta.ts",
     ]);
   });
+
+  it("handles * bullets in addition to - (forward-compat for v0.1.59 dirty descriptions)", () => {
+    const description = `**Affected Files:**\n* src/x.ts\n* src/y.ts`;
+    expect(parseAffectedFilesFromDescription(description)).toEqual([
+      "src/x.ts",
+      "src/y.ts",
+    ]);
+  });
+
+  it("strips surrounding backticks from path entries", () => {
+    const description = `**Affected Files:**\n- \`src/a.ts\`\n* \`src/b.ts\``;
+    expect(parseAffectedFilesFromDescription(description)).toEqual([
+      "src/a.ts",
+      "src/b.ts",
+    ]);
+  });
+
+  it("handles numbered-list bullets", () => {
+    const description = `**Affected Files:**\n1. src/foo.ts\n2) src/bar.ts`;
+    expect(parseAffectedFilesFromDescription(description)).toEqual([
+      "src/foo.ts",
+      "src/bar.ts",
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
