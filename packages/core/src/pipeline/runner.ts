@@ -116,7 +116,12 @@ import {
   pipelineTypecheckFailedEvent,
   pipelineSpecVsImplFailedEvent,
   pipelineAutoDeepReviewBumpedEvent,
+  pmTriageQualityScoreEvent,
 } from "../audit/index.js";
+import {
+  computeAffectedFilesPredictionQuality,
+  parseAffectedFilesFromDescription,
+} from "../pm/triage-prediction-quality.js";
 import { matchesAnyPattern } from "../util/glob.js";
 import { findScratchFiles } from "./scratch-file-guard.js";
 import { runTypecheck } from "./typecheck-gate.js";
@@ -2616,6 +2621,30 @@ export class PipelineRunner {
           }, // end withBranchLock fn
         ); // end withBranchLock
       }); // end pushQueue.enqueue
+
+      // Tier 6e — emit triage prediction-quality audit event. Fail-open: any
+      // error (parse, git, DB write) is logged and swallowed so telemetry
+      // never blocks pipeline completion.
+      if (worktreePath) {
+        try {
+          const predicted = parseAffectedFilesFromDescription(sanitizedIssue.description);
+          const actualFiles = await getChangedFiles(worktreePath, repoConfig.defaultBranch);
+          const quality = computeAffectedFilesPredictionQuality(predicted, actualFiles);
+          await logAuditEvent(
+            this.db as AnyDb,
+            pmTriageQualityScoreEvent({
+              runId,
+              issueId: sanitizedIssue.id,
+              ...quality,
+            }),
+          );
+        } catch (qualityErr) {
+          runLog.warn(
+            { err: qualityErr instanceof Error ? qualityErr.message : String(qualityErr) },
+            "triage-quality-score: emission failed — skipping (fail-open)",
+          );
+        }
+      }
 
       await db
         .update(pipelineRuns)

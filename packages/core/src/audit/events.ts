@@ -921,3 +921,39 @@ export function pipelineSpecVsImplFailedEvent(args: {
     },
   });
 }
+
+/**
+ * Tier 6e — emitted after each successful push. Records how closely triage
+ * v2's `affectedFiles` prediction matched the actual changed files in the
+ * final diff. When `hasV2Prediction` is false the triage stage ran v1 and
+ * the prediction fields are zeroed out.
+ *
+ * Payload is bounded: `missed` and `unexpected` are capped at 50 paths each
+ * to keep the audit row within the ~2 KB target.
+ */
+export function pmTriageQualityScoreEvent(args: {
+  runId: string;
+  issueId: string;
+  hasV2Prediction: boolean;
+  predicted: number;
+  actual: number;
+  intersection: number;
+  missed: string[];
+  unexpected: string[];
+}): AuditEvent {
+  return base({
+    eventType: "pm.triage_quality_score",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      hasV2Prediction: args.hasV2Prediction,
+      predicted: args.predicted,
+      actual: args.actual,
+      intersection: args.intersection,
+      missed: args.missed.slice(0, 50),
+      unexpected: args.unexpected.slice(0, 50),
+    },
+  });
+}
