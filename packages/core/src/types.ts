@@ -493,6 +493,12 @@ export const AuditEventTypeSchema = z.enum([
   "pm.approval_requested", "pm.approval_resolved",
   "pm.issue_promoted", "pm.issue_deprioritized", "pm.issue_cancelled",
   "pm.triage_classified",
+  /** Tier 6e — emitted after each successful push. Compares triage v2's
+   *  `affectedFiles` prediction against the actual diff to track prediction
+   *  quality over time. When `hasV2Prediction` is false the triage stage
+   *  ran v1 (no prediction) and only `actual` / `runId` / `issueId` are
+   *  meaningful. */
+  "pm.triage_quality_score",
   "pm.agent_branch_swept",
   "pm.skipped_circuit_breaker",
   "pm.recovered_long_running",

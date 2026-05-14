@@ -59,3 +59,25 @@ export function computeAffectedFilesPredictionQuality(
     unexpected,
   };
 }
+
+/**
+ * Parse the `**Affected Files:**` section written by `appendTriageSectionsToDescription`
+ * from a Linear issue description.
+ *
+ * Returns `undefined` when no section is found (v1 triage path, no prediction).
+ * Returns an empty array when the section exists but has no list items (v2 triage,
+ * zero predicted files).
+ */
+export function parseAffectedFilesFromDescription(description: string): string[] | undefined {
+  // Match the **Affected Files:** section. Ends at: blank line, next **header**, or end.
+  const match = /\*\*Affected Files:\*\*\s*\n([\s\S]*?)(?:\n\n|\n\*\*|$)/.exec(description);
+  if (!match) return undefined;
+
+  const block = match[1] ?? "";
+  const paths = block
+    .split("\n")
+    .map((line) => line.replace(/^-\s*/, "").trim())
+    .filter((line) => line.length > 0);
+
+  return paths;
+}
