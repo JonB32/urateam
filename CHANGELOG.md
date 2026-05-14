@@ -36,7 +36,16 @@ Bumps:
 - `@urateam/dashboard`: 0.1.44 → 0.1.45
 - `create-urateam`: 0.1.47 → 0.1.48
 
-<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+### Added (Tier 6e, PR #314)
+
+- **New audit event `pm.triage_quality_score`** — emitted by `pipeline/runner.ts` after each successful push. Records how closely triage v2's `affectedFiles` prediction matched the actual changed files. Audit-event count: 51 → **52**.
+- **`pmTriageQualityScoreEvent(args)`** helper in `audit/events.ts`. Payload includes `runId`, `issueId`, `hasV2Prediction`, `predicted`, `actual`, `intersection`, plus `missed` and `unexpected` path lists (each capped at 50 entries to keep the audit row ≤ ~2 KB).
+- **`parseAffectedFilesFromDescription(description)`** in `pm/triage-prediction-quality.ts` — reads the `**Affected Files:**` section that `appendTriageSectionsToDescription` wrote, returns `undefined` when no section is present (v1 triage path).
+- Runner emission is **fail-open**: any error in parse, `getChangedFiles`, or audit write is logged at warn and swallowed. Telemetry can never block pipeline completion.
+
+### Notes
+
+- This release was **dogfooded end-to-end**: BEC-217 was filed in Linear and the dogfood agent itself classified, planned, implemented, tested, and opened the draft PR via the v2 triage pipeline. One regex edge case (`parseAffectedFilesFromDescription` empty-section path) was caught by the agent's own test, fixed by the operator, and merged. The full soak validates v0.1.58's `parseJsonObject` nested-JSON fix in production.
 ## [0.1.58] — 2026-05-14
 
 Bumps:
