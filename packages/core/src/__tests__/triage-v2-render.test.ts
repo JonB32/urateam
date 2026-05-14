@@ -96,6 +96,24 @@ describe("renderTriageComment — v1 + v2 markdown contract", () => {
     expect(comment).not.toContain("### Risk Assessment");
   });
 
+  it("omits the entire Tier-6b block when v2 fields are present but all empty (Sonnet W1 fix)", () => {
+    const allEmpty: TriageResult = {
+      ...V1_RESULT,
+      assumptions: [],
+      examples: [],
+      affectedFiles: [],
+    };
+    const comment = renderTriageComment(allEmpty, {
+      forceNeedsDesign: false,
+      pipelineLabel: "bug",
+    });
+    expect(comment).not.toContain("### Assumptions");
+    expect(comment).not.toContain("### Examples");
+    expect(comment).not.toContain("### Affected Files");
+    expect(comment).not.toContain("### Test Strategy");
+    expect(comment).not.toContain("### Risk Assessment");
+  });
+
   it("prefixes the title with `(routed to needs-design)` when forceNeedsDesign", () => {
     const comment = renderTriageComment(V1_RESULT, {
       forceNeedsDesign: true,

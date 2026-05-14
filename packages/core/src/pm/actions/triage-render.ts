@@ -18,13 +18,21 @@ interface RenderOpts {
   pipelineLabel: string;
 }
 
-/** True iff `result` carries at least one Tier-6b field. */
+/**
+ * True iff `result` carries at least one non-empty Tier-6b field.
+ *
+ * Uses `?.length` rather than `?? `null-coalescing because an empty array
+ * is truthy in a boolean context — `[] ?? next` short-circuits to `[]` and
+ * `Boolean([]) === true`. We treat empty arrays as "no v2 content" so a
+ * caller who constructs `{assumptions: []}` doesn't get a Tier-6b block of
+ * five `(none)` placeholders.
+ */
 function hasV2Fields(result: TriageResult): boolean {
   return Boolean(
-    result.assumptions ??
-      result.examples ??
-      result.affectedFiles ??
-      result.testStrategy ??
+    result.assumptions?.length ||
+      result.examples?.length ||
+      result.affectedFiles?.length ||
+      result.testStrategy ||
       result.riskAssessment,
   );
 }
