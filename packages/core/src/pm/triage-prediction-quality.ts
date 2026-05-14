@@ -34,13 +34,13 @@ export function computeAffectedFilesPredictionQuality(
   const actualSet = new Set(actualDiff);
 
   const intersection = new Set<string>();
-  for (const p of predictedSet) {
-    if (actualSet.has(p)) intersection.add(p);
-  }
-
   const missed: string[] = [];
   for (const p of predictedSet) {
-    if (!actualSet.has(p)) missed.push(p);
+    if (actualSet.has(p)) {
+      intersection.add(p);
+    } else {
+      missed.push(p);
+    }
   }
   missed.sort();
 

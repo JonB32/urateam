@@ -1470,15 +1470,11 @@ export class PipelineRunner {
               }
             }
 
-            // Update coordination table with latest file changes from review-fix stage
+            // Update in-memory file list with latest changes from review-fix stage.
+            // No DB write needed here — coordination was already established at the
+            // start of the preceding main-stage loop and the run remains tracked.
             if (handoff?.filesChanged?.length) {
               allModifiedFiles = handoff.filesChanged;
-              await upsertActiveWork(db, {
-                runId,
-                issueId: sanitizedIssue.id,
-                stage: "implement",
-                filesModified: allModifiedFiles,
-              });
             }
           }
 
@@ -2727,13 +2723,12 @@ export class PipelineRunner {
             Array<{ modelId: string; inputTokens: number; outputTokens: number }>
           >();
           for (const mr of modelRows) {
-            const arr = modelsByStage.get(mr.stageRunId) ?? [];
-            arr.push({
+            if (!modelsByStage.has(mr.stageRunId)) modelsByStage.set(mr.stageRunId, []);
+            modelsByStage.get(mr.stageRunId)!.push({
               modelId: mr.modelId,
               inputTokens: mr.inputTokens,
               outputTokens: mr.outputTokens,
             });
-            modelsByStage.set(mr.stageRunId, arr);
           }
           const breakdown: StageCostBreakdown[] = stages.map((s: any) => ({
             stage: s.stage,
