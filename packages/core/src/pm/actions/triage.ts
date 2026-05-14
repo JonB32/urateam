@@ -1,3 +1,4 @@
+import type { LinearClient } from "@linear/sdk";
 import type { TriageResult } from "../types.js";
 import { parseTriageV2Extensions } from "../types.js";
 import { parseJsonObject } from "../../executor/agent-stream.js";
@@ -45,7 +46,7 @@ function isObserverOriginIssue(description: string | null | undefined): boolean 
 }
 
 export interface TriageInput {
-  linearClient: any; // LinearClient from @linear/sdk
+  linearClient: LinearClient;
   teamIds: string[];
   callClaude: (prompt: string) => Promise<string>;
   sanitize: (text: string) => string;
