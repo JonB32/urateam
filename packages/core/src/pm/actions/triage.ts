@@ -1,4 +1,4 @@
-import type { LinearClient } from "@linear/sdk";
+import type { Issue, LinearClient } from "@linear/sdk";
 import type { TriageResult } from "../types.js";
 import { parseTriageV2Extensions } from "../types.js";
 import { parseJsonObject } from "../../executor/agent-stream.js";
@@ -100,7 +100,7 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
   const results = (await runInBatches(
     issues.slice(0, MAX_ISSUES_PER_TICK),
     batchSize,
-    async (issue: any) => {
+    async (issue: Issue) => {
       try {
         if (isObserverOriginIssue(issue.description)) {
           const team = await issue.team;
@@ -205,6 +205,14 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
             ? parsed.approachSummary.trim()
             : "";
 
+        // `parsed.pipelineLabel` from the v2 prompt is INTENTIONALLY
+        // discarded here — Haiku's classification informs the response
+        // schema, but the authoritative pipeline routing happens below
+        // from `forceNeedsDesign` / `hasBug` / `complexity`. Wiring the
+        // model's self-classification directly into routing would let a
+        // prompt-injected issue self-route to `quick-fix` (escaping the
+        // bug-severity gate). Treat the model's `pipelineLabel` as
+        // telemetry only.
         const forceNeedsDesign = openQuestions.length > 0;
         const hasBug = labels.some((l: string) => l.toLowerCase() === "bug");
         const pipelineLabel = forceNeedsDesign
