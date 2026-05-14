@@ -28,6 +28,31 @@ notes call out when a change affects only a single package.
 - **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
 - **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
 
+## [0.1.57] — 2026-05-14
+
+Bumps:
+- `@urateam/core`: 0.1.42 → 0.1.43
+- `@urateam/cli`: 0.1.44 → 0.1.45
+- `@urateam/dashboard`: 0.1.42 → 0.1.43
+- `create-urateam`: 0.1.45 → 0.1.46
+
+### Added (Triage v2 — Tier 6a + 6b, PR #310)
+
+- **Anthropic-best-practices v2 triage prompt** (`packages/core/src/pm/actions/triage-prompt.ts`): XML-delineated sections (`<role>`, `<output_format>`, `<examples>`, `<issue>`, `<reasoning>`), role + audience priming, 12 multishot examples (2 positive + 1 anti-example per pipeline label), scratchpad CoT, JSON prefill. Prefix budget < 15K chars.
+- **Five new optional `TriageResult` fields** (`packages/core/src/pm/types.ts`): `assumptions` (≤10), `examples` (≤3 `{scenario, expected}`), `affectedFiles` (≤20), `testStrategy` (`{unit?, integration?}`), `riskAssessment` (`{severity, areas≤5}`). Pre-zod truncation; malformed inner shapes dropped silently; severity-enum miss drops the entire `riskAssessment` block.
+- **Linear comment + description rendering** (`pm/actions/triage-render.ts`): `renderTriageComment` adds 5 new `### Headed` sections with `(none)` placeholders; `appendTriageSectionsToDescription` is idempotent (re-triage doesn't duplicate sections).
+- **Operator escape hatch**: `URATEAM_DISABLE_TRIAGE_V2=true` (strict equality on `"true"`) falls back to v1 prompt + schema. Read at call time — flipping takes effect on the next PM tick without daemon restart.
+- **Tier 6e foundation**: `pm/triage-prediction-quality.ts:computeAffectedFilesPredictionQuality` — pure function comparing triage's predicted `affectedFiles` against the actual diff. Returns `{hasV2Prediction, predicted, actual, intersection, missed, unexpected}`.
+
+### Chore
+
+- **`TriageInput.linearClient`** tightened from `any` to `LinearClient` (`@linear/sdk`) per the CLAUDE.md new-code convention.
+- **Spec-driven development discipline**: full spec-kit cycle (`/speckit-specify` → `/speckit-plan` → `/speckit-tasks` → TDD implementation) under `specs/001-triage-v2/`. Constitution v1.0.0 (7 principles) signed off in `plan.md`.
+
+### Tests
+
+- 57 new tests across `triage-v2-{schema,prompt,render,prediction,env-toggle}.test.ts`. Full sweep: 1948 core tests pass; `pnpm -w typecheck` clean.
+
 ## [0.1.56] — 2026-05-13
 
 Bumps:
