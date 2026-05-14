@@ -78,9 +78,18 @@ export function parseAffectedFilesFromDescription(description: string): string[]
   if (!match) return undefined;
 
   const block = match[1] ?? "";
+  // Strip any leading bullet (-, *, +, 1., 1)) and surrounding backticks. Triage v2
+  // normalizes these at parse time (`parseTriageV2Extensions`), but descriptions
+  // already on disk from runs prior to that fix may still contain bullet-prefixed
+  // paths — handle both shapes for forward compatibility.
   const paths = block
     .split("\n")
-    .map((line) => line.replace(/^-\s*/, "").trim())
+    .map((line) =>
+      line
+        .replace(/^\s*(?:[-*+]|\d+[.)])\s*/, "")
+        .replace(/^`+|`+$/g, "")
+        .trim(),
+    )
     .filter((line) => line.length > 0);
 
   return paths;

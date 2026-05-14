@@ -129,4 +129,39 @@ describe("parseTriageV2Extensions — pre-zod truncation + filter", () => {
   it("returns an empty object when none of the v2 fields are present", () => {
     expect(parseTriageV2Extensions({ priority: 1, labels: [] })).toEqual({});
   });
+
+  it("strips leading markdown bullets from affectedFiles entries (Haiku echo bug)", () => {
+    const parsed = parseTriageV2Extensions({
+      affectedFiles: [
+        "* CLAUDE.md",
+        "- src/foo.ts",
+        "+ src/bar.ts",
+        "1. src/baz.ts",
+        "2) src/qux.ts",
+        "src/already-clean.ts",
+      ],
+    });
+    expect(parsed.affectedFiles).toEqual([
+      "CLAUDE.md",
+      "src/foo.ts",
+      "src/bar.ts",
+      "src/baz.ts",
+      "src/qux.ts",
+      "src/already-clean.ts",
+    ]);
+  });
+
+  it("strips surrounding backticks from affectedFiles entries", () => {
+    const parsed = parseTriageV2Extensions({
+      affectedFiles: ["`src/foo.ts`", "``src/bar.ts``", "* `src/baz.ts`"],
+    });
+    expect(parsed.affectedFiles).toEqual(["src/foo.ts", "src/bar.ts", "src/baz.ts"]);
+  });
+
+  it("drops affectedFiles entries that become empty after normalization", () => {
+    const parsed = parseTriageV2Extensions({
+      affectedFiles: ["- ", "src/keep.ts", "`"],
+    });
+    expect(parsed.affectedFiles).toEqual(["src/keep.ts"]);
+  });
 });

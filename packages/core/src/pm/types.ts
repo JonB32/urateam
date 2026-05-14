@@ -199,7 +199,22 @@ export function parseTriageV2Extensions(raw: unknown): TriageV2Extensions {
   const assumptions = collectStringArray("assumptions", TRIAGE_V2_CAPS.assumptions);
   if (assumptions) out.assumptions = assumptions;
   const affectedFiles = collectStringArray("affectedFiles", TRIAGE_V2_CAPS.affectedFiles);
-  if (affectedFiles) out.affectedFiles = affectedFiles;
+  if (affectedFiles) {
+    // Haiku sometimes echoes markdown-bullet syntax from the issue description
+    // into the affectedFiles array as a string prefix (`"* CLAUDE.md"`,
+    // `"- src/foo.ts"`, `"1. src/bar.ts"`). Strip those + surrounding backticks
+    // so downstream consumers (Linear comment render, description appender,
+    // Tier 6e prediction-quality comparison) see raw paths.
+    const normalized = affectedFiles
+      .map((p) =>
+        p
+          .replace(/^\s*(?:[-*+]|\d+[.)])\s*/, "") // leading bullet (-, *, +, 1., 1)) — \s* not \s+ so a lone bullet char also gets stripped
+          .replace(/^`+|`+$/g, "")                  // surrounding backticks
+          .trim(),
+      )
+      .filter((p) => p.length > 0);
+    if (normalized.length > 0) out.affectedFiles = normalized;
+  }
 
   // examples — drop entries missing either field.
   if (Array.isArray(r.examples)) {
