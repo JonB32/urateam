@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { createDb } from "@urateam/core";
-import type { TriageQualityEvent } from "@urateam/core";
+import type { AnyDb, TriageQualityEvent } from "@urateam/core";
 import { readTriageQualityEvents } from "@urateam/core";
 
 // ─── Formatter ────────────────────────────────────────────────────────────────
@@ -24,54 +24,47 @@ export function formatTriageQualityText(
   }
 
   const v2Events = events.filter((e) => e.payload.hasV2Prediction);
-  const nonV2Events = events.filter((e) => !e.payload.hasV2Prediction);
+  const nonV2Count = events.length - v2Events.length;
 
-  // ── Summary ──────────────────────────────────────────────────────────────
-  const avgPredicted =
-    v2Events.length
-      ? v2Events.reduce((s, e) => s + e.payload.predicted, 0) / v2Events.length
-      : 0;
-  const avgActual =
-    v2Events.length
-      ? v2Events.reduce((s, e) => s + e.payload.actual, 0) / v2Events.length
-      : 0;
+  // ── Summary (single pass over v2Events) ──────────────────────────────────
+  let sumPredicted = 0;
+  let sumActual = 0;
+  const intersectionRatios: number[] = [];
+  const missRates: number[] = [];
+  const unexpectedRates: number[] = [];
+  const missedCounts = new Map<string, number>();
+  const unexpectedCounts = new Map<string, number>();
 
-  const intersectionRatios = v2Events
-    .filter((e) => Math.max(e.payload.predicted, e.payload.actual) > 0)
-    .map(
-      (e) =>
-        e.payload.intersection /
-        Math.max(e.payload.predicted, e.payload.actual),
-    );
+  for (const e of v2Events) {
+    const { predicted, actual, intersection, missed, unexpected } = e.payload;
+    sumPredicted += predicted;
+    sumActual += actual;
+    const denom = Math.max(predicted, actual);
+    if (denom > 0) intersectionRatios.push(intersection / denom);
+    if (predicted > 0) missRates.push(missed.length / predicted);
+    if (actual > 0) unexpectedRates.push(unexpected.length / actual);
+    for (const f of missed) missedCounts.set(f, (missedCounts.get(f) ?? 0) + 1);
+    for (const f of unexpected) unexpectedCounts.set(f, (unexpectedCounts.get(f) ?? 0) + 1);
+  }
+
+  const avgPredicted = v2Events.length ? sumPredicted / v2Events.length : 0;
+  const avgActual = v2Events.length ? sumActual / v2Events.length : 0;
   const avgIntersectionRatio =
     intersectionRatios.length
-      ? intersectionRatios.reduce((s, r) => s + r, 0) /
-        intersectionRatios.length
+      ? intersectionRatios.reduce((s, r) => s + r, 0) / intersectionRatios.length
       : 0;
-
-  const missRates = v2Events
-    .filter((e) => e.payload.predicted > 0)
-    .map((e) => e.payload.missed.length / e.payload.predicted);
   const avgMissRate =
     missRates.length
       ? missRates.reduce((s, r) => s + r, 0) / missRates.length
       : 0;
-
-  const unexpectedRates = v2Events
-    .filter((e) => e.payload.actual > 0)
-    .map((e) => e.payload.unexpected.length / e.payload.actual);
   const avgUnexpectedRate =
     unexpectedRates.length
       ? unexpectedRates.reduce((s, r) => s + r, 0) / unexpectedRates.length
       : 0;
 
   lines.push("Summary:");
-  lines.push(
-    `  Runs with v2 prediction:    ${v2Events.length}`,
-  );
-  lines.push(
-    `  Runs without v2 prediction:  ${nonV2Events.length}`,
-  );
+  lines.push(`  Runs with v2 prediction:    ${v2Events.length}`);
+  lines.push(`  Runs without v2 prediction:  ${nonV2Count}`);
   lines.push(`  Avg predicted count:        ${avgPredicted.toFixed(1)}`);
   lines.push(`  Avg actual count:           ${avgActual.toFixed(1)}`);
   lines.push(
@@ -86,12 +79,6 @@ export function formatTriageQualityText(
   lines.push("");
 
   // ── Top missed files ──────────────────────────────────────────────────────
-  const missedCounts = new Map<string, number>();
-  for (const e of v2Events) {
-    for (const f of e.payload.missed) {
-      missedCounts.set(f, (missedCounts.get(f) ?? 0) + 1);
-    }
-  }
   const topMissed = [...missedCounts.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, 10);
@@ -107,12 +94,6 @@ export function formatTriageQualityText(
   lines.push("");
 
   // ── Top unexpected files ──────────────────────────────────────────────────
-  const unexpectedCounts = new Map<string, number>();
-  for (const e of v2Events) {
-    for (const f of e.payload.unexpected) {
-      unexpectedCounts.set(f, (unexpectedCounts.get(f) ?? 0) + 1);
-    }
-  }
   const topUnexpected = [...unexpectedCounts.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, 10);
@@ -152,7 +133,7 @@ export function formatTriageQualityText(
 
 // ─── Database helper ──────────────────────────────────────────────────────────
 
-async function openDb(opts: { log: (msg: string) => void }): Promise<any> {
+async function openDb(opts: { log: (msg: string) => void }): Promise<AnyDb> {
   const conn = process.env.DATABASE_URL;
   if (!conn) {
     opts.log(
@@ -166,7 +147,7 @@ async function openDb(opts: { log: (msg: string) => void }): Promise<any> {
 // ─── Commander wiring ─────────────────────────────────────────────────────────
 
 function fail(err: unknown): never {
-  console.error(err instanceof Error ? err.message : String(err));
+  process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
   process.exit(1);
 }
 
@@ -188,7 +169,9 @@ export const triageQualityCommand = new Command("triage-quality")
       const format = opts.format === "json" ? "json" : "text";
 
       try {
-        const db = await openDb({ log: (msg) => console.warn(msg) });
+        const db = await openDb({
+          log: (msg) => process.stderr.write(msg + "\n"),
+        });
         const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
 
         const events = await readTriageQualityEvents(db, {
@@ -198,12 +181,12 @@ export const triageQualityCommand = new Command("triage-quality")
         });
 
         if (format === "json") {
-          console.log(JSON.stringify(events, null, 2));
+          process.stdout.write(JSON.stringify(events, null, 2) + "\n");
           return;
         }
 
         // text mode
-        console.log(formatTriageQualityText(events, days, limit));
+        process.stdout.write(formatTriageQualityText(events, days, limit) + "\n");
       } catch (err) {
         fail(err);
       }

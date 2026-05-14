@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { createDb } from "../db/client.js";
+import { createDb, type AnyDb } from "../db/client.js";
 import { auditEvents } from "../db/schema.js";
 import { readTriageQualityEvents } from "../audit/triage-quality-reader.js";
 
-let db: any;
+let db: AnyDb;
 
 beforeEach(async () => {
   db = await createDb({ connectionString: ":memory:" });

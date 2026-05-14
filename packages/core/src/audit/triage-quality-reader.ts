@@ -41,22 +41,21 @@ export async function readTriageQualityEvents(
   opts: ReadTriageQualityEventsOpts = {},
 ): Promise<TriageQualityEvent[]> {
   const limit = opts.limit ?? 500;
-  const conditions: any[] = [
-    eq(auditEvents.eventType, "pm.triage_quality_score"),
-  ];
 
-  if (opts.sinceMs !== undefined) {
-    conditions.push(gte(auditEvents.timestamp, new Date(opts.sinceMs)));
-  }
+  const typeFilter = eq(auditEvents.eventType, "pm.triage_quality_score");
+  const whereClause =
+    opts.sinceMs !== undefined
+      ? and(typeFilter, gte(auditEvents.timestamp, new Date(opts.sinceMs)))
+      : typeFilter;
 
-  const rows = await (db as any)
+  const rows = await db
     .select()
     .from(auditEvents)
-    .where(conditions.length === 1 ? conditions[0] : and(...conditions))
+    .where(whereClause)
     .orderBy(desc(auditEvents.timestamp))
     .limit(limit);
 
-  return rows.map((row: any): TriageQualityEvent => {
+  return rows.map((row): TriageQualityEvent => {
     let payload: TriageQualityPayload;
     try {
       const parsed = JSON.parse(row.payload ?? "{}");
