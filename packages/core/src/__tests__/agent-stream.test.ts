@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { parseJsonObject } from "../executor/agent-stream.js";
 import {
   consumeAgentStream,
   StageStalledError,
@@ -142,5 +143,52 @@ describe("consumeAgentStream — operator abort", () => {
     const result = await consumeAgentStream(fast(), { abortSignal: controller.signal });
     controller.abort(); // post-hoc, should not throw or matter
     expect(result.lastText).toBe("done");
+  });
+});
+
+describe("parseJsonObject — nested-JSON handling (triage v2 regression)", () => {
+  it("parses a flat object", () => {
+    expect(parseJsonObject('{"a":1,"b":"x"}')).toEqual({ a: 1, b: "x" });
+  });
+
+  it("parses a nested object (riskAssessment shape)", () => {
+    const text = '{"priority":2,"riskAssessment":{"severity":"low","areas":["api"]}}';
+    expect(parseJsonObject(text)).toEqual({
+      priority: 2,
+      riskAssessment: { severity: "low", areas: ["api"] },
+    });
+  });
+
+  it("parses an object with array-of-objects (examples shape)", () => {
+    const text = '{"examples":[{"scenario":"a","expected":"b"},{"scenario":"c","expected":"d"}]}';
+    expect(parseJsonObject(text)).toEqual({
+      examples: [
+        { scenario: "a", expected: "b" },
+        { scenario: "c", expected: "d" },
+      ],
+    });
+  });
+
+  it("extracts a JSON object surrounded by prose", () => {
+    const text = 'Here is the result: {"a":1,"nested":{"b":2}} done.';
+    expect(parseJsonObject(text)).toEqual({ a: 1, nested: { b: 2 } });
+  });
+
+  it("handles strings containing braces (string-aware brace counting)", () => {
+    const text = '{"msg":"this has } a brace","ok":true}';
+    expect(parseJsonObject(text)).toEqual({ msg: "this has } a brace", ok: true });
+  });
+
+  it("handles escaped quotes inside strings", () => {
+    const text = '{"msg":"she said \\"hi\\"","ok":true}';
+    expect(parseJsonObject(text)).toEqual({ msg: 'she said "hi"', ok: true });
+  });
+
+  it("returns null when no object is present", () => {
+    expect(parseJsonObject("just prose, no json")).toBeNull();
+  });
+
+  it("returns null on malformed JSON", () => {
+    expect(parseJsonObject('{"a":1,"b":')).toBeNull();
   });
 });
