@@ -7,6 +7,7 @@ import { resolveIssueRelations } from "../../util/linear.js";
 import { createLogger } from "../../logger.js";
 import type { AnyDb } from "../../db/client.js";
 import { logAuditEventUnchecked, pmTriageClassifiedEvent } from "../../audit/index.js";
+import { upsertTriageResult } from "../triage-results-store.js";
 import {
   buildTriageV1Prompt,
   buildTriageV2Prompt,
@@ -305,6 +306,13 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
             label: pipelineLabel,
             rationale: String(rationale),
           }));
+          // Tier 6e — persist v2 prediction so the runner can read it from
+          // DB instead of parsing the description text (which gets sliced at
+          // 4000 chars by mapIssueToSchema, losing the appended v2 sections
+          // for realistic issues). Empty extensions are still written so
+          // "triage ran but emitted no prediction" is distinguishable from
+          // "triage hasn't run" (no row).
+          void upsertTriageResult(input.db, issue.identifier, v2Fields);
         }
         log.info({ issueId: issue.identifier, priority, labels: issueLabels, pipelineLabel, complexity }, "triaged issue");
         return result;

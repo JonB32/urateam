@@ -255,6 +255,12 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
 
   CREATE INDEX IF NOT EXISTS idx_review_model_runs_stage_run_id
     ON review_model_runs(stage_run_id);
+
+  CREATE TABLE IF NOT EXISTS triage_results (
+    issue_id TEXT PRIMARY KEY,
+    v2_prediction TEXT NOT NULL DEFAULT '{}',
+    triaged_at ${ts} NOT NULL DEFAULT (${now})
+  );
 `;
 }
 

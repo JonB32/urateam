@@ -128,6 +128,14 @@ export const webhookDedup = sqliteTable("webhook_dedup", {
   expiresAt: crossTimestamp("expires_at").notNull(),
 });
 
+export const triageResults = sqliteTable("triage_results", {
+  issueId: text("issue_id").primaryKey(),
+  v2Prediction: text("v2_prediction").notNull().default("{}"),
+  triagedAt: crossTimestamp("triaged_at")
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
 export const pmApprovals = sqliteTable("pm_approvals", {
   id: text("id").primaryKey(),
   issueId: text("issue_id").notNull(),

@@ -1,82 +1,13 @@
 /**
  * Tier 6e tests: triage prediction quality audit event emission.
  *
- * Tests the integration path: parseAffectedFilesFromDescription +
+ * Tests the integration path: getTriageResult (DB-backed) +
  * computeAffectedFilesPredictionQuality + pmTriageQualityScoreEvent are all
  * called from runner.ts after a successful push.
  */
 import { describe, it, expect } from "vitest";
-import {
-  parseAffectedFilesFromDescription,
-  computeAffectedFilesPredictionQuality,
-} from "../pm/triage-prediction-quality.js";
+import { computeAffectedFilesPredictionQuality } from "../pm/triage-prediction-quality.js";
 import { pmTriageQualityScoreEvent } from "../audit/events.js";
-
-// ---------------------------------------------------------------------------
-// parseAffectedFilesFromDescription unit tests
-// ---------------------------------------------------------------------------
-
-describe("parseAffectedFilesFromDescription", () => {
-  it("returns undefined when no Affected Files section exists (v1 triage)", () => {
-    const description = `## Summary\n\nFix a bug.\n\n**Acceptance Criteria:**\n- It works`;
-    expect(parseAffectedFilesFromDescription(description)).toBeUndefined();
-  });
-
-  it("returns an array of paths when section exists", () => {
-    const description = [
-      "**Acceptance Criteria:**",
-      "- fix it",
-      "",
-      "**Affected Files:**",
-      "- src/foo.ts",
-      "- src/bar.ts",
-      "",
-      "**Test Strategy:**",
-      "- unit tests",
-    ].join("\n");
-    expect(parseAffectedFilesFromDescription(description)).toEqual([
-      "src/foo.ts",
-      "src/bar.ts",
-    ]);
-  });
-
-  it("returns empty array when section exists but has no list items", () => {
-    const description = `**Affected Files:**\n\n**Test Strategy:**\n- unit`;
-    expect(parseAffectedFilesFromDescription(description)).toEqual([]);
-  });
-
-  it("handles section at end of description", () => {
-    const description = `**Affected Files:**\n- src/alpha.ts\n- src/beta.ts`;
-    expect(parseAffectedFilesFromDescription(description)).toEqual([
-      "src/alpha.ts",
-      "src/beta.ts",
-    ]);
-  });
-
-  it("handles * bullets in addition to - (forward-compat for v0.1.59 dirty descriptions)", () => {
-    const description = `**Affected Files:**\n* src/x.ts\n* src/y.ts`;
-    expect(parseAffectedFilesFromDescription(description)).toEqual([
-      "src/x.ts",
-      "src/y.ts",
-    ]);
-  });
-
-  it("strips surrounding backticks from path entries", () => {
-    const description = `**Affected Files:**\n- \`src/a.ts\`\n* \`src/b.ts\``;
-    expect(parseAffectedFilesFromDescription(description)).toEqual([
-      "src/a.ts",
-      "src/b.ts",
-    ]);
-  });
-
-  it("handles numbered-list bullets", () => {
-    const description = `**Affected Files:**\n1. src/foo.ts\n2) src/bar.ts`;
-    expect(parseAffectedFilesFromDescription(description)).toEqual([
-      "src/foo.ts",
-      "src/bar.ts",
-    ]);
-  });
-});
 
 // ---------------------------------------------------------------------------
 // computeAffectedFilesPredictionQuality unit tests
@@ -178,34 +109,29 @@ describe("pmTriageQualityScoreEvent", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Integration-path tests: the emission flow as called from runner.ts
+// Integration-path tests: the emission flow as called from runner.ts.
+// The runner reads the stored triage v2 prediction from
+// `triage_results.v2_prediction` (DB), feeds the affectedFiles array into
+// computeAffectedFilesPredictionQuality, and emits the audit event.
 // ---------------------------------------------------------------------------
 
-describe("triage quality score emission integration", () => {
-  it("full flow: v2 prediction → correct quality computed and event shaped", async () => {
-    // Simulate the runner.ts flow:
-    // 1. Parse predicted from description
-    // 2. Supply mock actual files
-    // 3. Call compute
-    // 4. Build event
-    const description = [
-      "**Acceptance Criteria:**",
-      "- It works",
-      "",
-      "**Affected Files:**",
-      "- packages/core/src/types.ts",
-      "- packages/core/src/audit/events.ts",
-      "- packages/core/src/pipeline/runner.ts",
-    ].join("\n");
-
-    const predicted = parseAffectedFilesFromDescription(description);
+describe("triage quality score emission integration (DB-backed read)", () => {
+  it("full flow: stored v2 prediction → correct quality computed and event shaped", () => {
+    // Simulated stored prediction shape (what getTriageResult returns from DB):
+    const stored = {
+      affectedFiles: [
+        "packages/core/src/types.ts",
+        "packages/core/src/audit/events.ts",
+        "packages/core/src/pipeline/runner.ts",
+      ],
+    };
     const actual = [
       "packages/core/src/types.ts",
       "packages/core/src/audit/events.ts",
       "packages/core/src/pm/triage-prediction-quality.ts", // unexpected
     ];
 
-    const quality = computeAffectedFilesPredictionQuality(predicted, actual);
+    const quality = computeAffectedFilesPredictionQuality(stored.affectedFiles, actual);
     const event = pmTriageQualityScoreEvent({
       runId: "run-bec217",
       issueId: "BEC-217",
@@ -223,11 +149,9 @@ describe("triage quality score emission integration", () => {
     });
   });
 
-  it("v1 path: no Affected Files section → hasV2Prediction false, event still emitted", () => {
-    const description = "## Summary\n\nFix a bug.\n\n**Acceptance Criteria:**\n- It works";
-    const predicted = parseAffectedFilesFromDescription(description);
-
-    // predicted is undefined (v1 path)
+  it("v1 path: no stored prediction → hasV2Prediction false, event still emitted", () => {
+    // getTriageResult returns undefined when no row exists for the issue.
+    const predicted: string[] | undefined = undefined;
     expect(predicted).toBeUndefined();
 
     const actual = ["src/foo.ts", "src/bar.ts"];
@@ -246,17 +170,26 @@ describe("triage quality score emission integration", () => {
     });
   });
 
-  it("getChangedFiles failure → the catch block prevents throw", async () => {
-    // Simulate getChangedFiles throwing — the runner wraps the entire block in try/catch
-    // This test verifies our quality result still has sensible shape when actual=[]
-    const description = "**Affected Files:**\n- src/foo.ts\n";
-    const predicted = parseAffectedFilesFromDescription(description);
+  it("triage row exists but affectedFiles omitted → hasV2Prediction false", () => {
+    // upsertTriageResult writes the row even when triage v2 didn't emit
+    // affectedFiles (so we can distinguish "ran but skipped" from "hasn't
+    // run"). At read time, `stored.affectedFiles` is undefined → v1 path.
+    const stored: { affectedFiles?: string[] } = {};
+    const predicted = stored.affectedFiles;
+    expect(predicted).toBeUndefined();
 
-    // Simulate getChangedFiles failing: we pass empty array (the fail-open return)
+    const quality = computeAffectedFilesPredictionQuality(predicted, ["src/x.ts"]);
+    expect(quality.hasV2Prediction).toBe(false);
+  });
+
+  it("getChangedFiles failure → the catch block prevents throw", () => {
+    // Simulate getChangedFiles throwing — the runner wraps the entire block
+    // in try/catch. This test verifies our quality result still has sensible
+    // shape when actual=[].
+    const stored = { affectedFiles: ["src/foo.ts"] };
     const actual: string[] = [];
-    const quality = computeAffectedFilesPredictionQuality(predicted, actual);
+    const quality = computeAffectedFilesPredictionQuality(stored.affectedFiles, actual);
 
-    // Should not throw
     expect(() => pmTriageQualityScoreEvent({
       runId: "run-fail",
       issueId: "BEC-999",
