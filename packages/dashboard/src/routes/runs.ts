@@ -404,6 +404,34 @@ export function createRunsRouter(
   router.post("/cli/runs/:id/cancel", requireCliToken, cliStopHandler("cancel"));
   router.post("/cli/runs/:id/stop", requireCliToken, cliStopHandler("graceful"));
 
+  const cliRetryHandler = async (c: any) => {
+    const id = c.req.param("id");
+    const rows = await d.select().from(pipelineRuns).where(eq(pipelineRuns.id, id)).limit(1);
+    if (rows.length === 0) return c.text("Run not found", 404);
+    const run = rows[0] as any;
+    if (run.status !== "failed" && run.status !== "retriable") {
+      return c.json({ error: `Cannot retry a run in status ${run.status}` }, 409);
+    }
+    if (!runner) return c.text("Runner not configured", 500);
+    try {
+      if (run.resumePayload) {
+        await runner.resume(id);
+      } else {
+        await runner.start({
+          issueId: run.issueId,
+          issueTitle: run.issueTitle,
+          repoUrl: run.repoUrl,
+          parentRunId: id,
+        });
+      }
+    } catch (err) {
+      return c.text(`Retry failed: ${(err as Error).message}`, 500);
+    }
+    return c.json({ runId: id, mode: "retry", issueId: run.issueId });
+  };
+
+  router.post("/cli/runs/:id/retry", requireCliToken, cliRetryHandler);
+
   router.post("/cli/halt-all", requireCliToken, async (c) => {
     if (!runner?.haltAll) return c.text("Runner not configured", 500);
     const { cancelledRunIds } = runner.haltAll();
