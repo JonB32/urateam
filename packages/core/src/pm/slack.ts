@@ -2,6 +2,7 @@ import type { TickResult, ApprovalAction } from "./types.js";
 import type { StuckIssueResult } from "./actions/recover-stuck.js";
 import { postSlackMessage } from "./slack-helpers.js";
 import { createLogger } from "../logger.js";
+import { truncateWithEllipsis } from "../util/strings.js";
 
 const log = createLogger({ component: "PmAgent:slack" });
 
@@ -93,11 +94,9 @@ export class PmSlackNotifier {
       lines.push(`*Circuit-Broken Issues* (≥${minConsecutiveFailures} consecutive failures in last 7 days):`);
       for (const issue of display) {
         const idLabel = issue.url ? `<${issue.url}|${issue.issueId}>` : issue.issueId;
-        const title = issue.issueTitle.length > 80
-          ? `${issue.issueTitle.slice(0, 79)}…`
-          : issue.issueTitle;
+        const title = truncateWithEllipsis(issue.issueTitle, 80);
         const errPart = issue.errorMessage
-          ? `: \`${issue.errorMessage.length > 200 ? `${issue.errorMessage.slice(0, 199)}…` : issue.errorMessage}\``
+          ? `: \`${truncateWithEllipsis(issue.errorMessage, 200)}\``
           : "";
         const ts = issue.failedAt.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
         lines.push(`• *${idLabel}* _${title}_${errPart} (${ts})`);

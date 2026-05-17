@@ -32,6 +32,20 @@ import { createAuthMonitor, type AuthMonitor } from "../executor/auth-monitor.js
 
 const log = createLogger({ component: "PmAgent:scheduler" });
 
+/**
+ * BEC-184: parse the PM_AGENT_STUCK_RUN_AGE_MIN env var (default 60 min).
+ * Controls how long a 'running' run must be active before it's treated as a
+ * zombie and eligible for stuck-issue recovery.
+ *
+ * Uses an isNaN guard so '0' doesn't silently fall back to 60 via a falsy
+ * `||` check; clamps to ≥1 min to prevent overly-aggressive recovery on
+ * mis-configured deployments.
+ */
+function parseStuckRunAgeMinutes(envValue: string | undefined): number {
+  const parsed = parseInt(envValue ?? "", 10);
+  return isNaN(parsed) ? 60 : Math.max(1, parsed);
+}
+
 export interface PmSchedulerDeps {
   config: PmAgentConfig;
   db: Db;
@@ -275,14 +289,9 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
         // --- Stuck In Progress issue recovery sweep ---
         if (config.stuckIssueRecovery !== false && !isPmPaused()) {
           try {
-            // BEC-184: read PM_AGENT_STUCK_RUN_AGE_MIN from env (default 60 min).
-            // Controls how long a 'running' run must be active before it's treated
-            // as a zombie and eligible for stuck-issue recovery.
-            // PM_AGENT_STUCK_RUN_AGE_MIN: use isNaN guard so '0' doesn't silently
-            // fall back to 60 via || falsy check; clamp to ≥1 min to prevent
-            // overly-aggressive recovery on mis-configured deployments.
-            const _parsedAge = parseInt(process.env.PM_AGENT_STUCK_RUN_AGE_MIN ?? "", 10);
-            const stuckRunAgeMinutes = isNaN(_parsedAge) ? 60 : Math.max(1, _parsedAge);
+            const stuckRunAgeMinutes = parseStuckRunAgeMinutes(
+              process.env.PM_AGENT_STUCK_RUN_AGE_MIN,
+            );
             const stuckResult = actions?.recoverStuckInProgressIssues
               ? await actions.recoverStuckInProgressIssues({} as any)
               : await recoverStuckInProgressIssues({

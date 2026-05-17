@@ -207,7 +207,17 @@ export async function batchCountConsecutiveFailures(
  *
  * Avoids N+1 queries: a single `batchCountConsecutiveFailures` round-trip
  * processes all candidate issue IDs.
+ *
+ * BEC-187 (CLAUDE.md hot-path note): `pipeline_runs` lacks an index on
+ * `(status, started_at)` until BEC-187 ships. This query is bounded by:
+ *   - a 7-day cutoff on `started_at`,
+ *   - a row LIMIT (`CIRCUIT_BROKEN_FETCH_LIMIT`),
+ *   - frequency: invoked once per PM tick (default 30 min).
+ * The Slack digest only renders the top 10, so 50 candidate rows is more
+ * than enough headroom for dedup-by-issue-id.
  */
+const CIRCUIT_BROKEN_FETCH_LIMIT = 50;
+
 export async function fetchCircuitBrokenIssues(
   db: AnyDb,
   minConsecutiveFailures: number = 3,
@@ -215,7 +225,9 @@ export async function fetchCircuitBrokenIssues(
 ): Promise<CircuitBrokenIssue[]> {
   const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
 
-  // Fetch all failed runs in the window, most-recent first.
+  // Fetch up to CIRCUIT_BROKEN_FETCH_LIMIT most-recent failed runs in the
+  // window (most-recent first). See BEC-187 note above re: hot-path query
+  // budget.
   const rows = await db
     .select({
       issueId: pipelineRuns.issueId,
@@ -231,7 +243,8 @@ export async function fetchCircuitBrokenIssues(
         gte(pipelineRuns.startedAt, cutoff),
       ),
     )
-    .orderBy(desc(pipelineRuns.startedAt), desc(pipelineRuns.id));
+    .orderBy(desc(pipelineRuns.startedAt), desc(pipelineRuns.id))
+    .limit(CIRCUIT_BROKEN_FETCH_LIMIT);
 
   // Dedupe by issueId — keep the most-recent failed run's display data.
   const byIssue = new Map<string, CircuitBrokenIssue>();

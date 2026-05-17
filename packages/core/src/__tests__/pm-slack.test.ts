@@ -303,15 +303,29 @@ describe("PmSlackNotifier", () => {
 
 // BEC-223 — fetchCircuitBrokenIssues unit tests
 describe("fetchCircuitBrokenIssues", () => {
-  it("returns empty array when no failed runs in window", async () => {
-    const mockDb = {
-      select: vi.fn().mockReturnValue({
-        from: vi.fn().mockReturnValue({
-          where: vi.fn().mockReturnValue({
-            orderBy: vi.fn().mockResolvedValue([]),
-          }),
+  // Helper: build a select-from-where-orderBy[-limit] chain that resolves to
+  // `rows`. `fetchCircuitBrokenIssues`'s first query terminates in `.limit()`,
+  // while `batchCountConsecutiveFailures` terminates in `.orderBy()`. We
+  // make both terminals resolve to the same rows so the same builder can be
+  // used for both call sites.
+  function mockQuery(rows: any[]) {
+    const terminal = {
+      limit: vi.fn().mockResolvedValue(rows),
+      then: (onFulfilled: any, onRejected: any) =>
+        Promise.resolve(rows).then(onFulfilled, onRejected),
+    };
+    return {
+      from: vi.fn().mockReturnValue({
+        where: vi.fn().mockReturnValue({
+          orderBy: vi.fn().mockReturnValue(terminal),
         }),
       }),
+    };
+  }
+
+  it("returns empty array when no failed runs in window", async () => {
+    const mockDb = {
+      select: vi.fn().mockReturnValue(mockQuery([])),
     } as any;
     const result = await fetchCircuitBrokenIssues(mockDb, 3, 7);
     expect(result).toEqual([]);
@@ -320,35 +334,23 @@ describe("fetchCircuitBrokenIssues", () => {
   it("returns broken issue when consecutive failure count meets threshold", async () => {
     const failedAt = new Date("2024-06-15T10:30:00.000Z");
     // First select() call: the failed-runs-in-window query
+    // Second select() call: batchCountConsecutiveFailures
     const mockDb = {
       select: vi.fn()
-        .mockReturnValueOnce({
-          from: vi.fn().mockReturnValue({
-            where: vi.fn().mockReturnValue({
-              orderBy: vi.fn().mockResolvedValue([
-                {
-                  issueId: "BEC-42",
-                  issueTitle: "Broken issue",
-                  errorMessage: "some error",
-                  startedAt: failedAt,
-                  completedAt: failedAt,
-                },
-              ]),
-            }),
-          }),
-        })
-        // Second select() call: batchCountConsecutiveFailures
-        .mockReturnValueOnce({
-          from: vi.fn().mockReturnValue({
-            where: vi.fn().mockReturnValue({
-              orderBy: vi.fn().mockResolvedValue([
-                { issueId: "BEC-42", status: "failed" },
-                { issueId: "BEC-42", status: "failed" },
-                { issueId: "BEC-42", status: "failed" },
-              ]),
-            }),
-          }),
-        }),
+        .mockReturnValueOnce(mockQuery([
+          {
+            issueId: "BEC-42",
+            issueTitle: "Broken issue",
+            errorMessage: "some error",
+            startedAt: failedAt,
+            completedAt: failedAt,
+          },
+        ]))
+        .mockReturnValueOnce(mockQuery([
+          { issueId: "BEC-42", status: "failed" },
+          { issueId: "BEC-42", status: "failed" },
+          { issueId: "BEC-42", status: "failed" },
+        ])),
     } as any;
 
     const result = await fetchCircuitBrokenIssues(mockDb, 3, 7);
@@ -362,33 +364,21 @@ describe("fetchCircuitBrokenIssues", () => {
     const failedAt = new Date("2024-06-15T10:30:00.000Z");
     const mockDb = {
       select: vi.fn()
-        .mockReturnValueOnce({
-          from: vi.fn().mockReturnValue({
-            where: vi.fn().mockReturnValue({
-              orderBy: vi.fn().mockResolvedValue([
-                {
-                  issueId: "BEC-42",
-                  issueTitle: "Recovered issue",
-                  errorMessage: "old error",
-                  startedAt: failedAt,
-                  completedAt: failedAt,
-                },
-              ]),
-            }),
-          }),
-        })
+        .mockReturnValueOnce(mockQuery([
+          {
+            issueId: "BEC-42",
+            issueTitle: "Recovered issue",
+            errorMessage: "old error",
+            startedAt: failedAt,
+            completedAt: failedAt,
+          },
+        ]))
         // batchCountConsecutiveFailures: most recent terminal run is 'completed'
-        .mockReturnValueOnce({
-          from: vi.fn().mockReturnValue({
-            where: vi.fn().mockReturnValue({
-              orderBy: vi.fn().mockResolvedValue([
-                { issueId: "BEC-42", status: "completed" }, // most recent is completed → recovered
-                { issueId: "BEC-42", status: "failed" },
-                { issueId: "BEC-42", status: "failed" },
-              ]),
-            }),
-          }),
-        }),
+        .mockReturnValueOnce(mockQuery([
+          { issueId: "BEC-42", status: "completed" }, // most recent is completed → recovered
+          { issueId: "BEC-42", status: "failed" },
+          { issueId: "BEC-42", status: "failed" },
+        ])),
     } as any;
 
     const result = await fetchCircuitBrokenIssues(mockDb, 3, 7);
@@ -400,33 +390,21 @@ describe("fetchCircuitBrokenIssues", () => {
     const failedAt = new Date("2024-06-15T10:30:00.000Z");
     const mockDb = {
       select: vi.fn()
-        .mockReturnValueOnce({
-          from: vi.fn().mockReturnValue({
-            where: vi.fn().mockReturnValue({
-              orderBy: vi.fn().mockResolvedValue([
-                {
-                  issueId: "BEC-42",
-                  issueTitle: "Partially failing issue",
-                  errorMessage: "some error",
-                  startedAt: failedAt,
-                  completedAt: null,
-                },
-              ]),
-            }),
-          }),
-        })
+        .mockReturnValueOnce(mockQuery([
+          {
+            issueId: "BEC-42",
+            issueTitle: "Partially failing issue",
+            errorMessage: "some error",
+            startedAt: failedAt,
+            completedAt: null,
+          },
+        ]))
         // Only 2 consecutive failures — below the threshold of 3
-        .mockReturnValueOnce({
-          from: vi.fn().mockReturnValue({
-            where: vi.fn().mockReturnValue({
-              orderBy: vi.fn().mockResolvedValue([
-                { issueId: "BEC-42", status: "failed" },
-                { issueId: "BEC-42", status: "failed" },
-                { issueId: "BEC-42", status: "completed" },
-              ]),
-            }),
-          }),
-        }),
+        .mockReturnValueOnce(mockQuery([
+          { issueId: "BEC-42", status: "failed" },
+          { issueId: "BEC-42", status: "failed" },
+          { issueId: "BEC-42", status: "completed" },
+        ])),
     } as any;
 
     const result = await fetchCircuitBrokenIssues(mockDb, 3, 7);
