@@ -249,6 +249,7 @@ export async function fetchCircuitBrokenIssues(
         errorMessage: row.errorMessage ?? undefined,
         // Prefer completedAt (exact failure time); fall back to startedAt.
         failedAt: row.completedAt ?? row.startedAt,
+        url: `https://linear.app/issue/${row.issueId}`,
       });
     }
   }

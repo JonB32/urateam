@@ -13,7 +13,7 @@ import { recoverRetriableRuns, type RecoverResult } from "./actions/recover.js";
 import { recoverStuckInProgressIssues, type StuckIssueResult } from "./actions/recover-stuck.js";
 import { startTodoIssues, type StartTodoInput, type StartTodoResult } from "./actions/start-todo.js";
 import { getActiveFileMaps, predictConflict, type ActiveRun } from "./conflict.js";
-import { fetchCircuitBrokenIssues } from "./actions/db-queries.js";
+import { fetchCircuitBrokenIssues, ACTIVE_STATUSES } from "./actions/db-queries.js";
 import { PmSlackNotifier } from "./slack.js";
 import { isPmPaused } from "./slack-interface.js";
 import { isFeatureLicensed } from "../license.js";
@@ -23,7 +23,7 @@ import { pipelineRuns } from "../db/schema.js";
 import { makeCallClaude } from "./call-claude.js";
 import { sanitize } from "../executor/prompt/sanitizer.js";
 import { resolveWorkflowStates, createLazyLinearClient } from "./linear-helpers.js";
-import { sql } from "drizzle-orm";
+import { sql, inArray } from "drizzle-orm";
 import { createLogger } from "../logger.js";
 import { logAuditEventUnchecked, budgetRefusedEvent, pruneAuditLog } from "../audit/index.js";
 import { pruneExpiredSessions } from "../auth/index.js";
@@ -59,7 +59,7 @@ interface PmSchedulerActions {
   promoteReadyIssues: (input: PromoteInput) => Promise<any[]>;
   deprioritizeStaleIssues: (input: DeprioritizeInput) => Promise<string[]>;
   cancelAbandonedIssues: (input: CancelInput) => Promise<string[]>;
-  postDigest: (tick: TickResult, maxInFlight: number) => Promise<void>;
+  postDigest: (tick: TickResult, maxInFlight: number, minConsecutiveFailures?: number) => Promise<void>;
   getActiveFileMaps: typeof getActiveFileMaps;
   predictConflict: typeof predictConflict;
 }
@@ -494,9 +494,9 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
 
         // BEC-223: Populate circuit-broken issues for the digest before posting.
         // Wrapped in try/catch — failure must not prevent the digest from posting.
+        const minFailures = config.maxConsecutiveFailures > 0 ? config.maxConsecutiveFailures : 3;
         if (!actions) {
           try {
-            const minFailures = config.maxConsecutiveFailures > 0 ? config.maxConsecutiveFailures : 3;
             tick.circuitBrokenIssues = await fetchCircuitBrokenIssues(db, minFailures);
           } catch (err) {
             log.warn({ err }, "failed to fetch circuit-broken issues for digest");
@@ -507,7 +507,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           if (actions) {
             await actions.postDigest(tick, config.maxInFlight);
           } else {
-            await getSlackNotifier().postDigest(tick, config.maxInFlight);
+            await getSlackNotifier().postDigest(tick, config.maxInFlight, minFailures);
           }
         } catch (err) {
           log.error({ err }, "digest failed");
@@ -578,7 +578,7 @@ async function getActiveRunsFromDb(db: AnyDb): Promise<ActiveRun[]> {
       })
       .from(pipelineRuns)
       .where(
-        sql`${pipelineRuns.status} in ('queued', 'running')`,
+        inArray(pipelineRuns.status, [...ACTIVE_STATUSES]),
       );
 
     return rows

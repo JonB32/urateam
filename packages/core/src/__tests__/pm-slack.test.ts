@@ -267,6 +267,24 @@ describe("PmSlackNotifier", () => {
     expect(text).toContain("_+3 more_");
   });
 
+  it("uses configurable minConsecutiveFailures in circuit-broken section header", async () => {
+    const failedAt = new Date("2024-06-15T10:30:00.000Z");
+    const broken: CircuitBrokenIssue = {
+      issueId: "BEC-99",
+      issueTitle: "Fix the authentication bug",
+      failedAt,
+    };
+    const tick: TickResult = {
+      ...emptyTick(),
+      circuitBrokenIssues: [broken],
+    };
+    await notifier.postDigest(tick, 3, 5);
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    const text: string = body.blocks[0].text.text;
+    expect(text).toContain("≥5 consecutive failures");
+    expect(text).not.toContain("≥3 consecutive failures");
+  });
+
   it("excludes recovered issues (section omitted when all pass batchCountConsecutiveFailures=0)", async () => {
     // Simulate the case where fetchCircuitBrokenIssues returns [] because
     // batchCountConsecutiveFailures returned 0 for all candidates (recovered).

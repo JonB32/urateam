@@ -5,6 +5,8 @@ import { createLogger } from "../logger.js";
 
 const log = createLogger({ component: "PmAgent:slack" });
 
+const CIRCUIT_BROKEN_ISSUES_CAP = 10;
+
 export interface PmSlackConfig {
   botToken: string;
   channelId: string;
@@ -19,7 +21,7 @@ export class PmSlackNotifier {
     this.channelId = config.channelId;
   }
 
-  async postDigest(tick: TickResult, maxInFlight: number): Promise<void> {
+  async postDigest(tick: TickResult, maxInFlight: number, minConsecutiveFailures: number = 3): Promise<void> {
     const hasActions =
       tick.paused ||
       tick.triaged.length > 0 ||
@@ -84,11 +86,11 @@ export class PmSlackNotifier {
       lines.push(`*Auto-recovered stuck issues:* ${tick.recoveredStuckIssues.join(", ")}`);
     }
     if (tick.circuitBrokenIssues && tick.circuitBrokenIssues.length > 0) {
-      const cap = 10;
+      const cap = CIRCUIT_BROKEN_ISSUES_CAP;
       const display = tick.circuitBrokenIssues.slice(0, cap);
       const overflow = tick.circuitBrokenIssues.length - display.length;
       lines.push("");
-      lines.push("*Circuit-Broken Issues* (≥3 consecutive failures in last 7 days):");
+      lines.push(`*Circuit-Broken Issues* (≥${minConsecutiveFailures} consecutive failures in last 7 days):`);
       for (const issue of display) {
         const idLabel = issue.url ? `<${issue.url}|${issue.issueId}>` : issue.issueId;
         const title = issue.issueTitle.length > 80
