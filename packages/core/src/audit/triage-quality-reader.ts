@@ -55,7 +55,7 @@ export async function readTriageQualityEvents(
     .orderBy(desc(auditEvents.timestamp))
     .limit(limit);
 
-  return rows.map((row): TriageQualityEvent => {
+  return rows.map((row: any): TriageQualityEvent => {
     let payload: TriageQualityPayload;
     try {
       const parsed = JSON.parse(row.payload ?? "{}");
