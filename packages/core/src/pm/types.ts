@@ -278,6 +278,23 @@ export interface PromoteResult {
   overlapRisk?: "none" | "low" | "high";
 }
 
+/**
+ * BEC-223: A single issue that has hit the circuit-breaker threshold (≥ N
+ * consecutive failed pipeline runs). Populated by fetchCircuitBrokenIssues
+ * in db-queries.ts and surfaced in the daily Slack digest.
+ */
+export interface CircuitBrokenIssue {
+  issueId: string;
+  issueTitle: string;
+  /** Most-recent failed run's error message, if any. */
+  errorMessage?: string;
+  /** Timestamp of the most recent failure (completedAt ?? startedAt of that run). */
+  failedAt: Date;
+  /** Linear issue URL for hyperlinking in Slack messages. Optional — rendered as
+   *  plain identifier when absent. */
+  url?: string;
+}
+
 export interface TickResult {
   triaged: TriageResult[];
   promoted: PromoteResult[];
@@ -295,6 +312,12 @@ export interface TickResult {
   recoveredStuckIssues?: string[];
   /** Todo issues that were started by the tick (orphaned from webhook). */
   startedTodoIssues?: Array<{ identifier: string; started: boolean; reason: string }>;
+  /**
+   * BEC-223: Issues that have hit the circuit-breaker threshold (≥ maxConsecutiveFailures
+   * consecutive failures in the last 7 days). Rendered as a section in the daily Slack digest.
+   * Empty array / undefined → section omitted from digest.
+   */
+  circuitBrokenIssues?: CircuitBrokenIssue[];
 }
 
 export type ApprovalAction = "deprioritize" | "cancel";

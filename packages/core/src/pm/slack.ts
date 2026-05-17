@@ -28,6 +28,7 @@ export class PmSlackNotifier {
       tick.deprioritizeRequested.length > 0 ||
       tick.cancelRequested.length > 0 ||
       (tick.recoveredStuckIssues?.length ?? 0) > 0 ||
+      (tick.circuitBrokenIssues?.length ?? 0) > 0 ||
       tick.errors.length > 0;
 
     if (!hasActions) return;
@@ -81,6 +82,27 @@ export class PmSlackNotifier {
     }
     if (tick.recoveredStuckIssues && tick.recoveredStuckIssues.length > 0) {
       lines.push(`*Auto-recovered stuck issues:* ${tick.recoveredStuckIssues.join(", ")}`);
+    }
+    if (tick.circuitBrokenIssues && tick.circuitBrokenIssues.length > 0) {
+      const cap = 10;
+      const display = tick.circuitBrokenIssues.slice(0, cap);
+      const overflow = tick.circuitBrokenIssues.length - display.length;
+      lines.push("");
+      lines.push("*Circuit-Broken Issues* (≥3 consecutive failures in last 7 days):");
+      for (const issue of display) {
+        const idLabel = issue.url ? `<${issue.url}|${issue.issueId}>` : issue.issueId;
+        const title = issue.issueTitle.length > 80
+          ? `${issue.issueTitle.slice(0, 79)}…`
+          : issue.issueTitle;
+        const errPart = issue.errorMessage
+          ? `: \`${issue.errorMessage.length > 200 ? `${issue.errorMessage.slice(0, 199)}…` : issue.errorMessage}\``
+          : "";
+        const ts = issue.failedAt.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
+        lines.push(`• *${idLabel}* _${title}_${errPart} (${ts})`);
+      }
+      if (overflow > 0) {
+        lines.push(`_+${overflow} more_`);
+      }
     }
     if (tick.errors.length > 0) {
       lines.push("");

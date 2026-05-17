@@ -13,6 +13,7 @@ import { recoverRetriableRuns, type RecoverResult } from "./actions/recover.js";
 import { recoverStuckInProgressIssues, type StuckIssueResult } from "./actions/recover-stuck.js";
 import { startTodoIssues, type StartTodoInput, type StartTodoResult } from "./actions/start-todo.js";
 import { getActiveFileMaps, predictConflict, type ActiveRun } from "./conflict.js";
+import { fetchCircuitBrokenIssues } from "./actions/db-queries.js";
 import { PmSlackNotifier } from "./slack.js";
 import { isPmPaused } from "./slack-interface.js";
 import { isFeatureLicensed } from "../license.js";
@@ -488,6 +489,17 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           } else {
             log.error({ err: cancelResult.reason }, "cancel failed");
             tick.errors.push(`cancel: ${(cancelResult.reason as Error).message}`);
+          }
+        }
+
+        // BEC-223: Populate circuit-broken issues for the digest before posting.
+        // Wrapped in try/catch — failure must not prevent the digest from posting.
+        if (!actions) {
+          try {
+            const minFailures = config.maxConsecutiveFailures > 0 ? config.maxConsecutiveFailures : 3;
+            tick.circuitBrokenIssues = await fetchCircuitBrokenIssues(db, minFailures);
+          } catch (err) {
+            log.warn({ err }, "failed to fetch circuit-broken issues for digest");
           }
         }
 

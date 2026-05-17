@@ -151,6 +151,7 @@ budget check → **recover retriable runs** → recover stuck In Progress → **
 - **Approval-gated**: deprioritize/cancel require Slack reaction approval (48h timeout) via shared `requestApprovalIfNotPending()`.
 - **Conflict detection**: git diff for active branches + Claude prediction for candidates.
 - **Slack interface** (`slack-interface.ts`): slash commands, @mentions, natural language via Haiku.
+- **Daily digest circuit-broken block (BEC-223)**: `postDigest` (`pm/slack.ts`) includes a `*Circuit-Broken Issues*` section listing every issue with ≥ `maxConsecutiveFailures` (default 3) consecutive failed runs that had at least one failure in the last 7 days. Each entry shows: identifier (hyperlinked when URL is available), title (≤ 80 chars), most-recent `error_message` (≤ 200 chars), and failure timestamp. Issues whose most-recent terminal run is `'completed'` are automatically excluded (recovered). Section omitted when empty; capped at 10 entries with `_+N more_` overflow footer. Query logic: `fetchCircuitBrokenIssues` in `pm/actions/db-queries.ts`; uses `batchCountConsecutiveFailures` to avoid N+1 DB queries. Populated by `scheduler.ts` before posting the digest.
 
 **Pause / circuit-breaker / escalation:**
 - `PM_AGENT_PAUSED=true` (BEC-170) pauses promote / start-todo / recover-stuck. OR'd with the Slack `/pm pause` state. Read at each tick — container restart required.
