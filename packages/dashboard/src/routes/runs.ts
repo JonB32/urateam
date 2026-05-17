@@ -123,7 +123,7 @@ export function createRunsRouter(
   async function auditCancelledRunsBatch(
     cancelledRunIds: string[],
     actor: string,
-    actorType: string,
+    actorType: "dashboard-user" | "cli" | "slack" | "system",
   ): Promise<void> {
     if (cancelledRunIds.length === 0) return;
     const rows = await d
