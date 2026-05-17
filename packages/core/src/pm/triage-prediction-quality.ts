@@ -60,37 +60,3 @@ export function computeAffectedFilesPredictionQuality(
   };
 }
 
-/**
- * Parse the `**Affected Files:**` section written by `appendTriageSectionsToDescription`
- * from a Linear issue description.
- *
- * Returns `undefined` when no section is found (v1 triage path, no prediction).
- * Returns an empty array when the section exists but has no list items (v2 triage,
- * zero predicted files).
- */
-export function parseAffectedFilesFromDescription(description: string): string[] | undefined {
-  // Match the **Affected Files:** section. Ends at: blank line, next **header**, or end.
-  // Use `[ \t]*\r?\n` (horizontal whitespace + line ending) for the header-line consumer,
-  // not `\s*\n` — `\s*` is greedy and would eat the blank-line newline that should
-  // serve as the section terminator, causing an empty section to capture all the way
-  // to EOF.
-  const match = /\*\*Affected Files:\*\*[ \t]*\r?\n([\s\S]*?)(?:\n\n|\n\*\*|$)/.exec(description);
-  if (!match) return undefined;
-
-  const block = match[1] ?? "";
-  // Strip any leading bullet (-, *, +, 1., 1)) and surrounding backticks. Triage v2
-  // normalizes these at parse time (`parseTriageV2Extensions`), but descriptions
-  // already on disk from runs prior to that fix may still contain bullet-prefixed
-  // paths — handle both shapes for forward compatibility.
-  const paths = block
-    .split("\n")
-    .map((line) =>
-      line
-        .replace(/^\s*(?:[-*+]|\d+[.)])\s*/, "")
-        .replace(/^`+|`+$/g, "")
-        .trim(),
-    )
-    .filter((line) => line.length > 0);
-
-  return paths;
-}

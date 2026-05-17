@@ -118,10 +118,8 @@ import {
   pipelineAutoDeepReviewBumpedEvent,
   pmTriageQualityScoreEvent,
 } from "../audit/index.js";
-import {
-  computeAffectedFilesPredictionQuality,
-  parseAffectedFilesFromDescription,
-} from "../pm/triage-prediction-quality.js";
+import { computeAffectedFilesPredictionQuality } from "../pm/triage-prediction-quality.js";
+import { getTriageResult } from "../pm/triage-results-store.js";
 import { matchesAnyPattern } from "../util/glob.js";
 import { findScratchFiles } from "./scratch-file-guard.js";
 import { runTypecheck } from "./typecheck-gate.js";
@@ -2623,11 +2621,17 @@ export class PipelineRunner {
       }); // end pushQueue.enqueue
 
       // Tier 6e — emit triage prediction-quality audit event. Fail-open: any
-      // error (parse, git, DB write) is logged and swallowed so telemetry
+      // error (DB read, git, DB write) is logged and swallowed so telemetry
       // never blocks pipeline completion.
+      //
+      // Reads `triage_results.v2_prediction` (written by triage v2 in the PM
+      // agent). The previous parse-from-description path was bricked by the
+      // 4000-char description cap in schema-mapper, which sliced off the
+      // appended v2 sections for realistic issues.
       if (worktreePath) {
         try {
-          const predicted = parseAffectedFilesFromDescription(sanitizedIssue.description);
+          const stored = await getTriageResult(this.db as AnyDb, sanitizedIssue.id);
+          const predicted = stored?.affectedFiles;
           const actualFiles = await getChangedFiles(worktreePath, repoConfig.defaultBranch);
           const quality = computeAffectedFilesPredictionQuality(predicted, actualFiles);
           await logAuditEvent(
