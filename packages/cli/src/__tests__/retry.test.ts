@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 describe("retryCommand", () => {
-  let processExit: ReturnType<typeof vi.spyOn>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let processExit: any;
   let consoleLog: ReturnType<typeof vi.spyOn>;
   let consoleError: ReturnType<typeof vi.spyOn>;
   let origToken: string | undefined;
@@ -16,9 +17,9 @@ describe("retryCommand", () => {
 
     processExit = vi
       .spyOn(process, "exit")
-      .mockImplementation((_code?: any) => {
+      .mockImplementation(((_code?: unknown) => {
         throw new Error(`process.exit(${_code})`);
-      });
+      }) as never);
     consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 
