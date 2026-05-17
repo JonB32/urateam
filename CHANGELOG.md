@@ -36,7 +36,9 @@ Bumps:
 - `@urateam/dashboard`: 0.1.46 → 0.1.47
 - `create-urateam`: 0.1.49 → 0.1.50
 
-<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+### Fixed
+- **Tier 6e triage prediction now reads from DB instead of description text** (#322): triage v2 appends `**Affected Files:**` (and other v2 sections) to the END of the Linear description, but `mapIssueToSchema` truncates descriptions at 4000 chars before they reach the runner. For any realistic issue the v2 section was getting sliced off and `pm.triage_quality_score` events reported `hasV2Prediction: false` every time (confirmed in the v0.1.60 soak: BEC-218 / BEC-219 / BEC-221 all produced 0-intersection events). The fix introduces a new `triage_results` table; triage v2 calls `upsertTriageResult` to persist the v2 prediction at classification time, and the runner Tier 6e hook calls `getTriageResult` to read it. `parseAffectedFilesFromDescription` is removed (3 days old, no external callers). DB-backed path is now the single source of truth; the description appender remains for human readability only.
+
 ## [0.1.60] — 2026-05-14
 
 Bumps:
