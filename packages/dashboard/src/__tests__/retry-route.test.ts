@@ -95,7 +95,7 @@ describe("POST /runs/:id/retry", () => {
       expect(retry).toBeDefined();
     });
 
-    it("operator retrying a failed run with no resumePayload → runner.start called with parentRunId", async () => {
+    it("operator retrying a failed run with no resumePayload → 422 (BEC-226: cannot reconstruct Linear/repo/pipeline context from a bare DB row)", async () => {
       // run_1 has no resumePayload (default fixture in beforeEach)
       const runner = {
         resume: vi.fn(),
@@ -103,15 +103,10 @@ describe("POST /runs/:id/retry", () => {
       };
       const app = appWith("operator", runner);
       const res = await app.request("/runs/run_1/retry", { method: "POST" });
-      expect(res.status).toBe(302);
-      expect(runner.start).toHaveBeenCalledWith(
-        expect.objectContaining({
-          issueId: "BEC-42",
-          issueTitle: "fix bug",
-          repoUrl: "https://github.com/acme/api",
-          parentRunId: "run_1",
-        }),
-      );
+      expect(res.status).toBe(422);
+      const body = await res.text();
+      expect(body).toContain("no resumePayload");
+      expect(runner.start).not.toHaveBeenCalled();
       expect(runner.resume).not.toHaveBeenCalled();
     });
 
