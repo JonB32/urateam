@@ -9,6 +9,7 @@ import type {
   DailyTokenSummary,
   PipelineRunStatus,
   ReviewFinding,
+  ResumePayload,
 } from "../types.js";
 import { ResumePayloadSchema } from "../types.js"; // value import — cannot be `import type`
 import type { Db, AnyDb } from "../db/client.js";
@@ -34,7 +35,7 @@ import { DEFAULT_AGENT_CLAUDE_MD } from "../executor/agent-config.js";
 import { generatePRDescription, type TriageQualityMetric } from "./pr-description.js";
 import { maybePostChangeSummary } from "./pr-change-summary.js";
 import { access, writeFile, appendFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
@@ -145,6 +146,31 @@ export { buildReviewFeedbackContext } from "./feedback-pipeline.js";
 
 // Module-level logger (no runId yet — used for pre-run messages)
 const log = createLogger({ component: "PipelineRunner" });
+
+/**
+ * Serialise a resume payload to the JSON string stored in
+ * `pipeline_runs.resume_payload`.  Both the await-approval pause path and the
+ * transient-failure retry path use this helper so their serialization stays in
+ * sync with `ResumePayloadSchema` — a single place to update if the schema
+ * evolves.
+ */
+function buildResumePayload(
+  handoff: HandoffArtifact | null,
+  pipelineConfig: PipelineConfig,
+  repoConfig: RepoConfig,
+  sanitizedIssue: SanitizedIssue,
+  worktreePath: string,
+  currentStageIndex: number,
+): string {
+  return JSON.stringify({
+    handoff,
+    pipelineConfig,
+    repoConfig,
+    sanitizedIssue,
+    worktreePath,
+    currentStageIndex,
+  } satisfies ResumePayload);
+}
 
 export interface PipelineRunnerConfig {
   db: Db;
@@ -405,9 +431,16 @@ export class PipelineRunner {
 
     const { handoff, pipelineConfig, repoConfig, sanitizedIssue, worktreePath, currentStageIndex } = parsed.data;
 
-    // Path containment check — worktreePath must be within agentRunDir
+    // Path containment check — worktreePath must be within agentRunDir.
+    // We append sep to agentRunDir before the startsWith check so that a
+    // crafted path like /home/ura/data/runs-evil cannot slip past as a prefix match
+    // of /home/ura/data/runs.  An exact match (resolvedPath === this.agentRunDir)
+    // is also accepted for symmetry, even though real worktrees are always subdirs.
     const resolvedPath = resolve(worktreePath); // canonicalize — collapses .. segments
-    if (!resolvedPath.startsWith(this.agentRunDir)) {
+    const normalizedBase = this.agentRunDir.endsWith(sep)
+      ? this.agentRunDir
+      : this.agentRunDir + sep;
+    if (!resolvedPath.startsWith(normalizedBase) && resolvedPath !== this.agentRunDir) {
       runLog.error({ worktreePath, agentRunDir: this.agentRunDir }, "resume: worktreePath outside agentRunDir — failing run");
       await db
         .update(pipelineRuns)
@@ -893,14 +926,14 @@ export class PipelineRunner {
           // Save the full resume context so resume() can re-attach the worktree
           // and continue from the next stage with the correct handoff artifact.
           const stageIndex = config.stages.indexOf(stage);
-          const resumePayload = JSON.stringify({
-            handoff: handoff ?? null,
-            pipelineConfig: config,
+          const resumePayload = buildResumePayload(
+            handoff ?? null,
+            config,
             repoConfig,
             sanitizedIssue,
-            worktreePath: worktreePath!,
-            currentStageIndex: stageIndex,
-          });
+            worktreePath!,
+            stageIndex,
+          );
           await db
             .update(pipelineRuns)
             .set({
@@ -2976,14 +3009,14 @@ export class PipelineRunner {
       // stage index; we store failedIndex - 1 so the same +1 offset re-runs the failed stage.
       const resumeStageIndex = (context.currentStageIndex ?? 0) - 1;
 
-      const resumePayload = JSON.stringify({
-        handoff: context.handoff ?? null,
-        pipelineConfig: context.pipelineConfig,
-        repoConfig: context.repoConfig,
-        sanitizedIssue: context.sanitizedIssue,
-        worktreePath: context.worktreePath,
-        currentStageIndex: resumeStageIndex,
-      });
+      const resumePayload = buildResumePayload(
+        context.handoff ?? null,
+        context.pipelineConfig,
+        context.repoConfig,
+        context.sanitizedIssue,
+        context.worktreePath,
+        resumeStageIndex,
+      );
 
       await db
         .update(pipelineRuns)
