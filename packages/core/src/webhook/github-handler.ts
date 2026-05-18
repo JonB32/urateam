@@ -47,8 +47,8 @@ export interface GitHubWebhookHandlerConfig {
   github?: GitHubConfig;
   /**
    * Notifier instance. When provided, `onPRMerged` is called when a PR is
-   * merged externally (human merge or GitHub's auto-merge-when-ready), which
-   * transitions the Linear issue to Done.
+   * merged externally (pull_request.closed + merged=true — human merge or
+   * GitHub's auto-merge-when-ready), transitioning the Linear issue to Done.
    */
   notifier?: Notifier;
 }

@@ -103,6 +103,17 @@ export class LinearNotifier implements Notifier {
     ]);
   }
 
+  async onPRMerged(run: PipelineRun): Promise<void> {
+    await Promise.all([
+      this.postComment(run.issueId,
+        `🤖 **Agent Run #${run.id.slice(0, 8)}** — PR Merged ✅\n\n` +
+        (run.prUrl ? `**PR**: ${run.prUrl}\n\n` : "") +
+        `The pull request has been merged.`
+      ),
+      this.transitionState(run.issueId, LINEAR_STATES.DONE),
+    ]);
+  }
+
   // onDailyTokenSummary intentionally omitted — daily summaries are cross-run
   // aggregates that don't map to per-issue comments. Use Slack/Discord instead.
 
