@@ -13,7 +13,7 @@
  *   - getMaxAttemptCountForReason — query the attempt count from the most-recent row for a (repo, branch, reason) triple
  *   - tryFileQaGapIssue           — file a QA gap issue via Linear and handle transient errors
  */
-import { and, desc, eq, isNull, max } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import type { LinearClient } from "@linear/sdk";
 import type { AnyDb } from "../db/client.js";
 import { releaseApprovals, releaseDecisions } from "../db/schema.js";
@@ -193,7 +193,7 @@ export async function getMaxAttemptCountForReason(
   qaRunSha?: string,
 ): Promise<number> {
   const rows = await (db as any)
-    .select({ maxAttempts: max(releaseDecisions.attemptCount) })
+    .select({ attemptCount: releaseDecisions.attemptCount })
     .from(releaseDecisions)
     .where(
       qaRunSha !== undefined
@@ -208,8 +208,10 @@ export async function getMaxAttemptCountForReason(
             eq(releaseDecisions.branch, branch),
             eq(releaseDecisions.reason, reason),
           ),
-    );
-  return rows?.[0]?.maxAttempts ?? 0;
+    )
+    .orderBy(desc(releaseDecisions.decidedAt))
+    .limit(1);
+  return rows?.[0]?.attemptCount ?? 0;
 }
 
 /**

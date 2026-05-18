@@ -287,9 +287,11 @@ export async function tick(ctx: TickContext): Promise<void> {
     let finalReason = result.reason;
 
     if (result.qaActionNeeded?.reason === "qa_needs_trigger") {
-      // Look up the highest attempt count across all qa_needs_trigger rows for this
-      // (branch, sha) pair. Using MAX instead of ORDER BY + LIMIT 1 to be stable
-      // when multiple rows share the same decidedAt timestamp.
+      // BEC-146: read the most-recent row's attemptCount (ORDER BY decidedAt DESC LIMIT 1)
+      // rather than MAX(attemptCount) across all rows for this (branch, sha) pair.
+      // Using MAX caused false permanent skips: after a successful dispatch reset
+      // attemptCount to 0, the MAX query still returned the old high-water mark
+      // from earlier failure rows, causing the next failure to immediately escalate.
       attemptCount = await getMaxAttemptCountForReason(
         db, repoUrl, branch, "qa_needs_trigger", state.headSha,
       );
