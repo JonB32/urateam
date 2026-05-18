@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { PmSlackNotifier } from "../pm/slack.js";
+import {
+  PmSlackNotifier,
+  chunkLinesToSlackSectionBlocks,
+  SLACK_SECTION_TEXT_MAX,
+} from "../pm/slack.js";
 import type { TickResult, BudgetGuardResult, ScopeBudget, CircuitBrokenIssue } from "../pm/types.js";
 import { fetchCircuitBrokenIssues } from "../pm/actions/db-queries.js";
 
@@ -285,6 +289,41 @@ describe("PmSlackNotifier", () => {
     expect(text).not.toContain("≥3 consecutive failures");
   });
 
+  it("splits long digests into multiple section blocks so no block exceeds Slack's 3000-char text limit (BEC-225)", async () => {
+    // Reproduces the production v0.1.62 failure: with ~10 circuit-broken
+    // issues × ~300 chars each (URL + 80-char title + 200-char error +
+    // timestamp), the joined digest text exceeds 3000 chars and Slack
+    // returns `invalid_blocks`.
+    const failedAt = new Date("2026-05-17T18:34:51.000Z");
+    const longErrorMessage = "E".repeat(300);  // truncateWithEllipsis caps at 200
+    const longTitle = "T".repeat(120);          // truncateWithEllipsis caps at 80
+    const issues: CircuitBrokenIssue[] = Array.from({ length: 10 }, (_, i) => ({
+      issueId: `BEC-${200 + i}`,
+      issueTitle: longTitle,
+      errorMessage: longErrorMessage,
+      url: `https://linear.app/beckerspace/issue/BEC-${200 + i}/some-long-url-slug`,
+      failedAt,
+    }));
+    const tick: TickResult = {
+      ...emptyTick(),
+      triaged: [{ issueId: "BEC-1", priority: 2, labels: ["bug"], complexity: "small", rationale: "test", acceptanceCriteria: [] }],
+      circuitBrokenIssues: issues,
+    };
+    await notifier.postDigest(tick, 3);
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(Array.isArray(body.blocks)).toBe(true);
+    expect(body.blocks.length).toBeGreaterThan(1);
+    for (const block of body.blocks) {
+      expect(block.type).toBe("section");
+      expect(block.text.type).toBe("mrkdwn");
+      expect(block.text.text.length).toBeLessThanOrEqual(SLACK_SECTION_TEXT_MAX);
+    }
+    const joined = body.blocks.map((b: { text: { text: string } }) => b.text.text).join("\n");
+    expect(joined).toContain("Circuit-Broken Issues");
+    expect(joined).toContain("BEC-200");
+    expect(joined).toContain("BEC-209");
+  });
+
   it("excludes recovered issues (section omitted when all pass batchCountConsecutiveFailures=0)", async () => {
     // Simulate the case where fetchCircuitBrokenIssues returns [] because
     // batchCountConsecutiveFailures returned 0 for all candidates (recovered).
@@ -298,6 +337,43 @@ describe("PmSlackNotifier", () => {
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     const text: string = body.blocks[0].text.text;
     expect(text).not.toContain("Circuit-Broken");
+  });
+});
+
+// BEC-225 — Slack section-block chunking (regression test for production v0.1.62 invalid_blocks)
+describe("chunkLinesToSlackSectionBlocks", () => {
+  it("emits one block when all lines fit", () => {
+    const blocks = chunkLinesToSlackSectionBlocks(["a", "b", "c"]);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]!.text.text).toBe("a\nb\nc");
+  });
+
+  it("returns empty array for empty input", () => {
+    expect(chunkLinesToSlackSectionBlocks([])).toEqual([]);
+  });
+
+  it("splits when accumulated text would exceed maxChars", () => {
+    const line = "x".repeat(1000);
+    const blocks = chunkLinesToSlackSectionBlocks([line, line, line, line], 2500);
+    expect(blocks.length).toBeGreaterThan(1);
+    for (const block of blocks) {
+      expect(block.text.text.length).toBeLessThanOrEqual(2500);
+    }
+    const joined = blocks.map((b) => b.text.text).join("\n");
+    expect(joined).toBe([line, line, line, line].join("\n"));
+  });
+
+  it("uses 2900-char default to leave headroom under Slack's 3000-char section limit", () => {
+    expect(SLACK_SECTION_TEXT_MAX).toBe(2900);
+  });
+
+  it("passes through a single line longer than maxChars rather than truncating", () => {
+    // Caller is expected to truncate values before joining; this preserves
+    // the line so the digest isn't silently mangled.
+    const big = "y".repeat(3500);
+    const blocks = chunkLinesToSlackSectionBlocks([big], 2900);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]!.text.text).toBe(big);
   });
 });
 
