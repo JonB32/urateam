@@ -28,6 +28,16 @@ notes call out when a change affects only a single package.
 - **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
 - **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
 
+## [0.1.64] — 2026-05-18
+
+Bumps:
+- `@urateam/core`: 0.1.49 → 0.1.50
+- `@urateam/cli`: 0.1.51 → 0.1.52
+- `@urateam/dashboard`: 0.1.49 → 0.1.50
+- `create-urateam`: 0.1.52 → 0.1.53
+
+### Fixed
+- **Retry handler crashed for non-resumable runs** (#329, BEC-226): both the dashboard retry button and the new `ura retry` CLI (BEC-221) crashed with HTTP 500 (`Cannot read properties of undefined (reading 'url')`) for any failed run without a `resumePayload`. `retryRun` called `runner.start(opts)` with a single bag-of-strings object, but `PipelineRunner.start()` takes 6 positional args — `repoConfig` ended up undefined, then `checkDuplicateBranch(repoConfig.url, ...)` exploded. The retry-route test mocked `runner.start` permissively (accepted any shape), so the divergence didn't surface in CI — only when called against the real implementation. Fix scope: error out cleanly with HTTP 422 when `resumePayload` is null; the resume path (with payload) is unchanged. Properly reconstructing positional args is follow-up work. Discovered when verifying the v0.1.63 deploy.
 ## [0.1.63] — 2026-05-18
 
 Bumps:
