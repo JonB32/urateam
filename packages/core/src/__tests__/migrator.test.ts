@@ -14,6 +14,20 @@ import {
   type MigrationStatus,
 } from "../db/migrator.js";
 
+/**
+ * Core tables expected to be created by the full migration suite.
+ * Shared between SQLite and Postgres test sections to avoid duplication.
+ */
+const EXPECTED_CORE_TABLES = [
+  "pipeline_runs",
+  "stage_runs",
+  "agent_logs",
+  "pm_approvals",
+  "active_work",
+  "webhook_dedup",
+  "schema_migrations",
+];
+
 // Helper: schema_migrations DDL, used in tests that pre-populate the table
 const CREATE_SCHEMA_MIGRATIONS_SQLITE_FOR_TEST = `
   CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -213,17 +227,7 @@ describe("Migration Framework", () => {
     it("should create all expected tables", () => {
       runMigrationsSqlite(db);
 
-      const expectedTables = [
-        "pipeline_runs",
-        "stage_runs",
-        "agent_logs",
-        "pm_approvals",
-        "active_work",
-        "webhook_dedup",
-        "schema_migrations",
-      ];
-
-      for (const table of expectedTables) {
+      for (const table of EXPECTED_CORE_TABLES) {
         const tableExists = db
           .prepare(
             `SELECT name FROM sqlite_master WHERE type='table' AND name=?`
@@ -377,17 +381,7 @@ describe("Migration Framework", () => {
 
       await runMigrationsPostgres(client);
 
-      const expectedTables = [
-        "pipeline_runs",
-        "stage_runs",
-        "agent_logs",
-        "pm_approvals",
-        "active_work",
-        "webhook_dedup",
-        "schema_migrations",
-      ];
-
-      for (const table of expectedTables) {
+      for (const table of EXPECTED_CORE_TABLES) {
         const result = await client.unsafe(
           `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)`,
           [table]

@@ -135,6 +135,35 @@ export function loadActiveMigrationFiles(
 }
 
 // ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a MigrationStatus array from the active migrations list and the
+ * applied-name → timestamp map that each driver-specific status function
+ * constructs. Shared between SQLite and Postgres implementations to avoid
+ * duplication.
+ */
+function buildMigrationStatus(
+  migrations: Migration[],
+  appliedMap: Map<string, Date>
+): MigrationStatus[] {
+  // Include any applied migrations that no longer have a file (e.g., squashed)
+  const allNames = new Set([
+    ...migrations.map((m) => m.name),
+    ...appliedMap.keys(),
+  ]);
+
+  return Array.from(allNames)
+    .sort()
+    .map((name) => ({
+      name,
+      applied: appliedMap.has(name),
+      appliedAt: appliedMap.get(name),
+    }));
+}
+
+// ---------------------------------------------------------------------------
 // SQLite
 // ---------------------------------------------------------------------------
 
@@ -235,19 +264,7 @@ export function getMigrationStatusSqlite(
     .all() as Array<{ name: string; applied_at: number }>;
   const appliedMap = new Map(rows.map((r) => [r.name, new Date(r.applied_at * 1000)]));
 
-  // Include any applied migrations that no longer have a file (e.g., squashed)
-  const allNames = new Set([
-    ...migrations.map((m) => m.name),
-    ...appliedMap.keys(),
-  ]);
-
-  return Array.from(allNames)
-    .sort()
-    .map((name) => ({
-      name,
-      applied: appliedMap.has(name),
-      appliedAt: appliedMap.get(name),
-    }));
+  return buildMigrationStatus(migrations, appliedMap);
 }
 
 // ---------------------------------------------------------------------------
@@ -264,11 +281,12 @@ export async function runMigrationsPostgres(client: Sql): Promise<void> {
 
   // BEC-149: Rename old migration entries to their canonical names so that
   // existing deployments don't re-run migrations under the new filenames.
-  for (const [oldName, newName] of Object.entries(POSTGRES_MIGRATION_RENAMES)) {
-    await client`
-      UPDATE schema_migrations SET name = ${newName} WHERE name = ${oldName}
-    `;
-  }
+  // All renames are independent, so run them in parallel for faster startup.
+  await Promise.all(
+    Object.entries(POSTGRES_MIGRATION_RENAMES).map(([oldName, newName]) =>
+      client`UPDATE schema_migrations SET name = ${newName} WHERE name = ${oldName}`
+    )
+  );
 
   // Only process active (non-tombstone) migrations
   const migrations = loadActiveMigrationFiles("postgres");
@@ -312,16 +330,5 @@ export async function getMigrationStatusPostgres(
 
   const appliedMap = new Map(rows.map((r) => [r.name, r.applied_at]));
 
-  const allNames = new Set([
-    ...migrations.map((m) => m.name),
-    ...appliedMap.keys(),
-  ]);
-
-  return Array.from(allNames)
-    .sort()
-    .map((name) => ({
-      name,
-      applied: appliedMap.has(name),
-      appliedAt: appliedMap.get(name),
-    }));
+  return buildMigrationStatus(migrations, appliedMap);
 }
