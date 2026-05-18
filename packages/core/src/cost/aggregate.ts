@@ -23,7 +23,7 @@ const DEFAULT_MAX_RUNS = 10_000;
 
 const UNASSIGNED_TEAM = "(unassigned)";
 
-export function normalizeTeamId(id: string | null | undefined): { key: string; label: string } {
+function normalizeTeamId(id: string | null | undefined): { key: string; label: string } {
   if (id === null || id === undefined || id === "") {
     return { key: "team:unassigned", label: UNASSIGNED_TEAM };
   }
@@ -57,7 +57,40 @@ function finalizeRoi(row: { dollars: number; timeSavedHours: number }, hourlyRat
   return (row.timeSavedHours * hourlyRate) / row.dollars;
 }
 
-export async function aggregateAll(
+/**
+ * Accumulate a single run's cost metrics into a breakdown bucket.
+ * Extracted to eliminate repetition across the per-run loop in aggregateAll.
+ */
+function updateBucketMetrics(
+  bucket: BreakdownRow,
+  cost: { inputTokens: number; outputTokens: number; dollars: number; timeSavedHours: number },
+  isMergedPr: boolean,
+): void {
+  bucket.runs += 1;
+  bucket.inputTokens += cost.inputTokens;
+  bucket.outputTokens += cost.outputTokens;
+  bucket.dollars += cost.dollars;
+  bucket.timeSavedHours += cost.timeSavedHours;
+  if (isMergedPr) bucket.prsMerged += 1;
+}
+
+/**
+ * Accumulate a rollup row's pre-aggregated totals into a breakdown bucket.
+ * Used in aggregateFromRollups where each row already contains batch counts.
+ */
+function addRollupToBucket(
+  bucket: BreakdownRow,
+  r: { runs: number; prsMerged: number; inputTokens: number; outputTokens: number; dollars: number; timeSavedHours: number },
+): void {
+  bucket.runs += r.runs;
+  bucket.prsMerged += r.prsMerged;
+  bucket.inputTokens += r.inputTokens;
+  bucket.outputTokens += r.outputTokens;
+  bucket.dollars += r.dollars;
+  bucket.timeSavedHours += r.timeSavedHours;
+}
+
+async function aggregateAll(
   db: AnyDb,
   filters: AggregateFilters,
   config: CostConfig,
@@ -172,24 +205,15 @@ export async function aggregateAll(
 
     const { key: teamKey, label: teamLabel } = normalizeTeamId(run.linearTeamId);
     if (!byTeam.has(teamKey)) byTeam.set(teamKey, emptyBucket(teamKey, teamLabel));
-    const tb = byTeam.get(teamKey)!;
-    tb.runs += 1; tb.inputTokens += cost.inputTokens; tb.outputTokens += cost.outputTokens;
-    tb.dollars += cost.dollars; tb.timeSavedHours += cost.timeSavedHours;
-    if (isMergedPr) tb.prsMerged += 1;
+    updateBucketMetrics(byTeam.get(teamKey)!, cost, isMergedPr);
 
     const repoKey = `repo:${run.repoUrl}`;
     if (!byRepo.has(repoKey)) byRepo.set(repoKey, emptyBucket(repoKey, run.repoUrl));
-    const rb = byRepo.get(repoKey)!;
-    rb.runs += 1; rb.inputTokens += cost.inputTokens; rb.outputTokens += cost.outputTokens;
-    rb.dollars += cost.dollars; rb.timeSavedHours += cost.timeSavedHours;
-    if (isMergedPr) rb.prsMerged += 1;
+    updateBucketMetrics(byRepo.get(repoKey)!, cost, isMergedPr);
 
     const pipelineKey = `pipeline:${run.pipelineKey}`;
     if (!byPipeline.has(pipelineKey)) byPipeline.set(pipelineKey, emptyBucket(pipelineKey, run.pipelineKey));
-    const pb = byPipeline.get(pipelineKey)!;
-    pb.runs += 1; pb.inputTokens += cost.inputTokens; pb.outputTokens += cost.outputTokens;
-    pb.dollars += cost.dollars; pb.timeSavedHours += cost.timeSavedHours;
-    if (isMergedPr) pb.prsMerged += 1;
+    updateBucketMetrics(byPipeline.get(pipelineKey)!, cost, isMergedPr);
   }
 
   summary.roiMultiplier = finalizeRoi(summary, hourlyRate);
@@ -272,24 +296,15 @@ async function aggregateFromRollups(
     const teamId = r.linearTeamId === "" ? null : r.linearTeamId;
     const { key: teamKey, label: teamLabel } = normalizeTeamId(teamId);
     if (!byTeam.has(teamKey)) byTeam.set(teamKey, emptyBucket(teamKey, teamLabel));
-    const tb = byTeam.get(teamKey)!;
-    tb.runs += r.runs; tb.prsMerged += r.prsMerged;
-    tb.inputTokens += r.inputTokens; tb.outputTokens += r.outputTokens;
-    tb.dollars += r.dollars; tb.timeSavedHours += r.timeSavedHours;
+    addRollupToBucket(byTeam.get(teamKey)!, r);
 
     const repoKey = `repo:${r.repoUrl}`;
     if (!byRepo.has(repoKey)) byRepo.set(repoKey, emptyBucket(repoKey, r.repoUrl));
-    const rb = byRepo.get(repoKey)!;
-    rb.runs += r.runs; rb.prsMerged += r.prsMerged;
-    rb.inputTokens += r.inputTokens; rb.outputTokens += r.outputTokens;
-    rb.dollars += r.dollars; rb.timeSavedHours += r.timeSavedHours;
+    addRollupToBucket(byRepo.get(repoKey)!, r);
 
     const pipelineKey = `pipeline:${r.pipelineKey}`;
     if (!byPipeline.has(pipelineKey)) byPipeline.set(pipelineKey, emptyBucket(pipelineKey, r.pipelineKey));
-    const pb = byPipeline.get(pipelineKey)!;
-    pb.runs += r.runs; pb.prsMerged += r.prsMerged;
-    pb.inputTokens += r.inputTokens; pb.outputTokens += r.outputTokens;
-    pb.dollars += r.dollars; pb.timeSavedHours += r.timeSavedHours;
+    addRollupToBucket(byPipeline.get(pipelineKey)!, r);
   }
 
   summary.roiMultiplier = finalizeRoi(summary, hourlyRate);
@@ -310,7 +325,18 @@ async function aggregateFromRollups(
 
 function mergeDailyRows(a: DailyRow[], b: DailyRow[]): DailyRow[] {
   const byDate = new Map<string, DailyRow>();
-  for (const row of [...a, ...b]) {
+  for (const row of a) {
+    const existing = byDate.get(row.date);
+    if (!existing) {
+      byDate.set(row.date, { ...row });
+    } else {
+      existing.runs += row.runs;
+      existing.prsMerged += row.prsMerged;
+      existing.dollars += row.dollars;
+      existing.timeSavedHours += row.timeSavedHours;
+    }
+  }
+  for (const row of b) {
     const existing = byDate.get(row.date);
     if (!existing) {
       byDate.set(row.date, { ...row });
@@ -330,7 +356,20 @@ function mergeBreakdowns(
   hourlyRate: number,
 ): BreakdownRow[] {
   const byKey = new Map<string, BreakdownRow>();
-  for (const row of [...a, ...b]) {
+  for (const row of a) {
+    const existing = byKey.get(row.key);
+    if (!existing) {
+      byKey.set(row.key, { ...row });
+    } else {
+      existing.runs += row.runs;
+      existing.prsMerged += row.prsMerged;
+      existing.inputTokens += row.inputTokens;
+      existing.outputTokens += row.outputTokens;
+      existing.dollars += row.dollars;
+      existing.timeSavedHours += row.timeSavedHours;
+    }
+  }
+  for (const row of b) {
     const existing = byKey.get(row.key);
     if (!existing) {
       byKey.set(row.key, { ...row });
