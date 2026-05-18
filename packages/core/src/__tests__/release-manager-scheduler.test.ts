@@ -425,6 +425,70 @@ describe("createReleaseManagerScheduler — qaCheck integration", () => {
     expect(rows[0].reason).toBe("qa_no_workflow");
   });
 
+  it("BEC-146: retry counter resets after successful dispatch — fail/fail/success(pending)/fail sequence should give attemptCount=1 not 3", async () => {
+    // Reproduces the bug described in BEC-146:
+    // When 2 dispatch failures occur (rows with attemptCount=1,2), then a successful
+    // HTTP dispatch occurs but listWorkflowRuns hasn't returned a runId yet
+    // (dispatch_pending), then a new failure occurs — the MAX query reads 2 from the
+    // OLD failure rows and escalates to 3 → permanent skip (qa_dispatch_error).
+    // Expected: the counter should reset to 0 after the successful dispatch, so the
+    // new failure starts counting from 1 (not 3).
+    const cfg = ReleaseManagerConfigSchema.parse(qaConfig);
+    let dispatchCallCount = 0;
+    const octokit = makeMockOctokit({
+      repos: {
+        getBranch: vi.fn(async () => ({ data: { commit: { sha: "head_sha_bec146" } } })),
+        listTags: vi.fn(async () => ({ data: [{ name: "v1.0.0", commit: { sha: "old_sha" } }] })),
+        getCommit: vi.fn(async () => ({ data: { commit: { committer: { date: "2026-04-01T12:00:00Z" } } } })),
+        compareCommits: vi.fn(async () => ({ data: { commits: [{ commit: { message: "fix: a" } }] } })),
+        listCommits: vi.fn(async () => ({ data: [] })),
+        getContent: vi.fn(async () => ({ data: { type: "file" } })),
+      },
+      actions: {
+        createWorkflowDispatch: vi.fn(async () => {
+          dispatchCallCount++;
+          if (dispatchCallCount <= 2) {
+            // Ticks 1, 2: dispatch fails with 502
+            const e: any = new Error("Server Error"); e.status = 502; throw e;
+          }
+          if (dispatchCallCount === 3) {
+            // Tick 3: dispatch HTTP call succeeds (204 OK) — "the successful dispatch"
+            return { status: 204 };
+          }
+          // Tick 4: dispatch fails again
+          const e: any = new Error("Server Error"); e.status = 502; throw e;
+        }),
+        // Always returns [] so tick 3 becomes dispatch_pending (runId not found yet)
+        // and state.qaRun remains null across all 4 ticks (all rows have qaRunId=null)
+        listWorkflowRuns: vi.fn(async () => ({ data: { workflow_runs: [] } })),
+      },
+      checks: { listForRef: vi.fn(async () => ({ data: { check_runs: [] } })) },
+    });
+    const sched = createReleaseManagerScheduler({
+      config: cfg, db, octokit, linear: { createIssue: vi.fn() } as any, repoUrl,
+      isLicensed: () => true, slack: undefined,
+    });
+
+    await sched.tick(); // Tick 1: dispatch_error → attemptCount=1
+    await sched.tick(); // Tick 2: dispatch_error → attemptCount=2
+    await sched.tick(); // Tick 3: HTTP 204 OK but listWorkflowRuns=[] → dispatch_pending
+    await sched.tick(); // Tick 4: dispatch_error → BUG: MAX(1,2,2)=2 → 2+1=3 → qa_dispatch_error
+
+    const rows = await db.select().from(releaseDecisions).orderBy(releaseDecisions.decidedAt);
+    expect(rows).toHaveLength(4);
+
+    const row4 = rows[3];
+    // BUG: With the current code, row4.reason === "qa_dispatch_error" and
+    // row4.attemptCount === 3 because getMaxAttemptCountForReason returns MAX=2
+    // from old failure rows, ignoring that tick 3 was a successful dispatch.
+    //
+    // EXPECTED (after fix): row4.attemptCount === 1 because the counter should
+    // reset to 0 after the successful dispatch in tick 3, so the new failure
+    // starts counting from 1 and does NOT immediately escalate to permanent skip.
+    expect(row4.reason).not.toBe("qa_dispatch_error"); // FAILS due to BUG (actually "qa_dispatch_error")
+    expect(row4.attemptCount).toBe(1);                 // FAILS due to BUG (actually 3)
+  });
+
   it("retry counter: 3 consecutive dispatch failures → permanent skip with qa_dispatch_error", async () => {
     const cfg = ReleaseManagerConfigSchema.parse(qaConfig);
     const octokit = makeMockOctokit({

@@ -323,11 +323,15 @@ export async function tick(ctx: TickContext): Promise<void> {
         finalReason = "qa_dispatch_error";
         attemptCount = 99; // permanent skip — workflow misconfigured, retrying won't help
       } else if (dispatch.kind === "dispatch_pending") {
-        // GitHub eventual-consistency window. Don't count against retry budget; next tick
-        // will re-evaluate and the run should be findable by then.
+        // GitHub eventual-consistency window. The HTTP dispatch DID succeed (204 OK), so
+        // reset the retry counter to 0 — a successful dispatch is not a failure.
+        // BEC-146: without this reset, old dispatch_error rows (attemptCount=1,2) cause
+        // MAX(attemptCount) on the next failure to read 2 and immediately escalate to
+        // qa_dispatch_error, bypassing the intended retry budget.
+        attemptCount = 0;
         // Tag with qaRunSha so the per-SHA retry counter query can find these rows.
         qaRunSha = state.headSha;
-        // attemptCount stays as-is; finalReason stays as "qa_needs_trigger" for next tick to retry.
+        // finalReason stays as "qa_needs_trigger" for next tick to retry.
       } else {
         // dispatch_error — increment attempt counter.
         // Tag with qaRunSha so the per-SHA retry counter query can find these rows.

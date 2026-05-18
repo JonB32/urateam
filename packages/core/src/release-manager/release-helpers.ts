@@ -10,7 +10,7 @@
  *   - maybePostSlack              — post to Slack with 24-hour same-reason dedup
  *   - persistDecision             — write a release_decisions row
  *   - consumeApprovalRow          — mark the most-recent fresh approval as consumed
- *   - getMaxAttemptCountForReason — query the highest attempt count for a (repo, branch, reason) triple
+ *   - getMaxAttemptCountForReason — query the attempt count from the most-recent row for a (repo, branch, reason) triple
  *   - tryFileQaGapIssue           — file a QA gap issue via Linear and handle transient errors
  */
 import { and, desc, eq, isNull, max } from "drizzle-orm";
@@ -165,10 +165,17 @@ export async function consumeApprovalRow(
 }
 
 /**
- * Query the highest `attemptCount` stored for a given `(repoUrl, branch, reason)` triple.
+ * Query the `attemptCount` of the most-recent row for a given `(repoUrl, branch, reason)` triple.
  *
- * Uses `MAX(attemptCount)` rather than `ORDER BY + LIMIT 1` to be stable when
- * multiple rows share the same `decidedAt` timestamp (e.g. rapid consecutive ticks).
+ * BEC-146 fix: uses `ORDER BY decidedAt DESC LIMIT 1` rather than `MAX(attemptCount)`.
+ * Using MAX caused a correctness bug: when a successful dispatch reset `attemptCount` to 0
+ * (writing a row with `attemptCount=0`), the subsequent `MAX` query still returned the
+ * old high-water mark from earlier failure rows — causing the next failure to compute
+ * `MAX_old + 1 >= MAX_QA_RETRY_ATTEMPTS` and permanently skip despite the counter
+ * having been logically reset.
+ *
+ * By reading the most-recent row's `attemptCount`, we correctly observe the reset value
+ * (0) after a successful dispatch, so the next failure starts the counter from 1.
  *
  * @param db        - Database client.
  * @param repoUrl   - Repository URL.
