@@ -22,6 +22,17 @@ import { requirePermission } from "../middleware/rbac.js";
 
 type AnyDb = any;
 
+/**
+ * Run statuses that are definitively done — no further transitions are
+ * possible and stop/cancel signals are a no-op.
+ */
+const TERMINAL_RUN_STATUSES = ["completed", "failed", "aborted", "cancelled"] as const;
+
+/** Returns true when a run status is eligible for retry. */
+function isRetryableStatus(status: string): boolean {
+  return status === "failed" || status === "retriable";
+}
+
 export interface RunsRouterDeps {
   db: Db;
   runner?: {
@@ -60,6 +71,90 @@ export function createRunsRouter(
   const router = new Hono();
   const d = db as AnyDb;
 
+  // ---------------------------------------------------------------------------
+  // Shared helpers (closed over db/runner/d so they don't need extra args)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * RBAC-license gate middleware. Returns 404 (not 403) when the RBAC feature
+   * is unlicensed so that the endpoint surface is not discoverable in OSS
+   * deployments. Use instead of inlining `isFeatureLicensed("rbac")` in every
+   * route middleware chain.
+   */
+  const requireRbac = async (c: any, next: any) => {
+    if (!isFeatureLicensed("rbac")) return c.notFound();
+    return next();
+  };
+
+  /**
+   * Fetch a pipeline run row by its id. Returns `null` when not found so
+   * handlers can choose their own 404 shape (text vs HTML).
+   */
+  async function fetchRunById(id: string): Promise<any | null> {
+    const rows = await d
+      .select()
+      .from(pipelineRuns)
+      .where(eq(pipelineRuns.id, id))
+      .limit(1);
+    return rows.length > 0 ? (rows[0] as any) : null;
+  }
+
+  /**
+   * Resume or start a pipeline run (the "retry" logic shared between the
+   * dashboard and CLI retry handlers).
+   */
+  async function retryRun(id: string, run: any): Promise<void> {
+    if (run.resumePayload) {
+      await runner!.resume(id);
+    } else {
+      await runner!.start({
+        issueId: run.issueId,
+        issueTitle: run.issueTitle,
+        repoUrl: run.repoUrl,
+        parentRunId: id,
+      });
+    }
+  }
+
+  /**
+   * Emit per-run audit events after a halt. Uses a single batched
+   * `inArray()` query so 10+ cancelled runs don't trigger 10+ round-trips.
+   */
+  async function auditCancelledRunsBatch(
+    cancelledRunIds: string[],
+    actor: string,
+    actorType: "dashboard-user" | "cli" | "slack" | "system",
+  ): Promise<void> {
+    if (cancelledRunIds.length === 0) return;
+    const rows = await d
+      .select({ id: pipelineRuns.id, issueId: pipelineRuns.issueId })
+      .from(pipelineRuns)
+      .where(inArray(pipelineRuns.id, cancelledRunIds));
+    const issueMap = new Map<string, string>(
+      rows.map((r: any) => [r.id as string, r.issueId as string]),
+    );
+    for (const runId of cancelledRunIds) {
+      const issueId = issueMap.get(runId);
+      if (issueId) {
+        void logAuditEvent(
+          db as any,
+          runCancelledEvent({
+            runId,
+            issueId,
+            actor,
+            actorType,
+            mode: "cancel",
+            reason: "system.halt",
+          }),
+        );
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Routes
+  // ---------------------------------------------------------------------------
+
   router.get("/", requirePermission("runs.view"), async (c) => {
     const runs = await d
       .select()
@@ -96,11 +191,7 @@ export function createRunsRouter(
       | { id: string; email: string; role?: Role }
       | undefined;
 
-    const [run] = await d
-      .select()
-      .from(pipelineRuns)
-      .where(eq(pipelineRuns.id, id))
-      .limit(1) as (RunInfo | undefined)[];
+    const run = await fetchRunById(id) as RunInfo | null;
 
     if (!run) {
       return c.html(layout("Not Found", "<p>Run not found</p>", effectiveBasePath, { userEmail: user?.email }), 404);
@@ -135,13 +226,16 @@ export function createRunsRouter(
         .offset(offset) as LogEntry[];
     }
 
-    const canRetry = isFeatureLicensed("rbac")
+    // Cache the rbac license check — isFeatureLicensed may involve a lookup
+    // and is needed three times in quick succession here.
+    const rbacLicensed = isFeatureLicensed("rbac");
+    const canRetry = rbacLicensed
       ? canAccess((user?.role ?? "viewer") as Role, "runs.retry")
       : false;
-    const canStop = isFeatureLicensed("rbac")
+    const canStop = rbacLicensed
       ? canAccess((user?.role ?? "viewer") as Role, "runs.stop")
       : false;
-    const canHalt = isFeatureLicensed("rbac")
+    const canHalt = rbacLicensed
       ? canAccess((user?.role ?? "viewer") as Role, "system.halt")
       : false;
     const content = runDetailView(run, stages, logs, page, totalLogs, canRetry, {
@@ -153,26 +247,13 @@ export function createRunsRouter(
 
   router.post(
     "/runs/:id/retry",
-    async (c, next) => {
-      // Per spec §10: retry endpoint returns 404 when RBAC is unlicensed.
-      // Without this gate the endpoint would be wide-open in unlicensed
-      // deployments because requirePermission is a no-op then.
-      if (!isFeatureLicensed("rbac")) return c.notFound();
-      return next();
-    },
+    requireRbac,
     requirePermission("runs.retry"),
     async (c) => {
       const id = c.req.param("id");
-      const rows = await d
-        .select()
-        .from(pipelineRuns)
-        .where(eq(pipelineRuns.id, id))
-        .limit(1);
-      if (rows.length === 0) {
-        return c.text("Run not found", 404);
-      }
-      const run = rows[0] as any;
-      if (run.status !== "failed" && run.status !== "retriable") {
+      const run = await fetchRunById(id);
+      if (!run) return c.text("Run not found", 404);
+      if (!isRetryableStatus(run.status)) {
         return c.text(`Cannot retry a run in status ${run.status}`, 409);
       }
 
@@ -181,16 +262,7 @@ export function createRunsRouter(
       }
 
       try {
-        if (run.resumePayload) {
-          await runner.resume(id);
-        } else {
-          await runner.start({
-            issueId: run.issueId,
-            issueTitle: run.issueTitle,
-            repoUrl: run.repoUrl,
-            parentRunId: id,
-          });
-        }
+        await retryRun(id, run);
       } catch (err) {
         return c.text(`Retry failed: ${(err as Error).message}`, 500);
       }
@@ -236,11 +308,9 @@ export function createRunsRouter(
    */
   const stopHandler = (mode: StopMode) => async (c: any) => {
     const id = c.req.param("id");
-    const rows = await d.select().from(pipelineRuns).where(eq(pipelineRuns.id, id)).limit(1);
-    if (rows.length === 0) return c.text("Run not found", 404);
-    const run = rows[0] as any;
-    const terminal = ["completed", "failed", "aborted", "cancelled"];
-    if (terminal.includes(run.status)) {
+    const run = await fetchRunById(id);
+    if (!run) return c.text("Run not found", 404);
+    if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(run.status)) {
       return c.text(`Cannot stop a run in status ${run.status}`, 409);
     }
 
@@ -269,25 +339,8 @@ export function createRunsRouter(
     return c.redirect(target, 302);
   };
 
-  router.post(
-    "/runs/:id/cancel",
-    async (c, next) => {
-      if (!isFeatureLicensed("rbac")) return c.notFound();
-      return next();
-    },
-    requirePermission("runs.stop"),
-    stopHandler("cancel"),
-  );
-
-  router.post(
-    "/runs/:id/stop",
-    async (c, next) => {
-      if (!isFeatureLicensed("rbac")) return c.notFound();
-      return next();
-    },
-    requirePermission("runs.stop"),
-    stopHandler("graceful"),
-  );
+  router.post("/runs/:id/cancel", requireRbac, requirePermission("runs.stop"), stopHandler("cancel"));
+  router.post("/runs/:id/stop", requireRbac, requirePermission("runs.stop"), stopHandler("graceful"));
 
   /**
    * Container-wide halt: pauses the PM Agent and cancels every active run.
@@ -297,10 +350,7 @@ export function createRunsRouter(
    */
   router.post(
     "/admin/halt-all",
-    async (c, next) => {
-      if (!isFeatureLicensed("rbac")) return c.notFound();
-      return next();
-    },
+    requireRbac,
     requirePermission("system.halt"),
     async (c) => {
       if (!runner?.haltAll) return c.text("Runner not configured", 500);
@@ -308,36 +358,17 @@ export function createRunsRouter(
 
       const user = c.get("user" as never) as { id: string; email: string } | undefined;
       if (user) {
+        const actor = `dashboard:${user.email}`;
         void logAuditEvent(
           db as any,
           systemHaltedEvent({
-            actor: `dashboard:${user.email}`,
+            actor,
             actorType: "dashboard-user",
             cancelledRunIds,
           }),
         );
-        // Per-run audit trail so each affected run shows the cancel reason in
-        // the audit feed alongside the halt event.
-        for (const runId of cancelledRunIds) {
-          const [row] = await d
-            .select({ issueId: pipelineRuns.issueId })
-            .from(pipelineRuns)
-            .where(eq(pipelineRuns.id, runId))
-            .limit(1);
-          if (row?.issueId) {
-            void logAuditEvent(
-              db as any,
-              runCancelledEvent({
-                runId,
-                issueId: row.issueId,
-                actor: `dashboard:${user.email}`,
-                actorType: "dashboard-user",
-                mode: "cancel",
-                reason: "system.halt",
-              }),
-            );
-          }
-        }
+        // Per-run audit trail — batched to avoid N+1 queries.
+        void auditCancelledRunsBatch(cancelledRunIds, actor, "dashboard-user");
       }
 
       const target = `${effectiveBasePath}/`;
@@ -380,10 +411,9 @@ export function createRunsRouter(
 
   const cliStopHandler = (mode: StopMode) => async (c: any) => {
     const id = c.req.param("id");
-    const rows = await d.select().from(pipelineRuns).where(eq(pipelineRuns.id, id)).limit(1);
-    if (rows.length === 0) return c.text("Run not found", 404);
-    const run = rows[0] as any;
-    if (["completed", "failed", "aborted", "cancelled"].includes(run.status)) {
+    const run = await fetchRunById(id);
+    if (!run) return c.text("Run not found", 404);
+    if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(run.status)) {
       return c.json({ error: `Cannot stop a run in status ${run.status}` }, 409);
     }
     if (!runner?.requestStop) return c.text("Runner not configured", 500);
@@ -404,37 +434,50 @@ export function createRunsRouter(
   router.post("/cli/runs/:id/cancel", requireCliToken, cliStopHandler("cancel"));
   router.post("/cli/runs/:id/stop", requireCliToken, cliStopHandler("graceful"));
 
+  const cliRetryHandler = async (c: any) => {
+    const id = c.req.param("id");
+    const run = await fetchRunById(id);
+    if (!run) return c.text("Run not found", 404);
+    if (!isRetryableStatus(run.status)) {
+      return c.json({ error: `Cannot retry a run in status ${run.status}` }, 409);
+    }
+    if (!runner) return c.text("Runner not configured", 500);
+    const previousStatus = run.status;
+    try {
+      await retryRun(id, run);
+    } catch (err) {
+      return c.text(`Retry failed: ${(err as Error).message}`, 500);
+    }
+    const actor = cliActor(c);
+    void logAuditEvent(
+      db as any,
+      dashboardRetryRunEvent({
+        runId: id,
+        issueId: run.issueId,
+        previousStatus,
+        actorUserId: actor,
+        actorEmail: actor,
+      }),
+    );
+    return c.json({ runId: id, mode: "retry", issueId: run.issueId });
+  };
+
+  router.post("/cli/runs/:id/retry", requireCliToken, cliRetryHandler);
+
   router.post("/cli/halt-all", requireCliToken, async (c) => {
     if (!runner?.haltAll) return c.text("Runner not configured", 500);
     const { cancelledRunIds } = runner.haltAll();
+    const actor = cliActor(c);
     void logAuditEvent(
       db as any,
       systemHaltedEvent({
-        actor: cliActor(c),
+        actor,
         actorType: "cli",
         cancelledRunIds,
       }),
     );
-    for (const runId of cancelledRunIds) {
-      const [row] = await d
-        .select({ issueId: pipelineRuns.issueId })
-        .from(pipelineRuns)
-        .where(eq(pipelineRuns.id, runId))
-        .limit(1);
-      if (row?.issueId) {
-        void logAuditEvent(
-          db as any,
-          runCancelledEvent({
-            runId,
-            issueId: row.issueId,
-            actor: cliActor(c),
-            actorType: "cli",
-            mode: "cancel",
-            reason: "system.halt",
-          }),
-        );
-      }
-    }
+    // Per-run audit trail — batched to avoid N+1 queries.
+    void auditCancelledRunsBatch(cancelledRunIds, actor, "cli");
     return c.json({ cancelledRunIds });
   });
 
