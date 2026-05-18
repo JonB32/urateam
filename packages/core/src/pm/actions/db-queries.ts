@@ -1,4 +1,5 @@
 import type { AnyDb } from "../../db/client.js";
+import type { CircuitBrokenIssue } from "../types.js";
 import { pipelineRuns } from "../../db/schema.js";
 import { and, desc, eq, gte, inArray, or } from "drizzle-orm";
 
@@ -193,4 +194,96 @@ export async function batchCountConsecutiveFailures(
     result.set(issueId, countLeadingFailures(issueRows));
   }
   return result;
+}
+
+/**
+ * BEC-223: Fetch issues that have hit the circuit-breaker threshold (≥
+ * `minConsecutiveFailures` consecutive failed pipeline runs) and had at
+ * least one failed run within the last `windowDays` days.
+ *
+ * Issues whose most-recent terminal run is `'completed'` are automatically
+ * excluded by `batchCountConsecutiveFailures` (it returns 0 for recovered
+ * issues), so no extra filter is needed.
+ *
+ * Avoids N+1 queries: a single `batchCountConsecutiveFailures` round-trip
+ * processes all candidate issue IDs.
+ *
+ * BEC-187 (CLAUDE.md hot-path note): `pipeline_runs` lacks an index on
+ * `(status, started_at)` until BEC-187 ships. This query is bounded by:
+ *   - a 7-day cutoff on `started_at`,
+ *   - a row LIMIT (`CIRCUIT_BROKEN_FETCH_LIMIT`),
+ *   - frequency: invoked once per PM tick (default 30 min).
+ * The Slack digest only renders the top 10, so 50 candidate rows is more
+ * than enough headroom for dedup-by-issue-id.
+ */
+const CIRCUIT_BROKEN_FETCH_LIMIT = 50;
+
+export async function fetchCircuitBrokenIssues(
+  db: AnyDb,
+  minConsecutiveFailures: number = 3,
+  windowDays: number = 7,
+): Promise<CircuitBrokenIssue[]> {
+  const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
+
+  // Fetch up to CIRCUIT_BROKEN_FETCH_LIMIT most-recent failed runs in the
+  // window (most-recent first). See BEC-187 note above re: hot-path query
+  // budget.
+  const rows = await db
+    .select({
+      issueId: pipelineRuns.issueId,
+      issueTitle: pipelineRuns.issueTitle,
+      errorMessage: pipelineRuns.errorMessage,
+      startedAt: pipelineRuns.startedAt,
+      completedAt: pipelineRuns.completedAt,
+    })
+    .from(pipelineRuns)
+    .where(
+      and(
+        eq(pipelineRuns.status, "failed"),
+        gte(pipelineRuns.startedAt, cutoff),
+      ),
+    )
+    .orderBy(desc(pipelineRuns.startedAt), desc(pipelineRuns.id))
+    .limit(CIRCUIT_BROKEN_FETCH_LIMIT);
+
+  // Dedupe by issueId — keep the most-recent failed run's display data.
+  const byIssue = new Map<string, CircuitBrokenIssue>();
+  for (const row of rows as Array<{
+    issueId: string;
+    issueTitle: string;
+    errorMessage: string | null;
+    startedAt: Date;
+    completedAt: Date | null;
+  }>) {
+    if (!byIssue.has(row.issueId)) {
+      byIssue.set(row.issueId, {
+        issueId: row.issueId,
+        issueTitle: row.issueTitle,
+        errorMessage: row.errorMessage ?? undefined,
+        // Prefer completedAt (exact failure time); fall back to startedAt.
+        failedAt: row.completedAt ?? row.startedAt,
+        url: `https://linear.app/issue/${row.issueId}`,
+      });
+    }
+  }
+
+  if (byIssue.size === 0) return [];
+
+  const issueIds = Array.from(byIssue.keys());
+  const failureCounts = await batchCountConsecutiveFailures(db, issueIds);
+
+  // Retain only issues at or above the failure threshold.
+  // batchCountConsecutiveFailures returns 0 for recovered issues.
+  const results: CircuitBrokenIssue[] = [];
+  for (const issueId of issueIds) {
+    const count = failureCounts.get(issueId) ?? 0;
+    if (count >= minConsecutiveFailures) {
+      results.push(byIssue.get(issueId)!);
+    }
+  }
+
+  // Most-recently-broken first so the digest is stable across ticks.
+  results.sort((a, b) => b.failedAt.getTime() - a.failedAt.getTime());
+
+  return results;
 }

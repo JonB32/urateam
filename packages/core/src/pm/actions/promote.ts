@@ -4,6 +4,7 @@ import { resolveWorkflowStates } from "../linear-helpers.js";
 import { resolveIssueRelations } from "../../util/linear.js";
 import { resolvePipeline } from "../../pipeline/router.js";
 import { createLogger } from "../../logger.js";
+import { truncateWithEllipsis } from "../../util/strings.js";
 import type { AnyDb } from "../../db/client.js";
 import {
   logAuditEventUnchecked,
@@ -260,9 +261,7 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
               await linearClient.updateIssue(candidate.id, { labelIds: merged });
             }
             const truncated = errorMessage
-              ? errorMessage.length > 500
-                ? errorMessage.slice(0, 500) + "…"
-                : errorMessage
+              ? truncateWithEllipsis(errorMessage, 500)
               : "(no error message captured on the most recent failed run)";
             await linearClient.createComment({
               issueId: candidate.id,

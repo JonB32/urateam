@@ -13,6 +13,7 @@ import { recoverRetriableRuns, type RecoverResult } from "./actions/recover.js";
 import { recoverStuckInProgressIssues, type StuckIssueResult } from "./actions/recover-stuck.js";
 import { startTodoIssues, type StartTodoInput, type StartTodoResult } from "./actions/start-todo.js";
 import { getActiveFileMaps, predictConflict, type ActiveRun } from "./conflict.js";
+import { fetchCircuitBrokenIssues, ACTIVE_STATUSES } from "./actions/db-queries.js";
 import { PmSlackNotifier } from "./slack.js";
 import { isPmPaused } from "./slack-interface.js";
 import { isFeatureLicensed } from "../license.js";
@@ -22,7 +23,7 @@ import { pipelineRuns } from "../db/schema.js";
 import { makeCallClaude } from "./call-claude.js";
 import { sanitize } from "../executor/prompt/sanitizer.js";
 import { resolveWorkflowStates, createLazyLinearClient } from "./linear-helpers.js";
-import { sql } from "drizzle-orm";
+import { sql, inArray } from "drizzle-orm";
 import { createLogger } from "../logger.js";
 import { logAuditEventUnchecked, budgetRefusedEvent, pruneAuditLog } from "../audit/index.js";
 import { pruneExpiredSessions } from "../auth/index.js";
@@ -30,6 +31,20 @@ import { recomputeCostRollups } from "../cost/index.js";
 import { createAuthMonitor, type AuthMonitor } from "../executor/auth-monitor.js";
 
 const log = createLogger({ component: "PmAgent:scheduler" });
+
+/**
+ * BEC-184: parse the PM_AGENT_STUCK_RUN_AGE_MIN env var (default 60 min).
+ * Controls how long a 'running' run must be active before it's treated as a
+ * zombie and eligible for stuck-issue recovery.
+ *
+ * Uses an isNaN guard so '0' doesn't silently fall back to 60 via a falsy
+ * `||` check; clamps to ≥1 min to prevent overly-aggressive recovery on
+ * mis-configured deployments.
+ */
+function parseStuckRunAgeMinutes(envValue: string | undefined): number {
+  const parsed = parseInt(envValue ?? "", 10);
+  return isNaN(parsed) ? 60 : Math.max(1, parsed);
+}
 
 export interface PmSchedulerDeps {
   config: PmAgentConfig;
@@ -58,7 +73,7 @@ interface PmSchedulerActions {
   promoteReadyIssues: (input: PromoteInput) => Promise<any[]>;
   deprioritizeStaleIssues: (input: DeprioritizeInput) => Promise<string[]>;
   cancelAbandonedIssues: (input: CancelInput) => Promise<string[]>;
-  postDigest: (tick: TickResult, maxInFlight: number) => Promise<void>;
+  postDigest: (tick: TickResult, maxInFlight: number, minConsecutiveFailures?: number) => Promise<void>;
   getActiveFileMaps: typeof getActiveFileMaps;
   predictConflict: typeof predictConflict;
 }
@@ -274,14 +289,9 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
         // --- Stuck In Progress issue recovery sweep ---
         if (config.stuckIssueRecovery !== false && !isPmPaused()) {
           try {
-            // BEC-184: read PM_AGENT_STUCK_RUN_AGE_MIN from env (default 60 min).
-            // Controls how long a 'running' run must be active before it's treated
-            // as a zombie and eligible for stuck-issue recovery.
-            // PM_AGENT_STUCK_RUN_AGE_MIN: use isNaN guard so '0' doesn't silently
-            // fall back to 60 via || falsy check; clamp to ≥1 min to prevent
-            // overly-aggressive recovery on mis-configured deployments.
-            const _parsedAge = parseInt(process.env.PM_AGENT_STUCK_RUN_AGE_MIN ?? "", 10);
-            const stuckRunAgeMinutes = isNaN(_parsedAge) ? 60 : Math.max(1, _parsedAge);
+            const stuckRunAgeMinutes = parseStuckRunAgeMinutes(
+              process.env.PM_AGENT_STUCK_RUN_AGE_MIN,
+            );
             const stuckResult = actions?.recoverStuckInProgressIssues
               ? await actions.recoverStuckInProgressIssues({} as any)
               : await recoverStuckInProgressIssues({
@@ -491,11 +501,22 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           }
         }
 
+        // BEC-223: Populate circuit-broken issues for the digest before posting.
+        // Wrapped in try/catch — failure must not prevent the digest from posting.
+        const minFailures = config.maxConsecutiveFailures > 0 ? config.maxConsecutiveFailures : 3;
+        if (!actions) {
+          try {
+            tick.circuitBrokenIssues = await fetchCircuitBrokenIssues(db, minFailures);
+          } catch (err) {
+            log.warn({ err }, "failed to fetch circuit-broken issues for digest");
+          }
+        }
+
         try {
           if (actions) {
             await actions.postDigest(tick, config.maxInFlight);
           } else {
-            await getSlackNotifier().postDigest(tick, config.maxInFlight);
+            await getSlackNotifier().postDigest(tick, config.maxInFlight, minFailures);
           }
         } catch (err) {
           log.error({ err }, "digest failed");
@@ -566,7 +587,7 @@ async function getActiveRunsFromDb(db: AnyDb): Promise<ActiveRun[]> {
       })
       .from(pipelineRuns)
       .where(
-        sql`${pipelineRuns.status} in ('queued', 'running')`,
+        inArray(pipelineRuns.status, [...ACTIVE_STATUSES]),
       );
 
     return rows

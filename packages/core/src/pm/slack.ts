@@ -2,8 +2,11 @@ import type { TickResult, ApprovalAction } from "./types.js";
 import type { StuckIssueResult } from "./actions/recover-stuck.js";
 import { postSlackMessage } from "./slack-helpers.js";
 import { createLogger } from "../logger.js";
+import { truncateWithEllipsis } from "../util/strings.js";
 
 const log = createLogger({ component: "PmAgent:slack" });
+
+const CIRCUIT_BROKEN_ISSUES_CAP = 10;
 
 export interface PmSlackConfig {
   botToken: string;
@@ -19,7 +22,7 @@ export class PmSlackNotifier {
     this.channelId = config.channelId;
   }
 
-  async postDigest(tick: TickResult, maxInFlight: number): Promise<void> {
+  async postDigest(tick: TickResult, maxInFlight: number, minConsecutiveFailures: number = 3): Promise<void> {
     const hasActions =
       tick.paused ||
       tick.triaged.length > 0 ||
@@ -28,6 +31,7 @@ export class PmSlackNotifier {
       tick.deprioritizeRequested.length > 0 ||
       tick.cancelRequested.length > 0 ||
       (tick.recoveredStuckIssues?.length ?? 0) > 0 ||
+      (tick.circuitBrokenIssues?.length ?? 0) > 0 ||
       tick.errors.length > 0;
 
     if (!hasActions) return;
@@ -81,6 +85,25 @@ export class PmSlackNotifier {
     }
     if (tick.recoveredStuckIssues && tick.recoveredStuckIssues.length > 0) {
       lines.push(`*Auto-recovered stuck issues:* ${tick.recoveredStuckIssues.join(", ")}`);
+    }
+    if (tick.circuitBrokenIssues && tick.circuitBrokenIssues.length > 0) {
+      const cap = CIRCUIT_BROKEN_ISSUES_CAP;
+      const display = tick.circuitBrokenIssues.slice(0, cap);
+      const overflow = tick.circuitBrokenIssues.length - display.length;
+      lines.push("");
+      lines.push(`*Circuit-Broken Issues* (≥${minConsecutiveFailures} consecutive failures in last 7 days):`);
+      for (const issue of display) {
+        const idLabel = issue.url ? `<${issue.url}|${issue.issueId}>` : issue.issueId;
+        const title = truncateWithEllipsis(issue.issueTitle, 80);
+        const errPart = issue.errorMessage
+          ? `: \`${truncateWithEllipsis(issue.errorMessage, 200)}\``
+          : "";
+        const ts = issue.failedAt.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
+        lines.push(`• *${idLabel}* _${title}_${errPart} (${ts})`);
+      }
+      if (overflow > 0) {
+        lines.push(`_+${overflow} more_`);
+      }
     }
     if (tick.errors.length > 0) {
       lines.push("");
