@@ -13,7 +13,7 @@ export * from "./cost/index.js";
 export * from "./rbac/index.js";
 export { computeConfigFingerprint } from "./audit/config-fingerprint.js";
 export { rootLogger, createLogger, addLogStream } from "./logger.js";
-export { createDb, isPostgres, sqlDateGroup, sqlDaysAgoFilter, type Db } from "./db/index.js";
+export { createDb, isPostgres, sqlDateGroup, sqlDaysAgoFilter, type Db, type AnyDb } from "./db/index.js";
 export { pipelineRuns, stageRuns, agentLogs, activeWork, pmApprovals } from "./db/index.js";
 export { createApp, type ServerConfig } from "./server.js";
 export { PipelineRunner, type PipelineRunnerConfig, type LinearIssue } from "./pipeline/index.js";
