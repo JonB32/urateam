@@ -28,6 +28,24 @@ notes call out when a change affects only a single package.
 - **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
 - **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
 
+## [0.1.62] — 2026-05-18
+
+Bumps:
+- `@urateam/core`: 0.1.47 → 0.1.48
+- `@urateam/cli`: 0.1.49 → 0.1.50
+- `@urateam/dashboard`: 0.1.47 → 0.1.48
+- `create-urateam`: 0.1.50 → 0.1.51
+
+### Added
+- **Slack digest now lists circuit-broken issues** (#324, BEC-223): the PM tick digest gains a "Circuit-Broken Issues" section that fetches issues with ≥ `maxConsecutiveFailures` consecutive failed runs in the last 7 days. Last-error context is rendered (200-char truncation via new `util/strings.ts:truncateWithEllipsis` helper, shared with the 500-char promote escalation). Capped at 10 issues. The query is bounded (LIMIT 50 before slicing) and runs once per PM tick — documented as a BEC-187 exception until the `pipeline_runs(status, started_at)` index lands. `scheduler.ts` now uses `ACTIVE_STATUSES` constant + `inArray()` instead of raw SQL, and `parseStuckRunAgeMinutes` helper extracted at module scope.
+- **PR description footer now shows triage-quality metric** (#321, BEC-220): when triage v2 emitted an `affectedFiles` prediction, the auto-generated PR description gains a `## Triage Quality` section reporting predicted vs. actual file counts and intersection. Reads from `triage_results.v2_prediction` (BEC-217 DB-backed path); the in-memory `quality` object is used directly — no audit-log read-back. `getChangedFiles()` and `getAgentCommits()` are now parallelized via `Promise.all`. The Tier 6e audit event still fires (single emission, moved from post-push to pre-PR-creation to feed the footer).
+- **`ura retry <runId>` CLI command** (#320, BEC-221): operator-facing CLI to retry failed/retriable pipeline runs without dashboard access. Authenticates via `URATEAM_CLI_TOKEN` against the new `/cli/runs/:id/retry` dashboard endpoint. Audit event logged on success. Halt-all endpoints now batch the per-run `issueId` lookup via `inArray()` instead of N+1 queries. `requireRbac` middleware and `TERMINAL_RUN_STATUSES` constant extracted to remove duplication.
+- **`ura triage-quality` CLI** (#317, BEC-219): surfaces `pm.triage_quality_score` audit events as operator-facing stats. `readTriageQualityEvents` audit reader in `packages/core/src/audit/triage-quality-reader.ts` aggregates predicted/actual/intersection/miss-rate stats in a single pass over the event window. Supports `--days <n>` / `--json` flags.
+- **`URATEAM_DISABLE_TIER_6E` env var** (#316, BEC-218): operator escape hatch to skip the entire `pm.triage_quality_score` emission block (no DB read, no `getChangedFiles`, no DB write). Strict equality on `"true"`; read at call time so flipping the var takes effect on the next pipeline run without a daemon restart. Mirrors the `URATEAM_DISABLE_TRIAGE_V2` precedent.
+- **`REVIEW_MODELS_MAX_OUTPUT_TOKENS` env var** (#308, BEC-164): optional cap on `max_tokens` per OpenRouter fanout-model request. Unset = provider default (can be 65536 for gemini-2.5-pro). Non-integer or ≤0 values warn + treated as unset; values <256 emit a low-floor warning. `createFailedModelRun` helper extracted in `openrouter-fanout.ts`.
+
+### Removed
+- **Dead-code cleanup** (#309, BEC-191): deleted 3 unused exports (`createSandboxConfig`, `devcontainerExecCommand`, `addMRComment`), made 2 cost-aggregate helpers module-private (`normalizeTeamId`, `aggregateAll`; public API is `aggregateHybrid`), and de-exported 10 internal Zod sub-schemas (type aliases remain exported). `updateBucketMetrics`/`addRollupToBucket` helpers extracted in `cost/aggregate.ts`; `createLogger({ component: ... })` corrected in `gitlab.ts`.
 ## [0.1.61] — 2026-05-17
 
 Bumps:
