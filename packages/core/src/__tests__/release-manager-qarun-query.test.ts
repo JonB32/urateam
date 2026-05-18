@@ -1,13 +1,15 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { randomBytes, randomUUID } from "node:crypto";
 import { unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { and, eq, isNotNull, desc } from "drizzle-orm";
 import { createDb } from "../db/index.js";
 import { releaseDecisions } from "../db/schema.js";
 
 function tmpDbPath(): string {
   const id = randomBytes(8).toString("hex");
-  return `/tmp/bec145-qarun-test-${id}.sqlite`;
+  return join(tmpdir(), `bec145-qarun-test-${id}.sqlite`);
 }
 
 describe("BEC-145: QA run query optimization (isNotNull + limit(1))", () => {
