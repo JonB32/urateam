@@ -3,9 +3,9 @@ services:
     build:
       context: .
       args:
-        URATEAM_CORE_VERSION: 0.1.47
-        URATEAM_CLI_VERSION: 0.1.49
-        URATEAM_DASHBOARD_VERSION: 0.1.47
+        URATEAM_CORE_VERSION: 0.1.48
+        URATEAM_CLI_VERSION: 0.1.50
+        URATEAM_DASHBOARD_VERSION: 0.1.48
         CLAUDE_CODE_VERSION: 2.1.128
     container_name: urateam-dogfood
     restart: unless-stopped
