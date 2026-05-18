@@ -8,6 +8,43 @@ const log = createLogger({ component: "PmAgent:slack" });
 
 const CIRCUIT_BROKEN_ISSUES_CAP = 10;
 
+// Slack `section` blocks cap `text.text` at 3000 chars; we leave headroom.
+// Exported for testing.
+export const SLACK_SECTION_TEXT_MAX = 2900;
+
+/**
+ * Pack `lines` into one or more Slack `section` blocks whose `text.text`
+ * stays under `maxChars`. Greedy: fills each block until adding the next
+ * line would overflow, then opens a new block.
+ *
+ * Single lines longer than `maxChars` are passed through as-is — callers
+ * are expected to have already truncated values to reasonable widths (the
+ * PM digest uses `truncateWithEllipsis` on titles + error messages, so an
+ * individual line stays well under the cap).
+ */
+export function chunkLinesToSlackSectionBlocks(
+  lines: string[],
+  maxChars: number = SLACK_SECTION_TEXT_MAX,
+): Array<{ type: "section"; text: { type: "mrkdwn"; text: string } }> {
+  const blocks: Array<{ type: "section"; text: { type: "mrkdwn"; text: string } }> = [];
+  let buf: string[] = [];
+  let bufLen = 0;
+  for (const line of lines) {
+    const needed = (buf.length === 0 ? 0 : 1) + line.length; // +1 for joining "\n"
+    if (bufLen + needed > maxChars && buf.length > 0) {
+      blocks.push({ type: "section", text: { type: "mrkdwn", text: buf.join("\n") } });
+      buf = [];
+      bufLen = 0;
+    }
+    buf.push(line);
+    bufLen += (bufLen === 0 ? 0 : 1) + line.length;
+  }
+  if (buf.length > 0) {
+    blocks.push({ type: "section", text: { type: "mrkdwn", text: buf.join("\n") } });
+  }
+  return blocks;
+}
+
 export interface PmSlackConfig {
   botToken: string;
   channelId: string;
@@ -112,9 +149,7 @@ export class PmSlackNotifier {
 
     await this.postMessage({
       channel: this.channelId,
-      blocks: [
-        { type: "section", text: { type: "mrkdwn", text: lines.join("\n") } },
-      ],
+      blocks: chunkLinesToSlackSectionBlocks(lines),
     });
   }
 
