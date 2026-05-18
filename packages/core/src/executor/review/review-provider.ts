@@ -196,5 +196,12 @@ function parseIntOr(raw: string | undefined, fallback: number): number {
 function parsePositiveIntOrUndefined(raw: string | undefined): number | undefined {
   if (!raw) return undefined;
   const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : undefined;
+  if (!Number.isFinite(n) || n <= 0) {
+    log.warn(
+      { var: "REVIEW_MODELS_MAX_OUTPUT_TOKENS", value: raw },
+      "REVIEW_MODELS_MAX_OUTPUT_TOKENS is not a positive integer — treating as unset (model provider default applies)",
+    );
+    return undefined;
+  }
+  return n;
 }
