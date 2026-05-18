@@ -359,15 +359,32 @@ export type StageRunStatus = "running" | "completed" | "failed" | "skipped" | "c
 export type AgentLogType = "tool_call" | "tool_result" | "message" | "error" | "cancelled";
 
 // --- Sanitized Issue ---
-export interface SanitizedIssue {
-  id: string;
-  slug: string;
-  title: string;
-  description: string;
-  acceptanceCriteria: string[];
-  labels: string[];
-  priority: number;
-}
+export const SanitizedIssueSchema = z.object({
+  id: z.string(),
+  slug: z.string(),
+  title: z.string(),
+  description: z.string(),
+  acceptanceCriteria: z.array(z.string()),
+  labels: z.array(z.string()),
+  priority: z.number(),
+});
+export type SanitizedIssue = z.infer<typeof SanitizedIssueSchema>;
+
+// --- Resume Payload ---
+// Snapshot of all context needed to restart a paused or retriable pipeline run.
+// Stored as JSON in pipeline_runs.resume_payload; validated with safeParse on
+// resume so schema mismatches from older DB rows fail gracefully (run → failed).
+// Note: currentStageIndex may be -1 for transient-failure retries (stage 0 failed;
+// slice(-1+1) = slice(0) re-runs the full stage list from the start).
+export const ResumePayloadSchema = z.object({
+  worktreePath: z.string(),
+  currentStageIndex: z.number().int(),
+  handoff: HandoffArtifactSchema.nullable(),
+  pipelineConfig: PipelineConfigSchema,
+  repoConfig: RepoConfigSchema,
+  sanitizedIssue: SanitizedIssueSchema,
+});
+export type ResumePayload = z.infer<typeof ResumePayloadSchema>;
 
 // --- Stage Result ---
 export interface StageResult {

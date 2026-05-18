@@ -10,6 +10,7 @@ import type {
   PipelineRunStatus,
   ReviewFinding,
 } from "../types.js";
+import { ResumePayloadSchema } from "../types.js"; // value import — cannot be `import type`
 import type { Db, AnyDb } from "../db/client.js";
 import { pipelineRuns, stageRuns, reviewModelRuns } from "../db/schema.js";
 import {
@@ -364,16 +365,13 @@ export class PipelineRunner {
       return;
     }
 
-    let payload: {
-      handoff: HandoffArtifact | null;
-      pipelineConfig: PipelineConfig;
-      repoConfig: RepoConfig;
-      sanitizedIssue: SanitizedIssue;
-      worktreePath: string;
-    };
-
+    // Parse and validate the resume payload using the Zod schema.
+    // This replaces the former hand-rolled property-existence checks and catches
+    // schema mismatches from older DB rows (e.g. missing handoff, wrong types)
+    // before any git or executor operations run.
+    let parsed: ReturnType<typeof ResumePayloadSchema.safeParse>;
     try {
-      payload = JSON.parse(pausedRun.resumePayload);
+      parsed = ResumePayloadSchema.safeParse(JSON.parse(pausedRun.resumePayload));
     } catch {
       runLog.error("resume payload is invalid JSON — failing run");
       await db
@@ -388,26 +386,24 @@ export class PipelineRunner {
       return;
     }
 
-    const { handoff, pipelineConfig, repoConfig, sanitizedIssue, worktreePath } = payload;
-
-    // Structural validation of deserialized payload
-    if (
-      typeof worktreePath !== "string" ||
-      !pipelineConfig?.stages ||
-      !sanitizedIssue?.id
-    ) {
-      runLog.error("resume payload has invalid structure — failing run");
+    if (!parsed.success) {
+      const zodErrors = parsed.error.errors
+        .map((e) => `${e.path.join(".") || "(root)"}: ${e.message}`)
+        .join("; ");
+      runLog.error({ zodErrors }, "resume payload failed schema validation — failing run");
       await db
         .update(pipelineRuns)
         .set({
           status: "failed",
           completedAt: new Date(),
-          errorMessage: "Invalid resume payload structure — cannot resume",
+          errorMessage: `Invalid resume payload structure — cannot resume: ${zodErrors}`,
         })
         .where(eq(pipelineRuns.id, runId));
       this.activeRuns.delete(issueId);
       return;
     }
+
+    const { handoff, pipelineConfig, repoConfig, sanitizedIssue, worktreePath, currentStageIndex } = parsed.data;
 
     // Path containment check — worktreePath must be within agentRunDir
     const resolvedPath = resolve(worktreePath); // canonicalize — collapses .. segments
@@ -455,7 +451,7 @@ export class PipelineRunner {
       startedAt: pausedRun.startedAt ?? new Date(),
       totalInputTokens: pausedRun.totalInputTokens ?? 0,
       totalOutputTokens: pausedRun.totalOutputTokens ?? 0,
-      retryCount: (pausedRun as any).retryCount ?? 0,
+      retryCount: pausedRun.retryCount ?? 0,
     };
 
     // Validate branch is present
@@ -474,7 +470,7 @@ export class PipelineRunner {
     }
 
     runLog.info(
-      { stageIndex: pausedRun.currentStageIndex, worktreePath },
+      { stageIndex: currentStageIndex, worktreePath },
       "resuming pipeline — re-queuing execution from stage after await-approval",
     );
 
@@ -491,7 +487,7 @@ export class PipelineRunner {
             sanitizedIssue,
             pausedRun.branch,
             {
-              startStageIndex: pausedRun.currentStageIndex!,
+              startStageIndex: currentStageIndex,
               worktreePath,
               initialHandoff: handoff ?? undefined,
             },
@@ -903,6 +899,7 @@ export class PipelineRunner {
             repoConfig,
             sanitizedIssue,
             worktreePath: worktreePath!,
+            currentStageIndex: stageIndex,
           });
           await db
             .update(pipelineRuns)
@@ -2971,14 +2968,6 @@ export class PipelineRunner {
       context.repoConfig &&
       context.sanitizedIssue
     ) {
-      const resumePayload = JSON.stringify({
-        handoff: context.handoff ?? null,
-        pipelineConfig: context.pipelineConfig,
-        repoConfig: context.repoConfig,
-        sanitizedIssue: context.sanitizedIssue,
-        worktreePath: context.worktreePath,
-      });
-
       // Store currentStageIndex - 1 so the existing resume path's
       // `slice(startStageIndex + 1)` lands back on the failed stage.
       // (await-approval stores the completed stage index; we need to re-run the failed one.)
@@ -2986,6 +2975,15 @@ export class PipelineRunner {
       // re-runs the full stage list. The await-approval path stores the completed
       // stage index; we store failedIndex - 1 so the same +1 offset re-runs the failed stage.
       const resumeStageIndex = (context.currentStageIndex ?? 0) - 1;
+
+      const resumePayload = JSON.stringify({
+        handoff: context.handoff ?? null,
+        pipelineConfig: context.pipelineConfig,
+        repoConfig: context.repoConfig,
+        sanitizedIssue: context.sanitizedIssue,
+        worktreePath: context.worktreePath,
+        currentStageIndex: resumeStageIndex,
+      });
 
       await db
         .update(pipelineRuns)

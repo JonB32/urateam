@@ -385,6 +385,7 @@ describe("PipelineRunner", () => {
       repoConfig: mockRepoConfig,
       sanitizedIssue: mockSanitizedIssue,
       worktreePath: "/tmp/test-agent-runs/nonexistent-worktree-path-xyz-abc",
+      currentStageIndex: 1,
     });
 
     await (db as any).insert(pipelineRuns).values({
@@ -432,6 +433,7 @@ describe("PipelineRunner", () => {
       repoConfig: mockRepoConfig,
       sanitizedIssue: mockSanitizedIssue,
       worktreePath,
+      currentStageIndex: 1,
     });
 
     await (db as any).insert(pipelineRuns).values({
@@ -460,6 +462,95 @@ describe("PipelineRunner", () => {
     // Cleanup
     const { rm } = await import("node:fs/promises");
     await rm(worktreePath, { recursive: true, force: true });
+  });
+
+  // ---------------------------------------------------------------------------
+  // resume() — ResumePayloadSchema Zod validation (BEC-192)
+  // ---------------------------------------------------------------------------
+
+  it("resume() marks run as failed when resumePayload is missing handoff field", async () => {
+    const { pipelineRuns } = await import("../db/schema.js");
+    const { eq } = await import("drizzle-orm");
+    const runId = "run-missing-handoff-1";
+
+    // Omit the required `handoff` field to trigger schema validation failure
+    const badPayload = JSON.stringify({
+      pipelineConfig: mockPipelineConfig,
+      repoConfig: mockRepoConfig,
+      sanitizedIssue: mockSanitizedIssue,
+      worktreePath: "/tmp/test-agent-runs/some-worktree",
+      currentStageIndex: 1,
+      // handoff is intentionally omitted
+    });
+
+    await (db as any).insert(pipelineRuns).values({
+      id: runId,
+      issueId: "TEAM-210",
+      issueTitle: "Missing handoff field",
+      pipelineKey: "auto-implement",
+      repoUrl: "https://github.com/test/repo.git",
+      branch: "agent/TEAM-210-missing-handoff",
+      status: "paused",
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      currentStageIndex: 1,
+      resumePayload: badPayload,
+    });
+
+    await runner.resume("TEAM-210");
+
+    const rows = await (db as any)
+      .select()
+      .from(pipelineRuns)
+      .where(eq(pipelineRuns.id, runId));
+
+    expect(rows[0].status).toBe("failed");
+    // Error message should mention the field that failed validation
+    expect(rows[0].errorMessage).toMatch(/Invalid resume payload structure/);
+    expect(rows[0].errorMessage).toMatch(/handoff/);
+    expect(runner.isActive("TEAM-210")).toBe(false);
+  });
+
+  it("resume() marks run as failed when currentStageIndex is a string instead of number", async () => {
+    const { pipelineRuns } = await import("../db/schema.js");
+    const { eq } = await import("drizzle-orm");
+    const runId = "run-bad-stage-index-1";
+
+    // currentStageIndex must be a number; passing a string should fail Zod validation
+    const badPayload = JSON.stringify({
+      handoff: null,
+      pipelineConfig: mockPipelineConfig,
+      repoConfig: mockRepoConfig,
+      sanitizedIssue: mockSanitizedIssue,
+      worktreePath: "/tmp/test-agent-runs/some-worktree",
+      currentStageIndex: "not-a-number",  // wrong type: string instead of number
+    });
+
+    await (db as any).insert(pipelineRuns).values({
+      id: runId,
+      issueId: "TEAM-211",
+      issueTitle: "Bad currentStageIndex type",
+      pipelineKey: "auto-implement",
+      repoUrl: "https://github.com/test/repo.git",
+      branch: "agent/TEAM-211-bad-stage-index",
+      status: "paused",
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      currentStageIndex: 0,
+      resumePayload: badPayload,
+    });
+
+    await runner.resume("TEAM-211");
+
+    const rows = await (db as any)
+      .select()
+      .from(pipelineRuns)
+      .where(eq(pipelineRuns.id, runId));
+
+    expect(rows[0].status).toBe("failed");
+    expect(rows[0].errorMessage).toMatch(/Invalid resume payload structure/);
+    expect(rows[0].errorMessage).toMatch(/currentStageIndex/);
+    expect(runner.isActive("TEAM-211")).toBe(false);
   });
 
   it("resume() handles in-memory active run (edge case: paused but still in activeRuns)", async () => {
