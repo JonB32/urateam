@@ -33,6 +33,17 @@ function isRetryableStatus(status: string): boolean {
   return status === "failed" || status === "retriable";
 }
 
+/**
+ * Thrown by `retryRun` when a run is in a retryable status but lacks the
+ * `resumePayload` needed to actually resume. Handler maps to HTTP 422.
+ */
+class RetryNotSupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RetryNotSupportedError";
+  }
+}
+
 export interface RunsRouterDeps {
   db: Db;
   runner?: {
@@ -100,20 +111,20 @@ export function createRunsRouter(
   }
 
   /**
-   * Resume or start a pipeline run (the "retry" logic shared between the
-   * dashboard and CLI retry handlers).
+   * Resume a pipeline run from its `resumePayload`. Throws `RetryNotSupportedError`
+   * if the run lacks one — `runner.start()` requires the full Linear/repo/pipeline
+   * context that isn't reconstructible from a bare DB row (BEC-226). Operators
+   * needing to re-run a failed-without-resume issue should re-open it in Linear.
    */
   async function retryRun(id: string, run: any): Promise<void> {
-    if (run.resumePayload) {
-      await runner!.resume(id);
-    } else {
-      await runner!.start({
-        issueId: run.issueId,
-        issueTitle: run.issueTitle,
-        repoUrl: run.repoUrl,
-        parentRunId: id,
-      });
+    if (!run.resumePayload) {
+      throw new RetryNotSupportedError(
+        "Cannot retry: run has no resumePayload. The original Linear/repo/pipeline " +
+          "context is not reconstructible from a bare run row. Re-open the issue in " +
+          "Linear or trigger a fresh pipeline run from the webhook.",
+      );
     }
+    await runner!.resume(id);
   }
 
   /**
@@ -264,6 +275,9 @@ export function createRunsRouter(
       try {
         await retryRun(id, run);
       } catch (err) {
+        if (err instanceof RetryNotSupportedError) {
+          return c.text(err.message, 422);
+        }
         return c.text(`Retry failed: ${(err as Error).message}`, 500);
       }
 
@@ -446,6 +460,9 @@ export function createRunsRouter(
     try {
       await retryRun(id, run);
     } catch (err) {
+      if (err instanceof RetryNotSupportedError) {
+        return c.json({ error: err.message }, 422);
+      }
       return c.text(`Retry failed: ${(err as Error).message}`, 500);
     }
     const actor = cliActor(c);
