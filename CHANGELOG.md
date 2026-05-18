@@ -28,6 +28,16 @@ notes call out when a change affects only a single package.
 - **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
 - **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
 
+## [0.1.63] — 2026-05-18
+
+Bumps:
+- `@urateam/core`: 0.1.48 → 0.1.49
+- `@urateam/cli`: 0.1.50 → 0.1.51
+- `@urateam/dashboard`: 0.1.48 → 0.1.49
+- `create-urateam`: 0.1.51 → 0.1.52
+
+### Fixed
+- **Slack PM digest no longer fails with `invalid_blocks`** (#327, BEC-225): the BEC-223 Circuit-Broken Issues section, when populated with ~10 issues × ~300 chars each (URL + 80-char title + 200-char error + timestamp), pushed the digest's single mrkdwn `section` block past Slack's 3000-char `text.text` limit. `postDigest` now uses the new `chunkLinesToSlackSectionBlocks(lines, maxChars=2900)` helper to emit one or more section blocks, each under the cap. Single lines longer than the cap pass through as-is — callers already truncate values via `truncateWithEllipsis`. Discovered during v0.1.62 production deploy on the dogfood instance.
 ## [0.1.62] — 2026-05-18
 
 Bumps:
