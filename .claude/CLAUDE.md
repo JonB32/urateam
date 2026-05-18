@@ -30,7 +30,7 @@ pnpm monorepo with 4 packages:
 - Agent SDK stream messages: `type="assistant"` with text in `message.message` (no-tool sessions) or `message.content` (tool sessions) — `consumeAgentStream` handles both
 - **Pre-stream stall (BEC-183):** `consumeAgentStream` throws `StagePreStreamStalledError` if no message arrives within `firstMessageTimeoutMs` (default 5 min). `executor.ts` adds a second wall-clock cap via `Promise.race` (`WALL_CLOCK_STAGE_TIMEOUT_MS`: 60 min for implement, 30 min for others). Both paths result in `stage_runs.status = 'failed'`.
 - **Linear SDK lazy relations:** All relation fields (`.team`, `.state`, `.project`) are Promise-like — always `await` them. `.labels` is a **method** — call `await issue.labels()`. Sync access returns `undefined` silently.
-- **PR body generation**: `generatePRDescription()` in `pipeline/pr-description.ts` builds markdown body for all auto-generated PRs
+- **PR body generation**: `generatePRDescription()` in `pipeline/pr-description.ts` builds markdown body for all auto-generated PRs. Template: `## Summary` → `## Changes` → `## Test plan` → `## Triage Quality` (omitted when event absent or v1 path) → `## Commits` → `> Draft PR` → `Resolves <id>`. Runner computes quality via `computeAffectedFilesPredictionQuality()`, logs the `pm.triage_quality_score` audit event, then passes the in-memory `quality` object directly to `generatePRDescription()` — no DB read-back (BEC-220). `getChangedFiles()` and `getAgentCommits()` are parallelized via `Promise.all`.
 
 ## PM Agent
 Autonomous backlog manager in `packages/core/src/pm/`:

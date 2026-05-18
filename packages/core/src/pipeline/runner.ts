@@ -30,7 +30,7 @@ import { postFanoutCommentsToPR } from "../executor/review/post-fanout-comments.
 import type { ReviewModelRun } from "../executor/review/review-provider.js";
 import { extractHandoff } from "../executor/extract-handoff.js";
 import { DEFAULT_AGENT_CLAUDE_MD } from "../executor/agent-config.js";
-import { generatePRDescription } from "./pr-description.js";
+import { generatePRDescription, type TriageQualityMetric } from "./pr-description.js";
 import { maybePostChangeSummary } from "./pr-change-summary.js";
 import { access, writeFile, appendFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -2195,7 +2195,45 @@ export class PipelineRunner {
         }
 
         // 3. Create PR/MR
-        const agentCommits = await getAgentCommits(wtPath, repoConfig.defaultBranch);
+        // Tier 6e — compute triage prediction-quality and emit audit event so the
+        // Tier 6e — compute triage prediction-quality and emit audit event so
+        // the metric can be surfaced in the PR description footer (BEC-220).
+        // Reads `triage_results.v2_prediction` (BEC-217 DB-backed path).
+        // Fail-open: any error is logged and swallowed; PR creation always
+        // proceeds. Parallelized with the agent-commits read.
+        let triageQuality: TriageQualityMetric | undefined;
+        const [qualityResult, agentCommits] = await Promise.all([
+          (async () => {
+            try {
+              const stored = await getTriageResult(this.db as AnyDb, sanitizedIssue.id);
+              const predicted = stored?.affectedFiles;
+              const actualFiles = await getChangedFiles(wtPath, repoConfig.defaultBranch);
+              const quality = computeAffectedFilesPredictionQuality(predicted, actualFiles);
+              await logAuditEvent(
+                this.db as AnyDb,
+                pmTriageQualityScoreEvent({
+                  runId,
+                  issueId: sanitizedIssue.id,
+                  ...quality,
+                }),
+              );
+              if (quality.hasV2Prediction) {
+                // PredictionQualityResult and TriageQualityMetric are structurally identical.
+                const metric: TriageQualityMetric = quality;
+                return metric;
+              }
+              return undefined;
+            } catch (qualityErr) {
+              runLog.warn(
+                { err: qualityErr instanceof Error ? qualityErr.message : String(qualityErr) },
+                "triage-quality-score: emission failed — skipping (fail-open)",
+              );
+              return undefined;
+            }
+          })(),
+          getAgentCommits(wtPath, repoConfig.defaultBranch),
+        ]);
+        triageQuality = qualityResult;
         const prBody = generatePRDescription({
           handoff,
           issueId: sanitizedIssue.id,
@@ -2206,6 +2244,7 @@ export class PipelineRunner {
           ralphEvaluationError,
           unresolvedBlockingFindings,
           agentCommits,
+          triageQuality,
         });
         const isGitLab = repoConfig.provider === "gitlab";
         const isBitbucket = repoConfig.provider === "bitbucket";
@@ -2618,40 +2657,6 @@ export class PipelineRunner {
           }, // end withBranchLock fn
         ); // end withBranchLock
       }); // end pushQueue.enqueue
-
-      // Tier 6e — emit triage prediction-quality audit event. Fail-open: any
-      // error (DB read, git, DB write) is logged and swallowed so telemetry
-      // never blocks pipeline completion.
-      //
-      // Reads `triage_results.v2_prediction` (written by triage v2 in the PM
-      // agent). The previous parse-from-description path was bricked by the
-      // 4000-char description cap in schema-mapper, which sliced off the
-      // appended v2 sections for realistic issues.
-      //
-      // Escape hatch (BEC-218): URATEAM_DISABLE_TIER_6E=true skips the entire
-      // block (no DB read, no getChangedFiles, no DB write). Read at call time
-      // so flipping the var takes effect without a daemon restart.
-      if (worktreePath && !isTier6eDisabled()) {
-        try {
-          const stored = await getTriageResult(this.db as AnyDb, sanitizedIssue.id);
-          const predicted = stored?.affectedFiles;
-          const actualFiles = await getChangedFiles(worktreePath, repoConfig.defaultBranch);
-          const quality = computeAffectedFilesPredictionQuality(predicted, actualFiles);
-          await logAuditEvent(
-            this.db as AnyDb,
-            pmTriageQualityScoreEvent({
-              runId,
-              issueId: sanitizedIssue.id,
-              ...quality,
-            }),
-          );
-        } catch (qualityErr) {
-          runLog.warn(
-            { err: qualityErr instanceof Error ? qualityErr.message : String(qualityErr) },
-            "triage-quality-score: emission failed — skipping (fail-open)",
-          );
-        }
-      }
 
       await db
         .update(pipelineRuns)
