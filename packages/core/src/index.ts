@@ -75,10 +75,13 @@ export type { PmAgentConfig, TickResult } from "./pm/types.js";
 export { PmAgentConfigSchema } from "./pm/types.js";
 export {
   loadMigrationFiles,
+  loadActiveMigrationFiles,
   runMigrationsSqlite,
   runMigrationsPostgres,
   getMigrationStatusSqlite,
   getMigrationStatusPostgres,
+  SQLITE_MIGRATION_RENAMES,
+  POSTGRES_MIGRATION_RENAMES,
   type Migration,
   type MigrationStatus,
 } from "./db/index.js";

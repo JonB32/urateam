@@ -2,10 +2,13 @@ export { createDb, isPostgres, sqlDateGroup, sqlDaysAgoFilter, getCreateTablesDD
 export { pipelineRuns, stageRuns, agentLogs, activeWork, webhookDedup, pmApprovals } from "./schema.js";
 export {
   loadMigrationFiles,
+  loadActiveMigrationFiles,
   runMigrationsSqlite,
   runMigrationsPostgres,
   getMigrationStatusSqlite,
   getMigrationStatusPostgres,
+  SQLITE_MIGRATION_RENAMES,
+  POSTGRES_MIGRATION_RENAMES,
   type Migration,
   type MigrationStatus,
 } from "./migrator.js";
