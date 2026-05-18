@@ -34,13 +34,13 @@ export function computeAffectedFilesPredictionQuality(
   const actualSet = new Set(actualDiff);
 
   const intersection = new Set<string>();
-  for (const p of predictedSet) {
-    if (actualSet.has(p)) intersection.add(p);
-  }
-
   const missed: string[] = [];
   for (const p of predictedSet) {
-    if (!actualSet.has(p)) missed.push(p);
+    if (actualSet.has(p)) {
+      intersection.add(p);
+    } else {
+      missed.push(p);
+    }
   }
   missed.sort();
 
@@ -60,3 +60,14 @@ export function computeAffectedFilesPredictionQuality(
   };
 }
 
+/**
+ * Returns true iff the env explicitly disables Tier 6e triage quality
+ * score emission. Strict equality on the string `"true"` — mirrors
+ * `isV2Disabled` in `pm/actions/triage-prompt.ts`.
+ *
+ * Reads at call time so operators can flip the env var and have the next
+ * pipeline run honor it without a daemon restart.
+ */
+export function isTier6eDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.URATEAM_DISABLE_TIER_6E === "true";
+}
