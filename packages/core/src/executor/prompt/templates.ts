@@ -84,8 +84,19 @@ const MAX_ERROR_SNIPPET_LENGTH = 500;
 /**
  * Wraps handoff artifact in a `<previous-stage-context>` block.
  * Returns empty string when handoff is undefined.
+ *
+ * @param opts.suppress - BEC-227: when `true`, returns empty string regardless
+ *   of handoff content. Used by the RALPH re-implement path on resumed
+ *   iterations: the agent already saw the same handoff in turn 1 (via the
+ *   resumed SDK session's transcript), so re-injecting it as prompt text would
+ *   be redundant and waste input tokens. Default `false` preserves legacy
+ *   behavior.
  */
-export function handoffBlock(handoff?: HandoffArtifact): string {
+export function handoffBlock(
+  handoff?: HandoffArtifact,
+  opts: { suppress?: boolean } = {},
+): string {
+  if (opts.suppress) return "";
   if (!handoff) return "";
 
   // Sanitize all agent-provided fields: previous agent output is untrusted and
@@ -194,6 +205,7 @@ export function triageTemplate(
   issue: SanitizedIssue,
   repo: RepoConfig,
   handoff?: HandoffArtifact,
+  opts: { suppressHandoff?: boolean } = {},
 ): string {
   return `You are the triage agent. Your job is to analyse the incoming issue, determine its scope, complexity, and relevant areas of the codebase.
 
@@ -201,7 +213,7 @@ ${issueDataBlock(issue)}
 
 ${repoContextBlock(repo)}
 
-${handoffBlock(handoff)}
+${handoffBlock(handoff, { suppress: opts.suppressHandoff })}
 
 Instructions:
 - Classify the issue (bug, feature, chore, security).
@@ -215,6 +227,7 @@ export function reproduceTemplate(
   issue: SanitizedIssue,
   repo: RepoConfig,
   handoff?: HandoffArtifact,
+  opts: { suppressHandoff?: boolean } = {},
 ): string {
   return `You are the reproduce agent. Your job is to reproduce the issue described below and confirm it exists.
 
@@ -222,7 +235,7 @@ ${issueDataBlock(issue)}
 
 ${repoContextBlock(repo)}
 
-${handoffBlock(handoff)}
+${handoffBlock(handoff, { suppress: opts.suppressHandoff })}
 
 Instructions:
 - Write or run a minimal reproduction of the issue.
@@ -237,6 +250,7 @@ export function implementTemplate(
   handoff?: HandoffArtifact,
   reviewFeedback?: ReviewFeedbackContext,
   mergeConflict?: MergeConflictContext,
+  opts: { suppressHandoff?: boolean } = {},
 ): string {
   if (mergeConflict) {
     return `You are the merge-conflict-resolution agent. The current branch has rebase conflicts with origin/${mergeConflict.defaultBranch}. Your only job is to resolve those conflicts so the rebase can continue.
@@ -265,7 +279,7 @@ ${repoContextBlock(repo)}
 
 ${reviewFeedbackBlock(reviewFeedback)}
 
-${handoffBlock(handoff)}
+${handoffBlock(handoff, { suppress: opts.suppressHandoff })}
 
 Instructions:
 - Stay on the current branch (\`${reviewFeedback.prBranch}\`) — the worktree is already configured. Do NOT run \`git checkout\`; switching branches inside a worktree is unsafe and can corrupt other concurrent runs.
@@ -289,7 +303,7 @@ ${issueDataBlock(issue)}
 
 ${repoContextBlock(repo)}
 
-${handoffBlock(handoff)}
+${handoffBlock(handoff, { suppress: opts.suppressHandoff })}
 
 Instructions:
 - Create a branch named: agent/${issue.id}-${issue.slug}
@@ -324,6 +338,7 @@ export function testTemplate(
   issue: SanitizedIssue,
   repo: RepoConfig,
   handoff?: HandoffArtifact,
+  opts: { suppressHandoff?: boolean } = {},
 ): string {
   return `You are the test agent. Your job is to verify the implementation by running and writing tests.
 
@@ -331,7 +346,7 @@ ${issueDataBlock(issue)}
 
 ${repoContextBlock(repo)}
 
-${handoffBlock(handoff)}
+${handoffBlock(handoff, { suppress: opts.suppressHandoff })}
 
 Instructions:
 - Run the full test suite: ${repo.testCommand}
@@ -346,6 +361,7 @@ export function reviewTemplate(
   issue: SanitizedIssue,
   repo: RepoConfig,
   handoff?: HandoffArtifact,
+  opts: { suppressHandoff?: boolean } = {},
 ): string {
   return `You are the review agent. Your job is to perform a thorough code review, security audit, and acceptance criteria verification.
 
@@ -353,7 +369,7 @@ ${issueDataBlock(issue)}
 
 ${repoContextBlock(repo)}
 
-${handoffBlock(handoff)}
+${handoffBlock(handoff, { suppress: opts.suppressHandoff })}
 
 ${SECURITY_REVIEW_CHECKLIST}
 

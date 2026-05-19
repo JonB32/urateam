@@ -1130,6 +1130,13 @@ export class PipelineRunner {
             // if eligible. Re-claim is a no-op (returns false) so this call
             // takes the `resume` shape when the flag is on.
             const isFirstResumableStageForRalph = claimFirstResumableStage(stageType);
+            // BEC-227 — when this RALPH iteration is a resumed call (session
+            // active AND not the first resumable stage), the prior handoff is
+            // already in the agent's resumed SDK transcript. Suppress the
+            // `<previous-stage-context>` block to avoid duplicating that
+            // context as prompt input tokens.
+            const suppressRalphHandoff =
+              runAgentSessionId !== null && !isFirstResumableStageForRalph;
             result = await executeStage({
               runId,
               issueId: sanitizedIssue.id,
@@ -1145,6 +1152,7 @@ export class PipelineRunner {
               stageModels: config.stageModels,
               agentSessionId: runAgentSessionId,
               isFirstResumableStage: isFirstResumableStageForRalph,
+              suppressHandoff: suppressRalphHandoff,
             });
 
             // Accumulate each RALPH iteration's tokens

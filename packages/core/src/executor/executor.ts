@@ -113,6 +113,15 @@ export interface ExecuteStageContext {
    * sessionId on create vs. resume on reuse. Defaults to `false`.
    */
   isFirstResumableStage?: boolean;
+  /**
+   * BEC-227 — when `true`, the rendered prompt omits the
+   * `<previous-stage-context>` block. Runner sets this on resumed RALPH
+   * re-implement iterations: the agent already received the same handoff in
+   * the initial turn (now visible in the resumed SDK session's transcript),
+   * so re-injecting it as prompt text would waste input tokens and risk
+   * confusing the model with duplicated context. Defaults to `false`.
+   */
+  suppressHandoff?: boolean;
 }
 
 export async function executeStage(
@@ -156,6 +165,7 @@ export async function executeStage(
     handoff,
     context.reviewFeedback,
     context.mergeConflictContext,
+    { suppressHandoff: context.suppressHandoff ?? false },
   );
 
   // When a devcontainer is active, instruct the agent to run shell commands inside it
