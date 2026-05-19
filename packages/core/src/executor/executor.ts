@@ -24,7 +24,10 @@ import { consumeAgentStream, StagePreStreamStalledError, type StreamMessage } fr
 import { isClaudeAuthValid, resolveClaudeAuth } from "./auth-check.js";
 import { isResumable } from "./session-policy.js";
 import { transcriptExists, defaultProjectsRoot } from "./session-store.js";
-import { agentSessionMissingFallbackEvent } from "../audit/index.js";
+import {
+  agentSessionMissingFallbackEvent,
+  agentSessionResumedEvent,
+} from "../audit/index.js";
 import { logAuditEvent } from "../audit/writer.js";
 
 /**
@@ -250,6 +253,47 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
         });
         if (exists) {
           sessionOpts = { resume: agentSessionId! };
+          // BEC-227 — emit resumed audit event with prior message count.
+          // Read transcript line count directly from the JSONL (the SDK's
+          // `getSessionMessages` is awaitable async; we want a synchronous
+          // best-effort count here so the event isn't blocked on an extra
+          // round-trip).
+          try {
+            const { readFileSync } = await import("node:fs");
+            const tp = (await import("./session-store.js")).transcriptPath({
+              projectsRoot: defaultProjectsRoot(),
+              cwd: workdir,
+              sessionId: agentSessionId!,
+            });
+            const priorMessageCount = readFileSync(tp, "utf8")
+              .split("\n")
+              .filter((line) => line.trim().length > 0).length;
+            void logAuditEvent(
+              db,
+              agentSessionResumedEvent({
+                runId,
+                issueId,
+                sessionId: agentSessionId!,
+                stage,
+                priorMessageCount,
+              }),
+            );
+          } catch (err) {
+            log.warn(
+              { err: (err as Error).message },
+              "failed to count prior session messages — emitting resumed event with count=0",
+            );
+            void logAuditEvent(
+              db,
+              agentSessionResumedEvent({
+                runId,
+                issueId,
+                sessionId: agentSessionId!,
+                stage,
+                priorMessageCount: 0,
+              }),
+            );
+          }
         } else {
           void logAuditEvent(
             db,
