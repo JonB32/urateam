@@ -39,6 +39,7 @@ export {
 } from "./notifier/index.js";
 export { assemblePrompt, sanitize, mapIssueToSchema } from "./executor/index.js";
 export { executeStage } from "./executor/index.js";
+export { getSessionMessages, type SessionMessage } from "./executor/index.js";
 export { validateReviewModels } from "./executor/review/review-provider.js";
 export { validateHandoff, type ValidationResult } from "./executor/validate.js";
 export { extractHandoff } from "./executor/extract-handoff.js";
