@@ -46,6 +46,16 @@ Autonomous backlog manager in `packages/core/src/pm/`:
 - `slack-interface.ts` — bidirectional Slack bot: slash commands, @mentions, natural language via Haiku
 - `coordination.ts` — DB-backed active work tracking for parallel conflict detection
 
+## Agent Session Continuity (BEC-227)
+- One Claude SDK session per pipeline run, gated by `URATEAM_ENABLE_AGENT_SESSION_RESUME=true` (strict equality, read at call time)
+- `agent_session_id` column on `pipeline_runs`; mint at `runner.start()`, thread through executor, ralph, deep-review
+- `isResumable(stage, model)` in `executor/session-policy.ts` — validator + Haiku ralph-check + non-Claude fanout providers always fresh
+- JSONL transcripts written by SDK at `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl` — mounted as `urateam-dogfood-agent-sessions` volume in dogfood compose
+- Fallback: missing JSONL → legacy handoff path, emits `pipeline.agent_session_missing_fallback` audit event
+- Track C-1: `excludeDynamicSections: true` on the `claude_code` SDK preset (always on, lifts cache hit ~95% → ~99%)
+- Track C-2: `PM_AGENT_STUCK_RUN_AGE_MIN` default 60 → 120 min (real RALPH work routinely exceeds 60)
+- Spec: `docs/superpowers/specs/2026-05-19-agent-session-continuity-design.md`. Plan: `docs/superpowers/plans/2026-05-19-agent-session-continuity-phase1.md`.
+
 ## OpenRouter Multi-Model Review Fanout (BEC-134)
 - When `REVIEW_MODELS` and `OPENROUTER_API_KEY` are both set, each comma-separated model produces an advisory review alongside the Claude Agent SDK deep-review
 - Symmetric requirement: both must be set or both unset (enforced at startup)

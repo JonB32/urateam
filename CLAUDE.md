@@ -140,6 +140,20 @@ Both paths land in `stage_runs.status = 'failed'`. `StageStalledError` is for mi
 - **`.labels` is a method**: `await issue.labels()` (with parens). Returns `LinearFetch<IssueLabelConnection>`.
 - Failure mode is silent — missing data causes downstream lookups to fail with no obvious origin.
 
+### Agent Session Continuity (BEC-227)
+
+Each pipeline run mints `agent_session_id = randomUUID()` (when `URATEAM_ENABLE_AGENT_SESSION_RESUME=true`) and threads it through every `executeStage()` call. First resumable stage uses `query({ sessionId })`; subsequent stages use `query({ resume: sessionId })`. The Claude Agent SDK writes JSONL transcripts to `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`, mounted as the named volume `urateam-dogfood-agent-sessions` in dogfood compose.
+
+- `isResumable(stage, model)` (`executor/session-policy.ts`) — static rule: stage NOT IN `{validate, ralph-check}` AND model family is `claude-{sonnet,opus}` (Haiku stages stay fresh). Validator + RALPH-check Haiku calls always run fresh; OpenRouter fanout review providers (non-Claude) also stay fresh.
+- **Feature flag**: `URATEAM_ENABLE_AGENT_SESSION_RESUME=true` (strict equality — `"1"` / `"yes"` / `"TRUE"` do NOT match) — read at call time per run, so flipping the var takes effect on the next pipeline run without daemon restart. Defaults to `false` in Phase 1; flipped to default-on in Phase 3 after dogfood soak. Helper: `isAgentSessionResumeEnabled(env?)` in `executor/session-policy.ts`.
+- **Fallback**: if `agent_session_id` is null (flag off at run start) OR the JSONL file is missing on disk → legacy handoff path. Audit events `pipeline.agent_session_missing_fallback` and `system.session_volume_warning` capture both. The `<previous-stage-context>` block is suppressed in resumed RALPH iterations (the agent already saw it).
+- **Validator skip rule**: `runMode === "resumed"` → skip entirely (the next agent IS the prior agent). Only the FIRST resumed stage runs validation as a paranoia check. `runMode: "first-resumed" | "resumed" | "fallback"` is computed per call-site in `runner.ts`.
+- **Track C-1 cache booster**: `excludeDynamicSections: true` on the `claude_code` SDK preset is now ON for every stage regardless of resume state — strips per-session cwd/git-status from the cached prefix, lifting cache hit rate from ~95% toward 99%.
+- **Audit events added (BEC-227)**: `pipeline.agent_session_created`, `pipeline.agent_session_resumed`, `pipeline.agent_session_missing_fallback`, `system.session_volume_warning`. (Canonical count comment lives in the Audit log row of the Enterprise Features table — see below.)
+- **Zombie-age tuning (BEC-227 / BEC-184)**: `PM_AGENT_STUCK_RUN_AGE_MIN` default raised from 60 → 120 minutes. Real RALPH-iterated implementation work routinely takes 60-90 min; the prior 60-min default produced false-positive reaps on healthy long runs.
+
+Spec: `docs/superpowers/specs/2026-05-19-agent-session-continuity-design.md`. Phase 1 implementation plan: `docs/superpowers/plans/2026-05-19-agent-session-continuity-phase1.md`.
+
 ### PM Agent (`packages/core/src/pm/`)
 
 Autonomous backlog manager on cron (default 30 min). Tick sequence:
