@@ -104,6 +104,8 @@ import {
 } from "../pm/coordination.js";
 import { eq, and, or, sql, gte, lt, inArray } from "drizzle-orm";
 import { nanoid } from "nanoid";
+import { randomUUID } from "node:crypto";
+import { isAgentSessionResumeEnabled } from "../executor/session-policy.js";
 import { createLogger, runWithLogContext } from "../logger.js";
 import { isTransientError, MAX_TRANSIENT_RETRIES } from "./error-classifier.js";
 import { evaluatePolicyGates } from "../policy/evaluate.js";
@@ -117,6 +119,7 @@ import {
   pipelineSpecVsImplFailedEvent,
   pipelineAutoDeepReviewBumpedEvent,
   pmTriageQualityScoreEvent,
+  agentSessionCreatedEvent,
 } from "../audit/index.js";
 import {
   computeAffectedFilesPredictionQuality,
@@ -249,6 +252,11 @@ export class PipelineRunner {
     }
 
     const runId = nanoid();
+    // BEC-227: mint a per-run agent session UUID when the flag is on. The
+    // first resumable stage opens its SDK session with this id; downstream
+    // stages reuse it via `resume:`. Read env at call time so flipping the
+    // var takes effect on the next pipeline run without a daemon restart.
+    const agentSessionId = isAgentSessionResumeEnabled() ? randomUUID() : null;
     const branch = branchName(issue.identifier, sanitizedIssue.slug);
     const db = this.db as AnyDb;
     const runLog = createLogger({ component: "PipelineRunner", runId, issueId: issue.identifier });
@@ -265,8 +273,20 @@ export class PipelineRunner {
         branch,
         status: "queued",
         linearTeamId,
+        agentSessionId, // null when flag is off; UUID when BEC-227 is enabled
       });
     runLog.info({ branch }, "run queued");
+
+    if (agentSessionId !== null) {
+      void logAuditEvent(
+        db,
+        agentSessionCreatedEvent({
+          runId,
+          issueId: issue.identifier,
+          sessionId: agentSessionId,
+        }),
+      );
+    }
 
     const run = this.buildPipelineRun(
       runId,

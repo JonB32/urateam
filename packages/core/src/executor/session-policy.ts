@@ -53,3 +53,17 @@ export function isResumable(stage: string, model: string): boolean {
   if (isAlwaysFreshStage(stage)) return false;
   return modelFamily(model) === "claude";
 }
+
+/**
+ * Returns true iff the env enables agent session resume (BEC-227).
+ *
+ * Strict equality on `"true"` — mirrors BEC-218 / BEC-225 precedent so
+ * `"1"` / `"yes"` / `"TRUE"` / `""` do NOT enable the flag. The env is
+ * read at call time so flipping the var takes effect on the next pipeline
+ * run without a daemon restart.
+ */
+export function isAgentSessionResumeEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return env.URATEAM_ENABLE_AGENT_SESSION_RESUME === "true";
+}
