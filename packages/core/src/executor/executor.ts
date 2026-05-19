@@ -23,6 +23,9 @@ import { createLogger } from "../logger.js";
 import { consumeAgentStream, StagePreStreamStalledError, type StreamMessage } from "./agent-stream.js";
 import { isClaudeAuthValid, resolveClaudeAuth } from "./auth-check.js";
 import { isResumable } from "./session-policy.js";
+import { transcriptExists, defaultProjectsRoot } from "./session-store.js";
+import { agentSessionMissingFallbackEvent } from "../audit/index.js";
+import { logAuditEvent } from "../audit/writer.js";
 
 /**
  * BEC-183: wall-clock stage timeouts. Independent of the in-stream watchdog
@@ -220,8 +223,14 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
     // first resumable stage. Combined with `isResumable(stage, model)` this
     // chooses between three call shapes: create (`sessionId`), reuse
     // (`resume`), or no session opts (always-fresh stages, non-Claude models,
-    // or flag off). Task 7 will add a JSONL-existence pre-check around the
-    // resume branch; here we wire the inputs only.
+    // or flag off).
+    //
+    // Task 7 (this block): on the resume branch (non-first resumable stage),
+    // verify the SDK's JSONL transcript file actually exists on disk before
+    // setting `resume`. If the JSONL is missing (e.g. container tmpfs lost,
+    // operator wiped `~/.claude/projects`), the SDK would throw on resume.
+    // Drop to a fresh-session shape, emit a `missing_fallback` audit event,
+    // and warn so operators can spot loss patterns.
     const resolvedModel = context.stageModels?.[stage] ?? effectiveProfile.model;
     const agentSessionId = context.agentSessionId ?? null;
     const isFirstResumableStage = context.isFirstResumableStage ?? false;
@@ -229,11 +238,36 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       agentSessionId !== null &&
       !!resolvedModel &&
       isResumable(stage, resolvedModel);
-    const sessionOpts: { sessionId?: string; resume?: string } = wantsResume
-      ? isFirstResumableStage
-        ? { sessionId: agentSessionId! }
-        : { resume: agentSessionId! }
-      : {};
+    let sessionOpts: { sessionId?: string; resume?: string } = {};
+    if (wantsResume) {
+      if (isFirstResumableStage) {
+        sessionOpts = { sessionId: agentSessionId! };
+      } else {
+        const exists = transcriptExists({
+          projectsRoot: defaultProjectsRoot(),
+          cwd: workdir,
+          sessionId: agentSessionId!,
+        });
+        if (exists) {
+          sessionOpts = { resume: agentSessionId! };
+        } else {
+          void logAuditEvent(
+            db,
+            agentSessionMissingFallbackEvent({
+              runId,
+              issueId,
+              sessionId: agentSessionId!,
+              reason: "jsonl-not-found",
+            }),
+          );
+          log.warn(
+            { runId, sessionId: agentSessionId, stage, cwd: workdir },
+            "agent session JSONL missing — falling back to fresh session",
+          );
+          sessionOpts = {};
+        }
+      }
+    }
 
     const messages = query({
       prompt,

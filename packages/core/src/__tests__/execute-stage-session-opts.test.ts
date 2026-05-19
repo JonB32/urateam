@@ -44,6 +44,20 @@ vi.mock("../executor/extract-handoff.js", () => ({
   }),
 }));
 
+// BEC-227 Task 7: the resume branch now checks JSONL existence on disk before
+// setting `resume`. These tests fixture a `/tmp/bec227-workdir` cwd that does
+// not actually have a transcript, so we force the existence check to return
+// true to keep the resume call shape exercised here.
+vi.mock("../executor/session-store.js", async () => {
+  const real = await vi.importActual<typeof import("../executor/session-store.js")>(
+    "../executor/session-store.js",
+  );
+  return {
+    ...real,
+    transcriptExists: vi.fn().mockReturnValue(true),
+  };
+});
+
 // ── Imports ───────────────────────────────────────────────────────────────────
 
 import { executeStage } from "../executor/executor.js";
