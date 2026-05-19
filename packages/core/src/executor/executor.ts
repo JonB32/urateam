@@ -22,6 +22,7 @@ import type { DevcontainerSession } from "../repo/devcontainer.js";
 import { createLogger } from "../logger.js";
 import { consumeAgentStream, StagePreStreamStalledError, type StreamMessage } from "./agent-stream.js";
 import { isClaudeAuthValid, resolveClaudeAuth } from "./auth-check.js";
+import { isResumable } from "./session-policy.js";
 
 /**
  * BEC-183: wall-clock stage timeouts. Independent of the in-stream watchdog
@@ -82,6 +83,30 @@ export interface ExecuteStageContext {
    *  continuing the rebase — no issue re-implementation, no build/test runs.
    *  Takes precedence over `reviewFeedback` if both are set. */
   mergeConflictContext?: MergeConflictContext;
+  /**
+   * BEC-227 — agent session continuity.
+   *
+   * UUID of the per-run SDK session, or `null` when the
+   * `URATEAM_ENABLE_AGENT_SESSION_RESUME` flag is off. Runner mints this once
+   * at start() and threads it through every executeStage() call so resumable
+   * stages share one SDK transcript across the pipeline.
+   *
+   * When `null` (flag off) no session options are added to the SDK call.
+   * When non-null AND `isResumable(stage, model)` is true:
+   *   - first resumable stage → `options.sessionId = agentSessionId` (creates)
+   *   - subsequent resumable stages → `options.resume = agentSessionId` (reuses)
+   *
+   * Optional for backwards compatibility with existing callers and tests; the
+   * runner always sets it. Defaults to `null` (no session opts).
+   */
+  agentSessionId?: string | null;
+  /**
+   * BEC-227 — true only on the first resumable stage of the run. Runner
+   * tracks this via a `hasInitiatedSession` flag and flips it once on the
+   * first resumable-stage call. Required to disambiguate the SDK call shape:
+   * sessionId on create vs. resume on reuse. Defaults to `false`.
+   */
+  isFirstResumableStage?: boolean;
 }
 
 export async function executeStage(
@@ -190,6 +215,26 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       log.info({ plugins: tooling.plugins.map((p) => p.path) }, "plugins resolved");
     }
 
+    // BEC-227 — resolve per-stage session opts. The runner mints
+    // `agentSessionId` once per run and flips `isFirstResumableStage` on the
+    // first resumable stage. Combined with `isResumable(stage, model)` this
+    // chooses between three call shapes: create (`sessionId`), reuse
+    // (`resume`), or no session opts (always-fresh stages, non-Claude models,
+    // or flag off). Task 7 will add a JSONL-existence pre-check around the
+    // resume branch; here we wire the inputs only.
+    const resolvedModel = context.stageModels?.[stage] ?? effectiveProfile.model;
+    const agentSessionId = context.agentSessionId ?? null;
+    const isFirstResumableStage = context.isFirstResumableStage ?? false;
+    const wantsResume =
+      agentSessionId !== null &&
+      !!resolvedModel &&
+      isResumable(stage, resolvedModel);
+    const sessionOpts: { sessionId?: string; resume?: string } = wantsResume
+      ? isFirstResumableStage
+        ? { sessionId: agentSessionId! }
+        : { resume: agentSessionId! }
+      : {};
+
     const messages = query({
       prompt,
       options: {
@@ -197,11 +242,19 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
         maxTurns: effectiveProfile.maxTurns,
         cwd: workdir,
         ...buildStagePermissionOptions(stage),
-        ...(context.stageModels?.[stage] ?? effectiveProfile.model
-          ? { model: context.stageModels?.[stage] ?? effectiveProfile.model! }
-          : {}),
+        ...(resolvedModel ? { model: resolvedModel } : {}),
         ...(mcpServerNames.length > 0 ? { mcpServers: tooling.mcpServers } : {}),
         ...(tooling.plugins.length > 0 ? { plugins: tooling.plugins } : {}),
+        ...sessionOpts,
+        // BEC-227 Track C-1: strip per-session dynamic sections (cwd, git
+        // status) from the claude_code preset so the system prompt is
+        // stable across stages. Improves cache hit rate even when no SDK
+        // session is involved, so we ship it on unconditionally in Phase 1.
+        systemPrompt: {
+          type: "preset" as const,
+          preset: "claude_code" as const,
+          excludeDynamicSections: true,
+        },
       },
     });
     log.info("iterating agent messages");
