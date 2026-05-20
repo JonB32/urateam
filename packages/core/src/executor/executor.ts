@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import type {
@@ -23,7 +24,7 @@ import { createLogger } from "../logger.js";
 import { consumeAgentStream, StagePreStreamStalledError, type StreamMessage } from "./agent-stream.js";
 import { isClaudeAuthValid, resolveClaudeAuth } from "./auth-check.js";
 import { isResumable } from "./session-policy.js";
-import { transcriptExists, defaultProjectsRoot } from "./session-store.js";
+import { transcriptExists, defaultProjectsRoot, transcriptPath } from "./session-store.js";
 // BEC-231 — `agentSessionMissingFallbackEvent` was previously fired from this
 // module when the resume branch found the JSONL absent. The new logic always
 // picks the right shape (`sessionId:` to create, `resume:` to continue) based
@@ -282,13 +283,13 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
         // Transcript present — resume the conversation.
         sessionOpts = { resume: agentSessionId! };
         try {
-          const { readFileSync } = await import("node:fs");
-          const tp = (await import("./session-store.js")).transcriptPath({
+          const tp = transcriptPath({
             projectsRoot: defaultProjectsRoot(),
             cwd: workdir,
             sessionId: agentSessionId!,
           });
-          const priorMessageCount = readFileSync(tp, "utf8")
+          const content = await readFile(tp, "utf8");
+          const priorMessageCount = content
             .split("\n")
             .filter((line) => line.trim().length > 0).length;
           void logAuditEvent(

@@ -1,15 +1,13 @@
 /**
- * BEC-227 — Task 11: deep-review SDK call session resume.
+ * BEC-227 / BEC-231 — deep-review SDK session shape.
  *
- * `runDeepReview` should pass `options.resume = agentSessionId` to the
- * Claude Agent SDK when:
- *   - `agentSessionId` is non-null
- *   - `isFirstResumableStage === false`
- *   - the resolved model is in the resumable family (sonnet/opus)
- *   - the transcript JSONL exists on disk
+ * `runDeepReview` must derive the session call shape from on-disk state
+ * (transcriptExists()), not from the in-memory `isFirstResumableStage` flag.
+ * This matches the BEC-231 fix applied to executor.ts.
  *
- * Otherwise (null sessionId, fresh stage, non-resumable model, missing
- * transcript) `options.resume` must be undefined.
+ * When JSONL present  → `options.resume = agentSessionId`   (continue)
+ * When JSONL absent   → `options.sessionId = agentSessionId` (create / retry)
+ * When agentSessionId null → no session options
  *
  * The OpenRouter fanout providers are deliberately untouched — they have
  * no SDK session of their own to resume.
@@ -22,20 +20,21 @@ import type { HandoffArtifact } from "../types.js";
 const queryMock = vi.fn();
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
 
-// Force transcriptExists → true so the resume branch fires without needing
-// real filesystem state. This matches the Task-7 pattern in
-// session-resume-fallback.test.ts.
+// Per-test transcriptExists control (hoisted so it's available before imports).
+const { transcriptExistsMock } = vi.hoisted(() => ({
+  transcriptExistsMock: vi.fn().mockReturnValue(false),
+}));
 vi.mock("../executor/session-store.js", async () => {
   const real = await vi.importActual<typeof import("../executor/session-store.js")>(
     "../executor/session-store.js",
   );
   return {
     ...real,
-    transcriptExists: vi.fn().mockReturnValue(true),
+    transcriptExists: transcriptExistsMock,
   };
 });
 
-// Silence audit writer — Task 11 doesn't assert audit events.
+// Silence audit writer.
 vi.mock("../audit/writer.js", async () => {
   const real = await vi.importActual<typeof import("../audit/writer.js")>(
     "../audit/writer.js",
@@ -66,13 +65,18 @@ function makeMinimalStream() {
   })();
 }
 
-describe("deep-review resume (BEC-227, Task 11)", () => {
+describe("deep-review session shape (BEC-227, BEC-231)", () => {
   beforeEach(() => {
     queryMock.mockReset();
     queryMock.mockImplementation(() => makeMinimalStream());
+    vi.clearAllMocks();
+    queryMock.mockImplementation(() => makeMinimalStream());
   });
 
-  it("agentSessionId provided + resumable model + not-first → passes resume in options", async () => {
+  it("JSONL present → passes resume: in options for all three sub-agents", async () => {
+    // Transcript exists on disk → resume path.
+    transcriptExistsMock.mockReturnValue(true);
+
     await runDeepReview({
       handoff: makeHandoff(),
       workdir: "/tmp/x",
@@ -82,14 +86,37 @@ describe("deep-review resume (BEC-227, Task 11)", () => {
     });
 
     expect(queryMock).toHaveBeenCalled();
-    // 3 parallel sub-agents — each call should carry the same resume opt.
     for (const call of queryMock.mock.calls) {
       expect(call[0].options.resume).toBe("uuid-1");
       expect(call[0].options.sessionId).toBeUndefined();
     }
   });
 
-  it("agentSessionId null → no resume in options", async () => {
+  it("JSONL absent → passes sessionId: (create/retry), not empty opts (BEC-231)", async () => {
+    // This is the BEC-231 bug scenario: the in-memory flag might say
+    // "session initiated" but the JSONL was never written (e.g. auth 401
+    // on the first deep-review attempt). The fix: absent JSONL → sessionId:
+    // so the SDK gets a fresh shot at creating the transcript.
+    transcriptExistsMock.mockReturnValue(false);
+
+    await runDeepReview({
+      handoff: makeHandoff(),
+      workdir: "/tmp/x",
+      agentSessionId: "uuid-2",
+      isFirstResumableStage: false, // ignored since BEC-231 — transcriptExists drives shape
+      model: "claude-sonnet-4-6",
+    });
+
+    expect(queryMock).toHaveBeenCalled();
+    for (const call of queryMock.mock.calls) {
+      expect(call[0].options.sessionId).toBe("uuid-2");
+      expect(call[0].options.resume).toBeUndefined();
+    }
+  });
+
+  it("agentSessionId null → no session options regardless of transcript state", async () => {
+    transcriptExistsMock.mockReturnValue(true); // even if transcript exists, null id → no opts
+
     await runDeepReview({
       handoff: makeHandoff(),
       workdir: "/tmp/x",
