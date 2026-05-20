@@ -11,7 +11,14 @@ WORKDIR /app
 # - sqlite: standalone sqlite3 CLI for runbook queries (e.g. docker exec urateam-dogfood sqlite3 ...)
 # - tini: PID 1 signal handling for clean shutdown
 # - python3, make, g++: better-sqlite3 native build fallback if no prebuild matches alpine-musl
-RUN apk add --no-cache git openssh-client github-cli sqlite tini python3 make g++
+# - bash: BEC-234 — Claude Agent SDK's Bash tool requires a POSIX shell; the
+#   alpine base ships only /bin/sh (busybox), and the SDK checks process.env.SHELL
+#   (not the filesystem) to decide whether a "suitable shell" is present.
+RUN apk add --no-cache git openssh-client github-cli sqlite tini python3 make g++ bash
+
+# BEC-234 — set SHELL so the Claude Agent SDK's "no suitable shell" check passes.
+# Without this, every Bash tool call fails with "No suitable shell found ...".
+ENV SHELL=/bin/bash
 
 # Pinned versions — image is reproducible per build.
 ARG URATEAM_CORE_VERSION=0.1.54
