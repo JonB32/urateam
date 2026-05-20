@@ -47,6 +47,11 @@ function appWith(
 }
 
 describe("POST /runs/:id/retry", () => {
+  beforeEach(async () => {
+    // Ensure license is not set before the unlicensed test runs
+    await restoreLicense();
+  });
+
   it("unlicensed → 404 even for valid retry requests", async () => {
     // Do NOT install enterprise license
     const runner = { resume: vi.fn(), start: vi.fn() };
