@@ -61,12 +61,11 @@ RUN mkdir -p /home/ura/.claude/projects
 # Persistent volumes:
 # - /home/ura/data: SQLite database
 # - /home/ura/work: cloned repos + worktrees (PM agent clones REPO_URL here)
-# - /home/ura/.claude: OAuth credentials so executor's auth-check passes without
-#   ANTHROPIC_API_KEY (`docker compose exec urateam-dogfood claude login` once)
-# - /home/ura/.claude/projects: BEC-227 session transcripts (Phase 1 — must be
-#   pre-created above so the named volume initializes ura-owned)
+# - /home/ura/.claude: OAuth credentials + BEC-227 session transcripts (projects/
+#   subdir mounted as a separate named volume in docker-compose; pre-created above
+#   so the named volume initializes ura-owned on first mount)
 # - /home/ura/.config: gh CLI auth (`gh auth login --with-token` once)
-VOLUME ["/home/ura/data", "/home/ura/work", "/home/ura/.claude", "/home/ura/.claude/projects", "/home/ura/.config"]
+VOLUME ["/home/ura/data", "/home/ura/work", "/home/ura/.claude", "/home/ura/.config"]
 EXPOSE 3001
 
 # `ura start` runs the full daemon: webhook + dashboard + PM agent + Release
