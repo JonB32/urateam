@@ -28,6 +28,17 @@ notes call out when a change affects only a single package.
 - **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
 - **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
 
+## [0.1.69] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.54 → 0.1.55
+- `@urateam/cli`: 0.1.56 → 0.1.57
+- `@urateam/dashboard`: 0.1.54 → 0.1.55
+- `create-urateam`: 0.1.57 → 0.1.58
+
+### Fixed
+- **Dogfood container: install `bash` + set `SHELL=/bin/bash`** (#351, BEC-234): two-line Dockerfile change. The Alpine base image ships only `/bin/sh` (busybox) and leaves `SHELL` empty. The Claude Agent SDK's "no suitable shell" check uses `process.env.SHELL` to decide whether to run Bash tool calls, and refuses to invoke any when it's empty. Effect: **every Bash tool call across every pipeline run silently failed** — agents ran on Read/Edit/Grep only, couldn't run tests, builds, git inspection, or any shell-mediated work. Discovered by auditing the BEC-231 run `Mvl1OtDQKbrHQMgGkwenS` JSONL transcript: 11/11 Bash attempts errored with "No suitable shell found ...", including `npx vitest`, `git status`, `git log`, `pnpm build`. The agent compensated with inspection-only verification (no real test execution), almost certainly contributing to several historical "Reached maximum number of turns" failures on the currently-circuit-broken issues. After this lands, the next pipeline run's transcript should show successful Bash tool results.
+
 ## [0.1.68] — 2026-05-20
 
 Bumps:
