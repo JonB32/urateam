@@ -25,10 +25,22 @@ export function defaultProjectsRoot(env: NodeJS.ProcessEnv = process.env): strin
   return env.URATEAM_CLAUDE_PROJECTS_DIR ?? join(homedir(), ".claude", "projects");
 }
 
-/** Encode a cwd into the SDK's per-project directory name. */
-function encodeCwd(cwd: string): string {
-  // SDK convention: replace path separators with hyphens, prefix removed if leading slash.
-  return cwd.replace(/^\//, "").replace(/[\/\\]/g, "-");
+/**
+ * Encode a cwd into the SDK's per-project directory name.
+ *
+ * BEC-232 — match the SDK's encoding exactly. The SDK replaces ALL path
+ * separators (including a leading `/`) with `-`, producing a directory name
+ * like `"-home-ura-data-runs-<run>-worktree"` (note the LEADING dash).
+ *
+ * The pre-BEC-232 implementation stripped the leading `/` BEFORE replacing,
+ * producing `"home-..."` (no leading dash). The mismatch caused
+ * `transcriptExists()` to always return false for absolute cwds — every
+ * BEC-227 session-resume attempt fell back to legacy handoff because
+ * urateam looked for the JSONL at the wrong path. Verified on the dogfood
+ * instance against real SDK-written transcripts (BEC-231 soak observation).
+ */
+export function encodeCwd(cwd: string): string {
+  return cwd.replace(/[\/\\]/g, "-");
 }
 
 /** Build the JSONL transcript path for a given (cwd, sessionId). */
