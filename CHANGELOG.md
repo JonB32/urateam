@@ -28,6 +28,34 @@ notes call out when a change affects only a single package.
 - **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
 - **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
 
+## [0.1.65] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.50 → 0.1.51
+- `@urateam/cli`: 0.1.52 → 0.1.53
+- `@urateam/dashboard`: 0.1.50 → 0.1.51
+- `create-urateam`: 0.1.53 → 0.1.54
+
+### Added
+- **Agent session continuity — Phase 1** (#339, BEC-227): Claude Agent SDK session resume across pipeline stages, gated behind `URATEAM_ENABLE_AGENT_SESSION_RESUME=true` (default off). When enabled, each pipeline run mints one `agent_session_id = randomUUID()` and threads it through every `executeStage()` call. The first resumable stage creates the SDK session; subsequent stages resume it. Implement #2 in RALPH iteration 2 now sees implement #1's full transcript (tool use, edits, reasoning) instead of a synthetic handoff blob.
+  - New `agent_session_id` column on `pipeline_runs` (nullable; null = legacy / flag-off)
+  - New `isResumable(stage, model)` policy module (`executor/session-policy.ts`) — validator + Haiku ralph-check + non-Claude OpenRouter fanout providers always run fresh
+  - New `transcriptPath` / `transcriptExists` helpers (`executor/session-store.ts`)
+  - New `urateam-dogfood-agent-sessions` Docker volume mounted at `/home/ura/.claude/projects` — without this, retriable resumes silently lose memory across container restarts
+  - Boot-time `checkSessionVolume()` warning when the projects dir is missing or not writeable
+  - Fallback path: if JSONL transcript file is absent, fall back to legacy handoff + emit `pipeline.agent_session_missing_fallback` audit event
+  - Validator (`validate.ts`) gains `runMode: "first-resumed" | "resumed" | "fallback"` — skips entirely on `"resumed"` since the next agent IS the prior agent
+  - RALPH iteration suppresses the `<previous-stage-context>` XML block on resumed re-implements
+  - Dashboard run-detail page displays the truncated session ID with a link to a new `GET /runs/:id/transcript` viewer (renders the SDK `getSessionMessages()` output)
+  - 4 new audit event types: `pipeline.agent_session_created`, `pipeline.agent_session_resumed`, `pipeline.agent_session_missing_fallback`, `system.session_volume_warning`. Canonical count 52 → 56.
+- **Cache booster** (Track C-1): `excludeDynamicSections: true` on the `claude_code` SDK `systemPrompt` preset — ON for every stage regardless of resume state. Strips per-session cwd/git-status from the cached prefix, lifting cache hit rate from ~95% toward 99%. Zero behavioral risk.
+
+### Changed
+- **`PM_AGENT_STUCK_RUN_AGE_MIN` default raised 60 → 120 minutes** (BEC-227 / BEC-184 tuning): real RALPH-iterated implementation work routinely takes 60-90 min, and the prior 60-min default produced false-positive reaps on healthy long runs (observed during BEC-192 v0.1.63 verification). The env var override is still respected.
+
+### Rollout note
+Phase 1 ships the code with the flag default `false`. Phase 2 is a dogfood soak (operator sets `URATEAM_ENABLE_AGENT_SESSION_RESUME=true` in `.env.dogfood`); Phase 3 flips the default in code; Phase 4 adds Track B (surgical review-fix) + Track D (decision artifact). See `docs/superpowers/specs/2026-05-19-agent-session-continuity-design.md` for the full rollout plan.
+
 ## [0.1.64] — 2026-05-18
 
 Bumps:
