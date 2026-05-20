@@ -306,16 +306,16 @@ export const DecisionArtifactSchema = z.object({
     z.object({
       choice: z.string(),
       reason: z.string(),
-      alternatives_considered: z.array(z.string()).default([]),
+      alternativesConsidered: z.array(z.string()).default([]),
     }),
   ).default([]),
-  left_unhandled: z.array(
+  leftUnhandled: z.array(
     z.object({
       case: z.string(),
       reason: z.string(),
     }),
   ).default([]),
-  key_files: z.array(z.string()).default([]),
+  keyFiles: z.array(z.string()).default([]),
 });
 export type DecisionArtifact = z.infer<typeof DecisionArtifactSchema>;
 
