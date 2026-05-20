@@ -84,9 +84,7 @@ export async function resolveSessionOpts(
           cwd: workdir,
           sessionId: agentSessionId,
         });
-        const priorMessageCount = readFileSync(tp, "utf8")
-          .split("\n")
-          .filter((line) => line.trim().length > 0).length;
+        const priorMessageCount = (readFileSync(tp, "utf8").match(/\n/g) ?? []).length;
         void logAuditEvent(
           db,
           agentSessionResumedEvent({ runId, issueId, sessionId: agentSessionId, stage, priorMessageCount }),
