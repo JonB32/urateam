@@ -28,6 +28,17 @@ notes call out when a change affects only a single package.
 - **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
 - **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
 
+## [0.1.67] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.52 → 0.1.53
+- `@urateam/cli`: 0.1.54 → 0.1.55
+- `@urateam/dashboard`: 0.1.52 → 0.1.53
+- `create-urateam`: 0.1.55 → 0.1.56
+
+### Fixed
+- **Agent session continuity: encodeCwd path encoding** (#346, BEC-232): one-line fix to `session-store.ts:encodeCwd()`. The Claude Agent SDK writes JSONL transcripts to a directory whose name is the cwd with ALL path separators (including the leading `/`) replaced with `-` — producing a LEADING-DASH directory like `-home-ura-data-runs-<run>-worktree`. The previous urateam implementation stripped the leading `/` before replacing, producing `home-...` (no leading dash). `transcriptExists()` therefore looked at the wrong path and returned false for every absolute cwd, making the BEC-231 lazy-creation fix (v0.1.66) effectively moot — every BEC-227 session-resume attempt fell back to legacy handoff despite the JSONLs being correctly written by the SDK. Verified on the dogfood instance with 268KB transcript files present at the leading-dash paths. Combined with v0.1.66, this completes the BEC-227 session-resume wiring; post-deploy the next pipeline run should produce ≥1 `pipeline.agent_session_resumed` audit event.
+
 ## [0.1.66] — 2026-05-20
 
 Bumps:
