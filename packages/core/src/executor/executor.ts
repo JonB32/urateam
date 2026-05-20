@@ -23,7 +23,8 @@ import { createLogger } from "../logger.js";
 import { consumeAgentStream, StagePreStreamStalledError, type StreamMessage } from "./agent-stream.js";
 import { isClaudeAuthValid, resolveClaudeAuth } from "./auth-check.js";
 import { isResumable } from "./session-policy.js";
-import { transcriptExists, defaultProjectsRoot } from "./session-store.js";
+import { resolveTranscript, defaultProjectsRoot } from "./session-store.js";
+import { readFileSync } from "node:fs";
 // BEC-231 — `agentSessionMissingFallbackEvent` was previously fired from this
 // module when the resume branch found the JSONL absent. The new logic always
 // picks the right shape (`sessionId:` to create, `resume:` to continue) based
@@ -273,21 +274,15 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       isResumable(stage, resolvedModel);
     let sessionOpts: { sessionId?: string; resume?: string } = {};
     if (wantsResume) {
-      const exists = transcriptExists({
+      const { path: tp, exists: transcriptFound } = resolveTranscript({
         projectsRoot: defaultProjectsRoot(),
         cwd: workdir,
         sessionId: agentSessionId!,
       });
-      if (exists) {
+      if (transcriptFound) {
         // Transcript present — resume the conversation.
         sessionOpts = { resume: agentSessionId! };
         try {
-          const { readFileSync } = await import("node:fs");
-          const tp = (await import("./session-store.js")).transcriptPath({
-            projectsRoot: defaultProjectsRoot(),
-            cwd: workdir,
-            sessionId: agentSessionId!,
-          });
           const priorMessageCount = readFileSync(tp, "utf8")
             .split("\n")
             .filter((line) => line.trim().length > 0).length;

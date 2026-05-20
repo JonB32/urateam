@@ -22,8 +22,8 @@ import type { HandoffArtifact } from "../types.js";
 const queryMock = vi.fn();
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
 
-// Force transcriptExists → true so the resume branch fires without needing
-// real filesystem state. This matches the Task-7 pattern in
+// Force resolveTranscript → exists:true so the resume branch fires without
+// needing real filesystem state. This matches the Task-7 pattern in
 // session-resume-fallback.test.ts.
 vi.mock("../executor/session-store.js", async () => {
   const real = await vi.importActual<typeof import("../executor/session-store.js")>(
@@ -31,7 +31,7 @@ vi.mock("../executor/session-store.js", async () => {
   );
   return {
     ...real,
-    transcriptExists: vi.fn().mockReturnValue(true),
+    resolveTranscript: vi.fn().mockReturnValue({ path: "/fake/session.jsonl", exists: true }),
   };
 });
 

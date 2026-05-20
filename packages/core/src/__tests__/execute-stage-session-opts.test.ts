@@ -58,7 +58,10 @@ vi.mock("../executor/session-store.js", async () => {
   );
   return {
     ...real,
-    transcriptExists: transcriptExistsMock,
+    resolveTranscript: vi.fn().mockImplementation(() => ({
+      path: "/fake/session.jsonl",
+      exists: transcriptExistsMock(),
+    })),
   };
 });
 

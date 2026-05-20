@@ -60,3 +60,18 @@ export function transcriptExists(opts: {
 }): boolean {
   return existsSync(transcriptPath(opts));
 }
+
+/**
+ * Compute the transcript path and check existence in a single call, encoding
+ * the cwd only once. Callers that need both the path (for readFileSync) and
+ * the existence check should prefer this over calling transcriptExists() then
+ * transcriptPath() separately.
+ */
+export function resolveTranscript(opts: {
+  projectsRoot: string;
+  cwd: string;
+  sessionId: string;
+}): { path: string; exists: boolean } {
+  const path = transcriptPath(opts);
+  return { path, exists: existsSync(path) };
+}

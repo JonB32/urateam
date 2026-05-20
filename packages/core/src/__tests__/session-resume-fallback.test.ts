@@ -55,8 +55,8 @@ vi.mock("../executor/session-store.js", async () => {
   );
   return {
     ...real,
-    // Force the transcript-not-found path so the fallback branch fires.
-    transcriptExists: vi.fn().mockReturnValue(false),
+    // Force the transcript-not-found path so the create/retry branch fires.
+    resolveTranscript: vi.fn().mockReturnValue({ path: "/fake/session.jsonl", exists: false }),
   };
 });
 

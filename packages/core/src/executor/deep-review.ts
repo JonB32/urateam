@@ -11,7 +11,8 @@ import { consumeAgentStream, parseJsonBlock } from "./agent-stream.js";
 import { buildStagePermissionOptions } from "./permissions.js";
 import { sanitize, buildSandboxedBlock } from "./prompt/sanitizer.js";
 import { isResumable } from "./session-policy.js";
-import { transcriptExists, defaultProjectsRoot, transcriptPath } from "./session-store.js";
+import { resolveTranscript, defaultProjectsRoot } from "./session-store.js";
+import { readFileSync } from "node:fs";
 import {
   agentSessionMissingFallbackEvent,
   agentSessionResumedEvent,
@@ -299,23 +300,17 @@ async function runSubAgent(
       if (isFirstResumableStage) {
         sessionOpts = { sessionId: agentSessionId! };
       } else {
-        const exists = transcriptExists({
+        const { path: tp, exists: transcriptFound } = resolveTranscript({
           projectsRoot: defaultProjectsRoot(),
           cwd: workdir,
           sessionId: agentSessionId!,
         });
-        if (exists) {
+        if (transcriptFound) {
           sessionOpts = { resume: agentSessionId! };
           // Emit resumed audit event with prior message count (best-effort
           // sync read of the JSONL; non-blocking).
           if (sessionOptsCtx.db && sessionOptsCtx.runId && sessionOptsCtx.issueId) {
             try {
-              const { readFileSync } = await import("node:fs");
-              const tp = transcriptPath({
-                projectsRoot: defaultProjectsRoot(),
-                cwd: workdir,
-                sessionId: agentSessionId!,
-              });
               const priorMessageCount = readFileSync(tp, "utf8")
                 .split("\n")
                 .filter((line) => line.trim().length > 0).length;
