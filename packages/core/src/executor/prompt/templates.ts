@@ -5,6 +5,8 @@ import type {
   ReviewFeedbackContext,
   ReviewComment,
   MergeConflictContext,
+  ReviewFinding,
+  DecisionArtifact,
 } from "../../types.js";
 import {
   SECURITY_REVIEW_CHECKLIST,
@@ -412,5 +414,50 @@ Instructions:
 - FINAL OUTPUT: After completing your review, emit a single HandoffArtifact JSON block as your last output (format below). The \`summary\` field must be 1–2 sentences of prose describing what was reviewed and the overall verdict — NOT JSON. All fields are required even when there are no findings.
 
 ${REVIEW_OUTPUT_FORMAT}
+`.trim();
+}
+
+/**
+ * BEC-227 Phase 4 / Track B. Used by the review-fix loop when the
+ * per-run Agent SDK session is intact AND there is a populated decision
+ * artifact AND `URATEAM_ENABLE_AGENT_SESSION_RESUME` was on at run start.
+ *
+ * The prompt is intentionally narrow: the resumed agent already has the
+ * full implement-stage context (tool calls, file edits, reasoning). All
+ * we need to give it is the list of blocking findings + a reminder of
+ * its own prior decisions so it can choose to preserve or revise them.
+ */
+export function surgicalReviewFixPrompt(
+  findings: ReviewFinding[],
+  decisions: DecisionArtifact | null,
+): string {
+  const findingsBlock = findings
+    .map((f, i) => {
+      const loc = `${f.file} line ${f.line}`;
+      const fix = f.fix ? ` — suggested fix: ${f.fix}` : "";
+      return `${i + 1}. [${f.severity} / ${f.category}] ${loc} — ${f.description}${fix}`;
+    })
+    .join("\n");
+
+  const hasDecisions =
+    decisions !== null &&
+    ((decisions.decisions?.length ?? 0) > 0 || (decisions.leftUnhandled?.length ?? 0) > 0);
+
+  const decisionsBlock = hasDecisions
+    ? `\n\nPrior decisions you made during the implement stage (review BEFORE deciding whether to preserve or revise each):\n${JSON.stringify(decisions, null, 2)}`
+    : "";
+
+  return `Review surfaced blocking findings on the diff you produced. Address each one.
+
+Blocking findings:
+${findingsBlock}${decisionsBlock}
+
+Instructions:
+- You already have the full implement-stage context — the diff, file contents, your reasoning. Reuse it; do not re-read files you already know.
+- Address every finding above. If a finding contradicts a prior decision listed above, choose the better answer and explain the trade-off in your reply (do NOT silently revert).
+- Make ONLY the changes needed to resolve the findings. No drive-by refactors, no scope creep, no doc-rewrites unrelated to the findings.
+- Commit your fixes (conventional commits, one logical commit per finding cluster) and push to the same branch.
+- Do NOT create a new PR. Do NOT switch branches inside the worktree.
+- After your edits, run the build + test commands you used in the implement stage and verify they still pass before declaring done.
 `.trim();
 }
