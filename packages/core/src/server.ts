@@ -16,6 +16,13 @@ import type { GitLabConfig } from "./repo/gitlab.js";
 import type { BitbucketConfig } from "./repo/bitbucket.js";
 import { isFeatureLicensed, checkLicense } from "./license.js";
 import { createLogger } from "./logger.js";
+import { checkSessionVolume } from "./pipeline/session-volume-check.js";
+import {
+  logAuditEvent,
+  systemSessionVolumeWarningEvent,
+} from "./audit/index.js";
+import { defaultProjectsRoot } from "./executor/session-store.js";
+import { isAgentSessionResumeEnabled } from "./executor/session-policy.js";
 
 const log = createLogger({ component: "server" });
 
@@ -92,6 +99,25 @@ export async function createApp(config: ServerConfig) {
   const db = await createDb({
     connectionString: config.databaseUrl ?? ":memory:",
   });
+
+  // BEC-227: session-volume sanity check. Verifies that `~/.claude/projects`
+  // (or `URATEAM_CLAUDE_PROJECTS_DIR`) is mounted and writeable so JSONL
+  // transcripts survive container restarts. Non-fatal — a failing check
+  // means resumes silently fall back to fresh sessions.
+  if (isAgentSessionResumeEnabled()) {
+    const projectsDir = defaultProjectsRoot();
+    const status = checkSessionVolume({ projectsDir });
+    if (!status.ok) {
+      log.warn(
+        { projectsDir, reason: status.reason },
+        "agent session projects dir failed volume check — resumes will fall back to fresh sessions",
+      );
+      void logAuditEvent(
+        db as any,
+        systemSessionVolumeWarningEvent({ projectsDir, reason: status.reason }),
+      );
+    }
+  }
 
   // Notifiers
   const notifiers = [

@@ -23,3 +23,11 @@ export {
   type DeepReviewFinding,
   type DeepReviewResult,
 } from "./deep-review.js";
+
+/**
+ * Re-export of the Claude Agent SDK's transcript reader and message shape so
+ * downstream packages (notably `@urateam/dashboard`, which doesn't take a
+ * direct SDK dependency) can render historical session transcripts without
+ * pulling the SDK in twice. BEC-227.
+ */
+export { getSessionMessages, type SessionMessage } from "@anthropic-ai/claude-agent-sdk";

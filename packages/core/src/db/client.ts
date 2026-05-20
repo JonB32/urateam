@@ -56,6 +56,8 @@ const MIGRATION_COLUMNS: MigrationColumn[] = [
   // BEC-94: auto-commit quality metric
   { table: "pipeline_runs", column: "auto_committed", sqliteType: "INTEGER", pgType: "BOOLEAN" },
   { table: "pipeline_runs", column: "linear_team_id", sqliteType: "TEXT", pgType: "TEXT" },
+  // BEC-227: agent session continuity — Claude Agent SDK session UUID for resumption
+  { table: "pipeline_runs", column: "agent_session_id", sqliteType: "TEXT", pgType: "TEXT" },
   // Feature 4.4: RBAC
   {
     table: "dashboard_users",
@@ -102,7 +104,8 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
     auto_merged ${bool},
     auto_merge_reason TEXT,
     auto_committed ${bool},
-    linear_team_id TEXT
+    linear_team_id TEXT,
+    agent_session_id TEXT
   );
 
   CREATE TABLE IF NOT EXISTS stage_runs (

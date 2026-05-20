@@ -565,6 +565,25 @@ export const AuditEventTypeSchema = z.enum([
    *  hash, so operators can audit which repos came/went without grepping
    *  the daemon log. */
   "config.reloaded",
+  /** BEC-227 — a fresh per-run Agent SDK session was created on the first
+   *  resumable stage. Payload: runId, issueId, sessionId (UUID generated
+   *  by the SDK on the first `query()` call). */
+  "pipeline.agent_session_created",
+  /** BEC-227 — a downstream stage resumed the per-run Agent SDK session via
+   *  `query({ resume: sessionId })`. Payload includes the stage name and
+   *  the prior message count read from the session JSONL transcript so
+   *  operators can see how much context was inherited. */
+  "pipeline.agent_session_resumed",
+  /** BEC-227 — a stage attempted to resume the per-run session but the
+   *  underlying JSONL transcript was missing, unreadable, or the SDK
+   *  rejected the resume. The runner fell back to a fresh session for
+   *  this stage. Payload `reason` carries the failure mode. */
+  "pipeline.agent_session_missing_fallback",
+  /** BEC-227 — at boot, the session-volume check found `~/.claude/projects`
+   *  on tmpfs, missing, or unwritable — meaning session JSONLs won't
+   *  survive container restarts. Payload carries the projectsDir path and
+   *  the failure reason so operators can fix their mount config. */
+  "system.session_volume_warning",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 
