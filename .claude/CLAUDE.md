@@ -47,7 +47,7 @@ Autonomous backlog manager in `packages/core/src/pm/`:
 - `coordination.ts` — DB-backed active work tracking for parallel conflict detection
 
 ## Agent Session Continuity (BEC-227)
-- One Claude SDK session per pipeline run, gated by `URATEAM_ENABLE_AGENT_SESSION_RESUME=true` (strict equality, read at call time)
+- One Claude SDK session per pipeline run (Phase 3 default ON; opt out via `URATEAM_DISABLE_AGENT_SESSION_RESUME=true`, strict equality, read at call time)
 - `agent_session_id` column on `pipeline_runs`; mint at `runner.start()`, thread through executor, ralph, deep-review
 - `isResumable(stage, model)` in `executor/session-policy.ts` — validator + Haiku ralph-check + non-Claude fanout providers always fresh
 - JSONL transcripts written by SDK at `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl` — mounted as `urateam-dogfood-agent-sessions` volume in dogfood compose

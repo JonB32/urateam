@@ -55,15 +55,26 @@ export function isResumable(stage: string, model: string): boolean {
 }
 
 /**
- * Returns true iff the env enables agent session resume (BEC-227).
+ * Returns true iff agent session resume (BEC-227) is enabled for this run.
  *
- * Strict equality on `"true"` — mirrors BEC-218 / BEC-225 precedent so
- * `"1"` / `"yes"` / `"TRUE"` / `""` do NOT enable the flag. The env is
- * read at call time so flipping the var takes effect on the next pipeline
- * run without a daemon restart.
+ * BEC-227 Phase 3: default ON. After the Phase 2 dogfood soak verified the
+ * mechanism works end-to-end (combined with the BEC-231 + BEC-232 fixes),
+ * the default flipped from opt-in to opt-out. Operators who want to disable
+ * session resume can set `URATEAM_DISABLE_AGENT_SESSION_RESUME=true`.
+ *
+ * Strict equality on `"true"` — mirrors BEC-218 precedent so `"1"` /
+ * `"yes"` / `"TRUE"` / `""` do NOT disable the flag. The env is read at
+ * call time so flipping the var takes effect on the next pipeline run
+ * without a daemon restart.
+ *
+ * The previous Phase-1/2 env var `URATEAM_ENABLE_AGENT_SESSION_RESUME` is
+ * ignored under Phase 3. Operators with `URATEAM_ENABLE_AGENT_SESSION_RESUME=true`
+ * in their `.env` will see no behavior change (the new default is on);
+ * operators relying on the old default-off can switch to
+ * `URATEAM_DISABLE_AGENT_SESSION_RESUME=true`.
  */
 export function isAgentSessionResumeEnabled(
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  return env.URATEAM_ENABLE_AGENT_SESSION_RESUME === "true";
+  return env.URATEAM_DISABLE_AGENT_SESSION_RESUME !== "true";
 }
