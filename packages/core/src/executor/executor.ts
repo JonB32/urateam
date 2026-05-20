@@ -22,13 +22,7 @@ import type { DevcontainerSession } from "../repo/devcontainer.js";
 import { createLogger } from "../logger.js";
 import { consumeAgentStream, StagePreStreamStalledError, type StreamMessage } from "./agent-stream.js";
 import { isClaudeAuthValid, resolveClaudeAuth } from "./auth-check.js";
-import { isResumable } from "./session-policy.js";
-import { transcriptExists, defaultProjectsRoot } from "./session-store.js";
-import {
-  agentSessionMissingFallbackEvent,
-  agentSessionResumedEvent,
-} from "../audit/index.js";
-import { logAuditEvent } from "../audit/writer.js";
+import { resolveSessionOpts } from "./session-resolver.js";
 
 /**
  * BEC-183: wall-clock stage timeouts. Independent of the in-stream watchdog
@@ -231,97 +225,21 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       log.info({ plugins: tooling.plugins.map((p) => p.path) }, "plugins resolved");
     }
 
-    // BEC-227 — resolve per-stage session opts. The runner mints
-    // `agentSessionId` once per run and flips `isFirstResumableStage` on the
-    // first resumable stage. Combined with `isResumable(stage, model)` this
-    // chooses between three call shapes: create (`sessionId`), reuse
-    // (`resume`), or no session opts (always-fresh stages, non-Claude models,
-    // or flag off).
-    //
-    // Task 7 (this block): on the resume branch (non-first resumable stage),
-    // verify the SDK's JSONL transcript file actually exists on disk before
-    // setting `resume`. If the JSONL is missing (e.g. container tmpfs lost,
-    // operator wiped `~/.claude/projects`), the SDK would throw on resume.
-    // Drop to a fresh-session shape, emit a `missing_fallback` audit event,
-    // and warn so operators can spot loss patterns.
+    // BEC-228 — resolve per-stage session opts via shared helper (extracted
+    // from the ~70-line inline block that was duplicated in deep-review.ts).
     const resolvedModel = context.stageModels?.[stage] ?? effectiveProfile.model;
     const agentSessionId = context.agentSessionId ?? null;
     const isFirstResumableStage = context.isFirstResumableStage ?? false;
-    const wantsResume =
-      agentSessionId !== null &&
-      !!resolvedModel &&
-      isResumable(stage, resolvedModel);
-    let sessionOpts: { sessionId?: string; resume?: string } = {};
-    if (wantsResume) {
-      if (isFirstResumableStage) {
-        sessionOpts = { sessionId: agentSessionId! };
-      } else {
-        const exists = transcriptExists({
-          projectsRoot: defaultProjectsRoot(),
-          cwd: workdir,
-          sessionId: agentSessionId!,
-        });
-        if (exists) {
-          sessionOpts = { resume: agentSessionId! };
-          // BEC-227 — emit resumed audit event with prior message count.
-          // Read transcript line count directly from the JSONL (the SDK's
-          // `getSessionMessages` is awaitable async; we want a synchronous
-          // best-effort count here so the event isn't blocked on an extra
-          // round-trip).
-          try {
-            const { readFileSync } = await import("node:fs");
-            const tp = (await import("./session-store.js")).transcriptPath({
-              projectsRoot: defaultProjectsRoot(),
-              cwd: workdir,
-              sessionId: agentSessionId!,
-            });
-            const priorMessageCount = readFileSync(tp, "utf8")
-              .split("\n")
-              .filter((line) => line.trim().length > 0).length;
-            void logAuditEvent(
-              db,
-              agentSessionResumedEvent({
-                runId,
-                issueId,
-                sessionId: agentSessionId!,
-                stage,
-                priorMessageCount,
-              }),
-            );
-          } catch (err) {
-            log.warn(
-              { err: (err as Error).message },
-              "failed to count prior session messages — emitting resumed event with count=0",
-            );
-            void logAuditEvent(
-              db,
-              agentSessionResumedEvent({
-                runId,
-                issueId,
-                sessionId: agentSessionId!,
-                stage,
-                priorMessageCount: 0,
-              }),
-            );
-          }
-        } else {
-          void logAuditEvent(
-            db,
-            agentSessionMissingFallbackEvent({
-              runId,
-              issueId,
-              sessionId: agentSessionId!,
-              reason: "jsonl-not-found",
-            }),
-          );
-          log.warn(
-            { runId, sessionId: agentSessionId, stage, cwd: workdir },
-            "agent session JSONL missing — falling back to fresh session",
-          );
-          sessionOpts = {};
-        }
-      }
-    }
+    const sessionOpts = await resolveSessionOpts({
+      stage,
+      model: resolvedModel,
+      agentSessionId,
+      isFirstResumableStage,
+      workdir,
+      runId,
+      issueId,
+      db,
+    });
 
     const messages = query({
       prompt,

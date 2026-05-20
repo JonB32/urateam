@@ -10,13 +10,7 @@ import { createLogger } from "../logger.js";
 import { consumeAgentStream, parseJsonBlock } from "./agent-stream.js";
 import { buildStagePermissionOptions } from "./permissions.js";
 import { sanitize, buildSandboxedBlock } from "./prompt/sanitizer.js";
-import { isResumable } from "./session-policy.js";
-import { transcriptExists, defaultProjectsRoot, transcriptPath } from "./session-store.js";
-import {
-  agentSessionMissingFallbackEvent,
-  agentSessionResumedEvent,
-} from "../audit/index.js";
-import { logAuditEvent } from "../audit/writer.js";
+import { resolveSessionOpts } from "./session-resolver.js";
 import type { AnyDb } from "../db/client.js";
 
 const log = createLogger({ component: "DeepReview" });
@@ -276,96 +270,23 @@ async function runSubAgent(
   try {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
-    // ── BEC-227 — resolve per-sub-agent session opts ────────────────────────
-    // Mirror the pattern in executor.ts: when agentSessionId is set and the
-    // resolved model is in the resumable family, choose between sessionId
-    // (first resumable stage of the run) and resume (subsequent stages).
-    // Pre-check the JSONL on the resume branch; fall back to fresh + audit
-    // event when the transcript is missing.
-    //
-    // Note: deep-review's three sub-agents run in parallel against the same
-    // session id. The SDK supports concurrent `resume` calls — each spawns
-    // its own conversation branch from the shared transcript. Each branch
-    // emits its own audit event with `stage = "review"` so operators see
-    // the resume rate at the sub-agent level.
+    // BEC-228 — resolve per-sub-agent session opts via shared helper (extracted
+    // from the ~70-line inline block that was duplicated in executor.ts).
+    // Each sub-agent uses a qualified stage label ("review:reuse" etc.) so
+    // operators can spot per-sub-agent resume patterns in the audit log.
     const resolvedModel = sessionOptsCtx.model ?? DEEP_REVIEW_MODEL;
     const agentSessionId = sessionOptsCtx.agentSessionId ?? null;
     const isFirstResumableStage = sessionOptsCtx.isFirstResumableStage ?? false;
-    const wantsResume =
-      agentSessionId !== null &&
-      isResumable(DEEP_REVIEW_STAGE_LABEL, resolvedModel);
-    let sessionOpts: { sessionId?: string; resume?: string } = {};
-    if (wantsResume) {
-      if (isFirstResumableStage) {
-        sessionOpts = { sessionId: agentSessionId! };
-      } else {
-        const exists = transcriptExists({
-          projectsRoot: defaultProjectsRoot(),
-          cwd: workdir,
-          sessionId: agentSessionId!,
-        });
-        if (exists) {
-          sessionOpts = { resume: agentSessionId! };
-          // Emit resumed audit event with prior message count (best-effort
-          // sync read of the JSONL; non-blocking).
-          if (sessionOptsCtx.db && sessionOptsCtx.runId && sessionOptsCtx.issueId) {
-            try {
-              const { readFileSync } = await import("node:fs");
-              const tp = transcriptPath({
-                projectsRoot: defaultProjectsRoot(),
-                cwd: workdir,
-                sessionId: agentSessionId!,
-              });
-              const priorMessageCount = readFileSync(tp, "utf8")
-                .split("\n")
-                .filter((line) => line.trim().length > 0).length;
-              void logAuditEvent(
-                sessionOptsCtx.db,
-                agentSessionResumedEvent({
-                  runId: sessionOptsCtx.runId,
-                  issueId: sessionOptsCtx.issueId,
-                  sessionId: agentSessionId!,
-                  stage: `${DEEP_REVIEW_STAGE_LABEL}:${agentName}`,
-                  priorMessageCount,
-                }),
-              );
-            } catch (err) {
-              log.warn(
-                { err: (err as Error).message, agent: agentName },
-                "deep-review: failed to count prior session messages — emitting resumed event with count=0",
-              );
-              void logAuditEvent(
-                sessionOptsCtx.db,
-                agentSessionResumedEvent({
-                  runId: sessionOptsCtx.runId,
-                  issueId: sessionOptsCtx.issueId,
-                  sessionId: agentSessionId!,
-                  stage: `${DEEP_REVIEW_STAGE_LABEL}:${agentName}`,
-                  priorMessageCount: 0,
-                }),
-              );
-            }
-          }
-        } else {
-          if (sessionOptsCtx.db && sessionOptsCtx.runId && sessionOptsCtx.issueId) {
-            void logAuditEvent(
-              sessionOptsCtx.db,
-              agentSessionMissingFallbackEvent({
-                runId: sessionOptsCtx.runId,
-                issueId: sessionOptsCtx.issueId,
-                sessionId: agentSessionId!,
-                reason: "jsonl-not-found",
-              }),
-            );
-          }
-          log.warn(
-            { runId: sessionOptsCtx.runId, sessionId: agentSessionId, agent: agentName, cwd: workdir },
-            "deep-review: agent session JSONL missing — falling back to fresh session",
-          );
-          sessionOpts = {};
-        }
-      }
-    }
+    const sessionOpts = await resolveSessionOpts({
+      stage: `${DEEP_REVIEW_STAGE_LABEL}:${agentName}`,
+      model: resolvedModel,
+      agentSessionId,
+      isFirstResumableStage,
+      workdir,
+      runId: sessionOptsCtx.runId,
+      issueId: sessionOptsCtx.issueId,
+      db: sessionOptsCtx.db,
+    });
 
     const messages = query({
       prompt,

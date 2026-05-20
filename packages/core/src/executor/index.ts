@@ -14,6 +14,7 @@ export {
 } from "./test-quality.js";
 export { parseHandoffArtifact } from "./handoff.js";
 export { executeStage, type ExecuteStageContext } from "./executor.js";
+export { resolveSessionOpts, type ResolveSessionOptsParams } from "./session-resolver.js";
 export { consumeAgentStream, parseJsonBlock, StageStalledError, StagePreStreamStalledError } from "./agent-stream.js";
 export { sanitize, mapIssueToSchema, assemblePrompt } from "./prompt/index.js";
 export {
