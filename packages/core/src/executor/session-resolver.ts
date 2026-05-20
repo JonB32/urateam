@@ -10,7 +10,8 @@
  * sub-agents pass a qualified label like `"review:reuse"`.
  */
 
-import { readFileSync } from "node:fs";
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import { isResumable } from "./session-policy.js";
 import { transcriptExists, defaultProjectsRoot, transcriptPath } from "./session-store.js";
 import {
@@ -22,6 +23,16 @@ import { createLogger } from "../logger.js";
 import type { AnyDb } from "../db/client.js";
 
 const log = createLogger({ component: "SessionResolver" });
+
+function countLines(filePath: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    let count = 0;
+    const rl = createInterface({ input: createReadStream(filePath), crlfDelay: Infinity });
+    rl.on("line", () => count++);
+    rl.on("close", () => resolve(count));
+    rl.on("error", reject);
+  });
+}
 
 export interface ResolveSessionOptsParams {
   /** Stage label used for the policy check and audit event `stage` field. */
@@ -84,7 +95,7 @@ export async function resolveSessionOpts(
           cwd: workdir,
           sessionId: agentSessionId,
         });
-        const priorMessageCount = (readFileSync(tp, "utf8").match(/\n/g) ?? []).length;
+        const priorMessageCount = await countLines(tp);
         void logAuditEvent(
           db,
           agentSessionResumedEvent({ runId, issueId, sessionId: agentSessionId, stage, priorMessageCount }),
