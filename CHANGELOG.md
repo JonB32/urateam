@@ -28,6 +28,17 @@ notes call out when a change affects only a single package.
 - **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
 - **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
 
+## [0.1.66] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.51 → 0.1.52
+- `@urateam/cli`: 0.1.53 → 0.1.54
+- `@urateam/dashboard`: 0.1.51 → 0.1.52
+- `create-urateam`: 0.1.54 → 0.1.55
+
+### Fixed
+- **Agent session continuity: lazy session creation** (#343, BEC-231): the BEC-227 Phase 1 implementation used an in-memory `hasInitiatedSession` flag that flipped after the first resumable stage's CALL, regardless of whether the SDK actually wrote any JSONL message. When stage 1 failed before any SDK message (the auth 401 hit during Phase 2 soak, MCP init failure, pre-stream stall, container SIGTERM), every subsequent stage tried `query({ resume: sessionId })`, found the JSONL absent, and dropped to legacy fresh-session-no-opts. The session was lost for the run's lifetime — confirmed on BEC-228 with **1** `agent_session_created`, **8** `agent_session_missing_fallback`, **0** `agent_session_resumed` events. Fix: `executeStage()` now derives the session shape from `transcriptExists()` on every entry (JSONL present → `resume:`; JSONL absent → `sessionId:` to create or retry creation). The `isFirstResumableStage` field stays on `ExecuteStageContext` for backwards compat but its value is now ignored. The `missing_fallback` audit event is no longer emitted from the executor; the new logic always picks the correct shape based on on-disk state. New `session-lazy-creation.test.ts` covers both directions (false flag + missing JSONL → create; true flag + present JSONL → resume).
+
 ## [0.1.65] — 2026-05-20
 
 Bumps:
