@@ -2,6 +2,7 @@ import type { HandoffParseResult } from "./handoff.js";
 import { parseHandoffArtifact, buildFallback } from "./handoff.js";
 import { gitExecSafe, gitExecRaw } from "../repo/git.js";
 import { createLogger } from "../logger.js";
+import { DecisionArtifactSchema, type DecisionArtifact } from "../types.js";
 
 const log = createLogger({ component: "ExtractHandoff" });
 
@@ -60,6 +61,34 @@ async function gitChangedFilesAcross(
   // Dedupe in case a file shows up in both (unlikely but possible if the
   // agent partially committed and then made more edits).
   return Array.from(new Set([...fromStatus, ...fromDiff]));
+}
+
+/**
+ * BEC-227 Phase 4 / Track D. Extracts the LAST `<decisions>{ JSON }</decisions>`
+ * block from agent output. Returns null on any failure (missing block,
+ * malformed JSON, schema mismatch) — graceful degradation by design;
+ * Track B's surgical-review-fix path simply omits the "previously decided"
+ * preamble when this returns null.
+ */
+export function parseDecisionsBlock(agentOutput: string): DecisionArtifact | null {
+  if (!agentOutput) return null;
+  // Match all blocks; take the last (an agent that revises its decisions
+  // mid-turn ends with the canonical version).
+  const re = /<decisions>([\s\S]*?)<\/decisions>/g;
+  let lastMatch: string | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(agentOutput)) !== null) {
+    lastMatch = m[1] ?? null;
+  }
+  if (lastMatch === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(lastMatch.trim());
+  } catch {
+    return null;
+  }
+  const result = DecisionArtifactSchema.safeParse(parsed);
+  return result.success ? result.data : null;
 }
 
 /**
