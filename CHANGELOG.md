@@ -28,6 +28,17 @@ notes call out when a change affects only a single package.
 - **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
 - **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
 
+## [0.1.68] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.53 → 0.1.54
+- `@urateam/cli`: 0.1.55 → 0.1.56
+- `@urateam/dashboard`: 0.1.53 → 0.1.54
+- `create-urateam`: 0.1.56 → 0.1.57
+
+### Changed
+- **Agent session continuity: Phase 3 — default ON** (#349, BEC-227): the Phase 2 dogfood soak verified session resume works end-to-end (with the BEC-231 lazy-creation fix in v0.1.66 and the BEC-232 path-encoding fix in v0.1.67). Observable signal from BEC-232's run: 1 `agent_session_created` + 3 `agent_session_resumed` events across implement/review/implement stages, `priorMessageCount: 35` on the first resume — full continuity, no synthetic handoff blob. This release flips the default from opt-in to opt-out. The new env var is `URATEAM_DISABLE_AGENT_SESSION_RESUME=true` (strict equality, matching BEC-218 precedent). The Phase-1/2 var `URATEAM_ENABLE_AGENT_SESSION_RESUME` is ignored — operators with it set in their `.env` see no behavior change since the new default is on; operators who want the legacy handoff path can set `URATEAM_DISABLE_AGENT_SESSION_RESUME=true`.
+
 ## [0.1.67] — 2026-05-20
 
 Bumps:
