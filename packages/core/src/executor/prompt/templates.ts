@@ -331,6 +331,33 @@ ${(issue.acceptanceCriteria ?? []).map((ac, i) => `  ${i + 1}. ${ac}`).join("\n"
 For each criterion, confirm in your response that it is addressed by your code changes.
 If any criterion cannot be met, explain why and what partial progress was made.
 Do NOT claim work is complete if acceptance criteria are not satisfied.
+
+BEFORE you finish, emit a structured decision artifact so downstream
+stages can see your reasoning without re-deriving it from the diff.
+Output a single XML block at the very end of your final message:
+
+<decisions>
+{
+  "decisions": [
+    { "choice": "<short label of a non-obvious design choice you made>",
+      "reason": "<why this over the alternatives>",
+      "alternativesConsidered": ["<other approach you weighed>"] }
+  ],
+  "leftUnhandled": [
+    { "case": "<edge case you noticed but did NOT fix>",
+      "reason": "<why it's out of scope>" }
+  ],
+  "keyFiles": ["<path/to/file.ts>", "..."]
+}
+</decisions>
+
+Rules:
+- Emit the block exactly once, at the END of your final message.
+- Use valid JSON (double-quoted keys + strings; no trailing commas).
+- Keep each "choice" / "reason" / "case" to one sentence.
+- If you had no non-obvious decisions, "leftUnhandled" cases, or relevant
+  files, emit empty arrays: { "decisions": [], "leftUnhandled": [], "keyFiles": [] }.
+- A reviewer will see this — keep it terse and honest, NOT marketing.
 `.trim();
 }
 
