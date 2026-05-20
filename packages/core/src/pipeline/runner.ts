@@ -2365,9 +2365,11 @@ export class PipelineRunner {
         const [qualityResult, agentCommits] = await Promise.all([
           (async () => {
             try {
-              const stored = await getTriageResult(this.db as AnyDb, sanitizedIssue.id);
+              const [stored, actualFiles] = await Promise.all([
+                getTriageResult(this.db as AnyDb, sanitizedIssue.id),
+                getChangedFiles(wtPath, repoConfig.defaultBranch),
+              ]);
               const predicted = stored?.affectedFiles;
-              const actualFiles = await getChangedFiles(wtPath, repoConfig.defaultBranch);
               const quality = computeAffectedFilesPredictionQuality(predicted, actualFiles);
               await logAuditEvent(
                 this.db as AnyDb,
