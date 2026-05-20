@@ -152,6 +152,22 @@ export const pmApprovals = sqliteTable("pm_approvals", {
 });
 
 /**
+ * BEC-227 Phase 4 / Track D. Persists the `<decisions>` JSON block emitted
+ * by the implement agent at the end of each implement turn. Multiple rows
+ * per pipeline_run when RALPH iterates (one per (iteration, stage)).
+ */
+export const pipelineRunDecisions = sqliteTable("pipeline_run_decisions", {
+  id: text("id").primaryKey(),
+  pipelineRunId: text("pipeline_run_id").notNull().references(() => pipelineRuns.id),
+  iteration: integer("iteration").notNull(),
+  stage: text("stage").notNull(),
+  payload: text("payload").notNull(),
+  createdAt: crossTimestamp("created_at").notNull(),
+});
+
+export type PipelineRunDecisionRow = typeof pipelineRunDecisions.$inferSelect;
+
+/**
  * Dedup table for budget threshold alerts. One row per (date, scope, threshold)
  * — the UNIQUE constraint + onConflictDoNothing() guarantees an alert fires at
  * most once per day per scope per threshold.
