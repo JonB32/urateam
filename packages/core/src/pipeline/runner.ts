@@ -344,7 +344,8 @@ export class PipelineRunner {
       return;
     }
 
-    // Look up a paused run in the DB for this issue
+    // Look up a paused or retriable run in the DB for this issue.
+    // "paused" = awaiting approval; "retriable" = transient failure awaiting manual retry.
     const db = this.db as AnyDb;
     const rows = await db
       .select()
@@ -352,13 +353,13 @@ export class PipelineRunner {
       .where(
         and(
           eq(pipelineRuns.issueId, issueId),
-          eq(pipelineRuns.status, "paused"),
+          inArray(pipelineRuns.status, ["paused", "retriable"]),
         ),
       )
       .limit(1);
 
     if (rows.length === 0) {
-      resumeLog.info("resume() called but no paused run found in DB — no-op");
+      resumeLog.info("resume() called but no paused or retriable run found in DB — no-op");
       return;
     }
 
@@ -368,6 +369,16 @@ export class PipelineRunner {
 
     // Claim the slot immediately to prevent concurrent resume() calls
     this.activeRuns.set(issueId, runId);
+
+    // For retriable runs: flip status to "paused" so the PM tick's
+    // recoverRetriableRuns() won't find and double-recover this run while
+    // execution is queued. The paused-run execution path is identical.
+    if (pausedRun.status === "retriable") {
+      await db
+        .update(pipelineRuns)
+        .set({ status: "paused" })
+        .where(eq(pipelineRuns.id, runId));
+    }
 
     // Validate that the run has a full resume payload (saved at await-approval)
     if (pausedRun.currentStageIndex == null || !pausedRun.resumePayload) {
