@@ -2370,6 +2370,12 @@ export class PipelineRunner {
           } else {
             runLog.warn("push queue: rebase conflicts detected, running implement pass to resolve");
 
+            // Abort the in-progress rebase so the worktree HEAD returns to the
+            // named branch ref before the agent starts writing new commits.
+            // Without this, HEAD stays detached on the tentative rebase commit
+            // and verifyBranchMatch() (BEC-99 guard) will reject the push.
+            await abortRebase(wtPath);
+
             const isFirstResumableStageForResolve = claimFirstResumableStage("implement");
             const resolveResult = await executeStage({
               runId,
@@ -2392,8 +2398,7 @@ export class PipelineRunner {
             run.totalOutputTokens += resolveResult.outputTokens;
 
             if (resolveResult.status !== "completed") {
-              runLog.warn("push queue: conflict resolution failed — aborting rebase and force-pushing for human review");
-              await abortRebase(wtPath);
+              runLog.warn("push queue: conflict resolution failed — force-pushing for human review");
               rebaseConflict = true;
             } else {
               runLog.info("push queue: conflict resolution succeeded");
@@ -2428,9 +2433,11 @@ export class PipelineRunner {
         const [qualityResult, agentCommits] = await Promise.all([
           (async () => {
             try {
-              const stored = await getTriageResult(this.db as AnyDb, sanitizedIssue.id);
+              const [stored, actualFiles] = await Promise.all([
+                getTriageResult(this.db as AnyDb, sanitizedIssue.id),
+                getChangedFiles(wtPath, repoConfig.defaultBranch),
+              ]);
               const predicted = stored?.affectedFiles;
-              const actualFiles = await getChangedFiles(wtPath, repoConfig.defaultBranch);
               const quality = computeAffectedFilesPredictionQuality(predicted, actualFiles);
               await logAuditEvent(
                 this.db as AnyDb,
