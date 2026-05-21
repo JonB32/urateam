@@ -923,6 +923,136 @@ export function pipelineSpecVsImplFailedEvent(args: {
 }
 
 /**
+ * BEC-227 — a fresh per-run Agent SDK session was created on the first
+ * resumable stage. The `sessionId` is the UUID the SDK generates on the
+ * first `query()` call; downstream stages reuse it via `resume:`.
+ */
+export function agentSessionCreatedEvent(args: {
+  runId: string;
+  issueId: string;
+  sessionId: string;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.agent_session_created",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      runId: args.runId,
+      issueId: args.issueId,
+      sessionId: args.sessionId,
+    },
+  });
+}
+
+/**
+ * BEC-227 — a downstream stage resumed the per-run SDK session. Payload
+ * carries the stage name and the prior message count read from the
+ * session JSONL transcript so operators can see how much context was
+ * inherited from earlier stages.
+ */
+export function agentSessionResumedEvent(args: {
+  runId: string;
+  issueId: string;
+  sessionId: string;
+  stage: string;
+  priorMessageCount: number;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.agent_session_resumed",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      runId: args.runId,
+      issueId: args.issueId,
+      sessionId: args.sessionId,
+      stage: args.stage,
+      priorMessageCount: args.priorMessageCount,
+    },
+  });
+}
+
+/**
+ * BEC-227 Phase 4 / Track B. The review-fix loop's branch decision — was
+ * the surgical path taken (resume + findings + decisions prompt) or the
+ * legacy path (full implement-template re-run)? Always emitted, even on
+ * the legacy path, so operators can audit fallback rates.
+ */
+export function surgicalReviewFixEvent(args: {
+  runId: string;
+  issueId: string;
+  path: "surgical" | "legacy";
+  findingsCount: number;
+  decisionPayloadBytes: number;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.surgical_review_fix",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      runId: args.runId,
+      issueId: args.issueId,
+      path: args.path,
+      findingsCount: args.findingsCount,
+      decisionPayloadBytes: args.decisionPayloadBytes,
+    },
+  });
+}
+
+/**
+ * BEC-227 — a stage attempted to resume the per-run session but the
+ * underlying JSONL was missing, unreadable, or the SDK rejected the resume.
+ * The runner fell back to a fresh session for this stage. `reason` captures
+ * the failure mode so operators can spot tmpfs-loss / parse-error patterns.
+ */
+export function agentSessionMissingFallbackEvent(args: {
+  runId: string;
+  issueId: string;
+  sessionId: string;
+  reason: "jsonl-not-found" | "jsonl-parse-error" | "sdk-resume-error";
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.agent_session_missing_fallback",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      runId: args.runId,
+      issueId: args.issueId,
+      sessionId: args.sessionId,
+      reason: args.reason,
+    },
+  });
+}
+
+/**
+ * BEC-227 — emitted at boot when the session-volume check finds
+ * `~/.claude/projects` on tmpfs, missing, or unwritable. Session JSONLs
+ * won't survive container restarts in any of these cases, so the operator
+ * must remount before resume becomes reliable.
+ */
+export function systemSessionVolumeWarningEvent(args: {
+  projectsDir: string;
+  reason: "tmpfs" | "write-test-failed" | "not-found";
+}): AuditEvent {
+  return base({
+    eventType: "system.session_volume_warning",
+    actor: "system",
+    actorType: "system",
+    payload: {
+      projectsDir: args.projectsDir,
+      reason: args.reason,
+    },
+  });
+}
+
+/**
  * Tier 6e — emitted after each successful push. Records how closely triage
  * v2's `affectedFiles` prediction matched the actual changed files in the
  * final diff. When `hasV2Prediction` is false the triage stage ran v1 and

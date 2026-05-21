@@ -1,5 +1,5 @@
 import { HandoffArtifactSchema } from "../types.js";
-import type { HandoffArtifact } from "../types.js";
+import type { DecisionArtifact, HandoffArtifact } from "../types.js";
 import { parseJsonBlock } from "./agent-stream.js";
 import { createLogger } from "../logger.js";
 
@@ -9,6 +9,15 @@ export interface HandoffParseResult {
   artifact: HandoffArtifact;
   /** True when the agent emitted a valid, structured JSON handoff block. */
   structured: boolean;
+  /**
+   * BEC-227 Phase 4 / Track D. Parsed `<decisions>` block from the agent's
+   * final message, or null if absent / malformed / schema-mismatch. The
+   * `parseHandoffArtifact()` helper in this file does not see the agent's
+   * raw output, only the handoff JSON block, so it always returns null
+   * here; `extractHandoff()` populates this field by calling
+   * `parseDecisionsBlock(agentOutput)` against the full agent text.
+   */
+  decisions: DecisionArtifact | null;
 }
 
 export function buildFallback(
@@ -86,6 +95,9 @@ export function parseHandoffArtifact(
     return {
       artifact: buildFallback(metadata, agentOutput.slice(0, 500)),
       structured: false,
+      // BEC-227 Phase 4 / Track D — this helper doesn't parse decisions;
+      // extractHandoff() overlays the real value from parseDecisionsBlock().
+      decisions: null,
     };
   }
 
@@ -110,8 +122,11 @@ export function parseHandoffArtifact(
     return {
       artifact: buildFallback(metadata, agentOutput.slice(0, 500)),
       structured: false,
+      // BEC-227 Phase 4 / Track D — this helper doesn't parse decisions;
+      // extractHandoff() overlays the real value from parseDecisionsBlock().
+      decisions: null,
     };
   }
 
-  return { artifact: result.data, structured: true };
+  return { artifact: result.data, structured: true, decisions: null };
 }

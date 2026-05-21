@@ -294,6 +294,31 @@ export const HandoffArtifactSchema = z.object({
 });
 export type HandoffArtifact = z.infer<typeof HandoffArtifactSchema>;
 
+/**
+ * BEC-227 Phase 4 / Track D. The implement agent emits this as a
+ * `<decisions>{ JSON }</decisions>` XML block at the end of its turn.
+ * Used by the review-fix loop's surgical prompt and by future Track F
+ * cross-run inheritance. Every field is optional — malformed or missing
+ * blocks degrade silently to an empty artifact.
+ */
+export const DecisionArtifactSchema = z.object({
+  decisions: z.array(
+    z.object({
+      choice: z.string(),
+      reason: z.string(),
+      alternativesConsidered: z.array(z.string()).default([]),
+    }),
+  ).default([]),
+  leftUnhandled: z.array(
+    z.object({
+      case: z.string(),
+      reason: z.string(),
+    }),
+  ).default([]),
+  keyFiles: z.array(z.string()).default([]),
+});
+export type DecisionArtifact = z.infer<typeof DecisionArtifactSchema>;
+
 // --- Review Feedback Context ---
 export const ReviewCommentSchema = z.object({
   author: z.string(),
@@ -359,15 +384,32 @@ export type StageRunStatus = "running" | "completed" | "failed" | "skipped" | "c
 export type AgentLogType = "tool_call" | "tool_result" | "message" | "error" | "cancelled";
 
 // --- Sanitized Issue ---
-export interface SanitizedIssue {
-  id: string;
-  slug: string;
-  title: string;
-  description: string;
-  acceptanceCriteria: string[];
-  labels: string[];
-  priority: number;
-}
+export const SanitizedIssueSchema = z.object({
+  id: z.string(),
+  slug: z.string(),
+  title: z.string(),
+  description: z.string(),
+  acceptanceCriteria: z.array(z.string()),
+  labels: z.array(z.string()),
+  priority: z.number(),
+});
+export type SanitizedIssue = z.infer<typeof SanitizedIssueSchema>;
+
+// --- Resume Payload ---
+// Snapshot of all context needed to restart a paused or retriable pipeline run.
+// Stored as JSON in pipeline_runs.resume_payload; validated with safeParse on
+// resume so schema mismatches from older DB rows fail gracefully (run → failed).
+// Note: currentStageIndex may be -1 for transient-failure retries (stage 0 failed;
+// slice(-1+1) = slice(0) re-runs the full stage list from the start).
+export const ResumePayloadSchema = z.object({
+  worktreePath: z.string(),
+  currentStageIndex: z.number().int(),
+  handoff: HandoffArtifactSchema.nullable(),
+  pipelineConfig: PipelineConfigSchema,
+  repoConfig: RepoConfigSchema,
+  sanitizedIssue: SanitizedIssueSchema,
+});
+export type ResumePayload = z.infer<typeof ResumePayloadSchema>;
 
 // --- Stage Result ---
 export interface StageResult {
@@ -566,6 +608,34 @@ export const AuditEventTypeSchema = z.enum([
    *  hash, so operators can audit which repos came/went without grepping
    *  the daemon log. */
   "config.reloaded",
+  /** BEC-227 — a fresh per-run Agent SDK session was created on the first
+   *  resumable stage. Payload: runId, issueId, sessionId (UUID generated
+   *  by the SDK on the first `query()` call). */
+  "pipeline.agent_session_created",
+  /** BEC-227 — a downstream stage resumed the per-run Agent SDK session via
+   *  `query({ resume: sessionId })`. Payload includes the stage name and
+   *  the prior message count read from the session JSONL transcript so
+   *  operators can see how much context was inherited. */
+  "pipeline.agent_session_resumed",
+  /** BEC-227 — a stage attempted to resume the per-run session but the
+   *  underlying JSONL transcript was missing, unreadable, or the SDK
+   *  rejected the resume. The runner fell back to a fresh session for
+   *  this stage. Payload `reason` carries the failure mode. */
+  "pipeline.agent_session_missing_fallback",
+  /** BEC-227 — at boot, the session-volume check found `~/.claude/projects`
+   *  on tmpfs, missing, or unwritable — meaning session JSONLs won't
+   *  survive container restarts. Payload carries the projectsDir path and
+   *  the failure reason so operators can fix their mount config. */
+  "system.session_volume_warning",
+  /** BEC-227 Phase 4 / Track B — the review-fix loop took the surgical path:
+   *  it resumed the per-run Agent SDK session and prompted the agent with
+   *  just the blocking review findings (plus the previously-persisted
+   *  decision artifact when available), instead of re-running the full
+   *  implement template. Payload: `runId`, `issueId`, `path` ("surgical" |
+   *  "legacy"), `findingsCount`, `decisionPayloadBytes` (0 when no
+   *  artifact was found). The `legacy` path is logged too so operators
+   *  can audit fallback rates. */
+  "pipeline.surgical_review_fix",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 

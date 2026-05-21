@@ -10,9 +10,25 @@ import { createLogger } from "../logger.js";
 import { consumeAgentStream, parseJsonBlock } from "./agent-stream.js";
 import { buildStagePermissionOptions } from "./permissions.js";
 import { sanitize, buildSandboxedBlock } from "./prompt/sanitizer.js";
+import { isResumable } from "./session-policy.js";
+import { transcriptExists, defaultProjectsRoot, transcriptPath } from "./session-store.js";
+import {
+  agentSessionMissingFallbackEvent,
+  agentSessionResumedEvent,
+} from "../audit/index.js";
+import { logAuditEvent } from "../audit/writer.js";
+import type { AnyDb } from "../db/client.js";
 
 const log = createLogger({ component: "DeepReview" });
 const DEEP_REVIEW_MODEL = "claude-haiku-4-5-20251001";
+
+/**
+ * BEC-227 — stage label used when emitting agent-session audit events from
+ * deep-review sub-agents. Each of the three sub-agents (reuse, quality,
+ * efficiency) writes its own event, qualified by the agent name so
+ * operators can spot per-sub-agent resume patterns.
+ */
+const DEEP_REVIEW_STAGE_LABEL = "review";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -237,13 +253,119 @@ interface RawFinding {
   fix?: unknown;
 }
 
+interface SubAgentSessionOpts {
+  /** Resolved model override — defaults to DEEP_REVIEW_MODEL when undefined. */
+  model?: string;
+  /** Per-run SDK session UUID (BEC-227). */
+  agentSessionId?: string | null;
+  /** True only on the very first resumable stage of the pipeline run. */
+  isFirstResumableStage?: boolean;
+  /** runId / issueId / db are required to emit audit events; if any is missing
+   *  the events are skipped silently. */
+  runId?: string;
+  issueId?: string;
+  db?: AnyDb;
+}
+
 async function runSubAgent(
   agentName: AgentName,
   prompt: string,
   workdir: string,
+  sessionOptsCtx: SubAgentSessionOpts = {},
 ): Promise<{ findings: DeepReviewFinding[]; inputTokens: number; outputTokens: number }> {
   try {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
+
+    // ── BEC-227 — resolve per-sub-agent session opts ────────────────────────
+    // Mirror the pattern in executor.ts: when agentSessionId is set and the
+    // resolved model is in the resumable family, choose between sessionId
+    // (first resumable stage of the run) and resume (subsequent stages).
+    // Pre-check the JSONL on the resume branch; fall back to fresh + audit
+    // event when the transcript is missing.
+    //
+    // Note: deep-review's three sub-agents run in parallel against the same
+    // session id. The SDK supports concurrent `resume` calls — each spawns
+    // its own conversation branch from the shared transcript. Each branch
+    // emits its own audit event with `stage = "review"` so operators see
+    // the resume rate at the sub-agent level.
+    const resolvedModel = sessionOptsCtx.model ?? DEEP_REVIEW_MODEL;
+    const agentSessionId = sessionOptsCtx.agentSessionId ?? null;
+    const isFirstResumableStage = sessionOptsCtx.isFirstResumableStage ?? false;
+    const wantsResume =
+      agentSessionId !== null &&
+      isResumable(DEEP_REVIEW_STAGE_LABEL, resolvedModel);
+    let sessionOpts: { sessionId?: string; resume?: string } = {};
+    if (wantsResume) {
+      if (isFirstResumableStage) {
+        sessionOpts = { sessionId: agentSessionId! };
+      } else {
+        const exists = transcriptExists({
+          projectsRoot: defaultProjectsRoot(),
+          cwd: workdir,
+          sessionId: agentSessionId!,
+        });
+        if (exists) {
+          sessionOpts = { resume: agentSessionId! };
+          // Emit resumed audit event with prior message count (best-effort
+          // sync read of the JSONL; non-blocking).
+          if (sessionOptsCtx.db && sessionOptsCtx.runId && sessionOptsCtx.issueId) {
+            try {
+              const { readFileSync } = await import("node:fs");
+              const tp = transcriptPath({
+                projectsRoot: defaultProjectsRoot(),
+                cwd: workdir,
+                sessionId: agentSessionId!,
+              });
+              const priorMessageCount = readFileSync(tp, "utf8")
+                .split("\n")
+                .filter((line) => line.trim().length > 0).length;
+              void logAuditEvent(
+                sessionOptsCtx.db,
+                agentSessionResumedEvent({
+                  runId: sessionOptsCtx.runId,
+                  issueId: sessionOptsCtx.issueId,
+                  sessionId: agentSessionId!,
+                  stage: `${DEEP_REVIEW_STAGE_LABEL}:${agentName}`,
+                  priorMessageCount,
+                }),
+              );
+            } catch (err) {
+              log.warn(
+                { err: (err as Error).message, agent: agentName },
+                "deep-review: failed to count prior session messages — emitting resumed event with count=0",
+              );
+              void logAuditEvent(
+                sessionOptsCtx.db,
+                agentSessionResumedEvent({
+                  runId: sessionOptsCtx.runId,
+                  issueId: sessionOptsCtx.issueId,
+                  sessionId: agentSessionId!,
+                  stage: `${DEEP_REVIEW_STAGE_LABEL}:${agentName}`,
+                  priorMessageCount: 0,
+                }),
+              );
+            }
+          }
+        } else {
+          if (sessionOptsCtx.db && sessionOptsCtx.runId && sessionOptsCtx.issueId) {
+            void logAuditEvent(
+              sessionOptsCtx.db,
+              agentSessionMissingFallbackEvent({
+                runId: sessionOptsCtx.runId,
+                issueId: sessionOptsCtx.issueId,
+                sessionId: agentSessionId!,
+                reason: "jsonl-not-found",
+              }),
+            );
+          }
+          log.warn(
+            { runId: sessionOptsCtx.runId, sessionId: agentSessionId, agent: agentName, cwd: workdir },
+            "deep-review: agent session JSONL missing — falling back to fresh session",
+          );
+          sessionOpts = {};
+        }
+      }
+    }
 
     const messages = query({
       prompt,
@@ -253,8 +375,18 @@ async function runSubAgent(
         // keeping token cost reasonable (each turn can read multiple files).
         maxTurns: 8,
         cwd: workdir,
-        model: DEEP_REVIEW_MODEL,
+        model: resolvedModel,
         ...buildStagePermissionOptions("review"),
+        ...sessionOpts,
+        // BEC-227 Track C-1: strip per-session dynamic sections (cwd, git
+        // status) from the claude_code preset so the system prompt is
+        // stable across stages. Improves cache hit rate even when no SDK
+        // session is involved, so we ship it on unconditionally in Phase 1.
+        systemPrompt: {
+          type: "preset" as const,
+          preset: "claude_code" as const,
+          excludeDynamicSections: true,
+        },
       },
     });
 
@@ -300,6 +432,33 @@ async function runSubAgent(
 // ---------------------------------------------------------------------------
 
 /**
+ * Options for {@link runDeepReview}.
+ *
+ * BEC-227 — extended with `agentSessionId` / `isFirstResumableStage` / `model`
+ * so the three parallel sub-agents can resume the per-run SDK session when
+ * the pipeline is using a resumable model family. Audit-event fields
+ * (`runId` / `issueId` / `db`) are optional: when omitted, resume/fallback
+ * still happens but no audit events are written.
+ */
+export interface RunDeepReviewOpts {
+  handoff: HandoffArtifact;
+  workdir: string;
+  /** Optional model override. Defaults to the hardcoded `DEEP_REVIEW_MODEL`
+   *  (Haiku). Pass a Sonnet/Opus id to enable session resume. */
+  model?: string;
+  /** Per-run SDK session UUID (BEC-227). When null/undefined, sub-agents run
+   *  with a fresh session as before. */
+  agentSessionId?: string | null;
+  /** True only on the very first resumable stage of the run (BEC-227). */
+  isFirstResumableStage?: boolean;
+  /** Required (with runId+issueId) to emit `pipeline.agent_session_resumed`
+   *  / `pipeline.agent_session_missing_fallback` audit events. */
+  db?: AnyDb;
+  runId?: string;
+  issueId?: string;
+}
+
+/**
  * Run the three parallel deep-review sub-agents (reuse, quality, efficiency)
  * against the current worktree state.
  *
@@ -313,9 +472,9 @@ async function runSubAgent(
  * - Each agent receives only the file subset relevant to its focus area.
  */
 export async function runDeepReview(
-  handoff: HandoffArtifact,
-  workdir: string,
+  opts: RunDeepReviewOpts,
 ): Promise<DeepReviewResult> {
+  const { handoff, workdir } = opts;
   // Compute diff-stat once and share across all sub-agents.
   const diffStat = await gitExecSafe(["diff", "--stat", "HEAD"], workdir);
 
@@ -338,10 +497,19 @@ export async function runDeepReview(
     "deep review file subsets computed",
   );
 
+  const sessionCtx: SubAgentSessionOpts = {
+    model: opts.model,
+    agentSessionId: opts.agentSessionId,
+    isFirstResumableStage: opts.isFirstResumableStage,
+    runId: opts.runId,
+    issueId: opts.issueId,
+    db: opts.db,
+  };
+
   const [reuseResult, qualityResult, efficiencyResult] = await Promise.all([
-    runSubAgent("reuse", buildPrompt("reuse", summary, reuseFiles, diffStat), workdir),
-    runSubAgent("quality", buildPrompt("quality", summary, qualityFiles, diffStat), workdir),
-    runSubAgent("efficiency", buildPrompt("efficiency", summary, efficiencyFiles, diffStat), workdir),
+    runSubAgent("reuse", buildPrompt("reuse", summary, reuseFiles, diffStat), workdir, sessionCtx),
+    runSubAgent("quality", buildPrompt("quality", summary, qualityFiles, diffStat), workdir, sessionCtx),
+    runSubAgent("efficiency", buildPrompt("efficiency", summary, efficiencyFiles, diffStat), workdir, sessionCtx),
   ]);
 
   const findings = [

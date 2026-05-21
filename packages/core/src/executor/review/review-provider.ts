@@ -1,4 +1,5 @@
 import type { HandoffArtifact, ReviewFinding } from "../../types.js";
+import type { AnyDb } from "../../db/client.js";
 import { AgenticDeepReviewProvider } from "./agentic-deep-review.js";
 import { OpenRouterFanoutProvider } from "./openrouter-fanout.js";
 import { createLogger } from "../../logger.js";
@@ -14,6 +15,26 @@ export interface ReviewContext {
   handoff: HandoffArtifact;
   baseRef: string;
   prNumber: number | null;
+  /** Issue id — required (with `runId`) for BEC-227 agent-session audit
+   *  events emitted from the agentic deep-review provider. Optional for
+   *  backwards compatibility with existing test callers. */
+  issueId?: string;
+  /** BEC-227 — per-run SDK session UUID threaded into deep-review sub-agents
+   *  so they can resume the per-run transcript when the resolved review
+   *  model is in the resumable family. Null when the feature flag is off
+   *  (`URATEAM_ENABLE_AGENT_SESSION_RESUME` ≠ `"true"`). */
+  agentSessionId?: string | null;
+  /** BEC-227 — true only on the first resumable stage of the pipeline run.
+   *  Runner flips this once via `claimFirstResumableStage("review")`. */
+  isFirstResumableStage?: boolean;
+  /** BEC-227 — resolved review-stage model (after `stageModels` override).
+   *  When in the resumable family the agentic provider passes this through
+   *  to `runDeepReview` so its sub-agents inherit the session. Hardcoded
+   *  Haiku (the default) is non-resumable and skips the session path. */
+  reviewModel?: string;
+  /** BEC-227 — DB handle for emitting agent-session audit events. When
+   *  omitted, resume/fallback still happens but no events are written. */
+  db?: AnyDb;
 }
 
 export interface ReviewModelRun {

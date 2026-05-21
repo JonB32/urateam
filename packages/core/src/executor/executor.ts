@@ -22,6 +22,17 @@ import type { DevcontainerSession } from "../repo/devcontainer.js";
 import { createLogger } from "../logger.js";
 import { consumeAgentStream, StagePreStreamStalledError, type StreamMessage } from "./agent-stream.js";
 import { isClaudeAuthValid, resolveClaudeAuth } from "./auth-check.js";
+import { isResumable } from "./session-policy.js";
+import { transcriptExists, defaultProjectsRoot } from "./session-store.js";
+// BEC-231 — `agentSessionMissingFallbackEvent` was previously fired from this
+// module when the resume branch found the JSONL absent. The new logic always
+// picks the right shape (`sessionId:` to create, `resume:` to continue) based
+// on actual disk state, so the missing-fallback path is unreachable from here.
+// The event type itself is kept in `audit/events.ts` for callers (e.g. the
+// session-volume boot check) that may need it.
+import { agentSessionResumedEvent } from "../audit/index.js";
+import { logAuditEvent } from "../audit/writer.js";
+import { persistDecisionArtifact } from "../db/decisions-store.js";
 
 /**
  * BEC-183: wall-clock stage timeouts. Independent of the in-stream watchdog
@@ -82,6 +93,60 @@ export interface ExecuteStageContext {
    *  continuing the rebase — no issue re-implementation, no build/test runs.
    *  Takes precedence over `reviewFeedback` if both are set. */
   mergeConflictContext?: MergeConflictContext;
+  /**
+   * BEC-227 — agent session continuity.
+   *
+   * UUID of the per-run SDK session, or `null` when the
+   * `URATEAM_ENABLE_AGENT_SESSION_RESUME` flag is off. Runner mints this once
+   * at start() and threads it through every executeStage() call so resumable
+   * stages share one SDK transcript across the pipeline.
+   *
+   * When `null` (flag off) no session options are added to the SDK call.
+   * When non-null AND `isResumable(stage, model)` is true:
+   *   - first resumable stage → `options.sessionId = agentSessionId` (creates)
+   *   - subsequent resumable stages → `options.resume = agentSessionId` (reuses)
+   *
+   * Optional for backwards compatibility with existing callers and tests; the
+   * runner always sets it. Defaults to `null` (no session opts).
+   */
+  agentSessionId?: string | null;
+  /**
+   * BEC-227 — true only on the first resumable stage of the run. Runner
+   * tracks this via a `hasInitiatedSession` flag and flips it once on the
+   * first resumable-stage call. Required to disambiguate the SDK call shape:
+   * sessionId on create vs. resume on reuse. Defaults to `false`.
+   */
+  isFirstResumableStage?: boolean;
+  /**
+   * BEC-227 — when `true`, the rendered prompt omits the
+   * `<previous-stage-context>` block. Runner sets this on resumed RALPH
+   * re-implement iterations: the agent already received the same handoff in
+   * the initial turn (now visible in the resumed SDK session's transcript),
+   * so re-injecting it as prompt text would waste input tokens and risk
+   * confusing the model with duplicated context. Defaults to `false`.
+   */
+  suppressHandoff?: boolean;
+  /**
+   * BEC-227 Phase 4 / Track D. RALPH iteration index (0 = initial implement,
+   * 1..N = re-implement after RALPH gap check) used as the persistence
+   * iteration column for `pipeline_run_decisions`. Other implement-stage
+   * re-entries (e.g. review-fix loop) may pass their own iteration index
+   * when relevant. Purely informational; Track B's surgical-review-fix
+   * path reads only the highest-iteration row, but stages logging different
+   * iterations creates a useful audit trail. Defaults to 0.
+   */
+  iteration?: number;
+  /**
+   * BEC-227 Phase 4 / Track B. When set, replaces the prompt that
+   * `assemblePrompt()` + RALPH-context + devcontainer-context would
+   * produce. Used by the surgical-review-fix path: the resumed agent
+   * already has full context in its SDK transcript, so we send only the
+   * focused findings-plus-prior-decisions prompt. Always combine with
+   * `suppressHandoff: true` for clarity — the override skips the existing
+   * prompt entirely; suppressing the handoff doc-string is logically
+   * redundant but makes the call-site intent explicit.
+   */
+  promptOverride?: string;
 }
 
 export async function executeStage(
@@ -125,6 +190,7 @@ export async function executeStage(
     handoff,
     context.reviewFeedback,
     context.mergeConflictContext,
+    { suppressHandoff: context.suppressHandoff ?? false },
   );
 
   // When a devcontainer is active, instruct the agent to run shell commands inside it
@@ -141,6 +207,13 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
   // Append RALPH context if this is a re-run with gap analysis
   if (context.ralphContext) {
     prompt += `\n\n${context.ralphContext}`;
+  }
+
+  // BEC-227 Phase 4 / Track B — `promptOverride` replaces the assembled prompt
+  // entirely. Used by the surgical-review-fix path; the resumed SDK session
+  // already carries all upstream context.
+  if (context.promptOverride) {
+    prompt = context.promptOverride;
   }
 
   await db.insert(stageRuns).values({
@@ -190,6 +263,97 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       log.info({ plugins: tooling.plugins.map((p) => p.path) }, "plugins resolved");
     }
 
+    // BEC-227 — resolve per-stage session opts. The runner mints
+    // `agentSessionId` once per run and flips `isFirstResumableStage` on the
+    // first resumable stage. Combined with `isResumable(stage, model)` this
+    // chooses between three call shapes: create (`sessionId`), reuse
+    // (`resume`), or no session opts (always-fresh stages, non-Claude models,
+    // or flag off).
+    //
+    // Task 7 (this block): on the resume branch (non-first resumable stage),
+    // verify the SDK's JSONL transcript file actually exists on disk before
+    // setting `resume`. If the JSONL is missing (e.g. container tmpfs lost,
+    // operator wiped `~/.claude/projects`), the SDK would throw on resume.
+    // Drop to a fresh-session shape, emit a `missing_fallback` audit event,
+    // and warn so operators can spot loss patterns.
+    // BEC-231 — derive session-shape from on-disk state, not from an in-memory
+    // flag. The previous implementation passed `isFirstResumableStage` (set by
+    // the runner via `hasInitiatedSession`) and used it to pick `sessionId:` vs.
+    // `resume:`. That flag flipped after the first resumable stage's CALL —
+    // before the SDK had actually written a single message to the JSONL. If the
+    // first stage failed (auth 401, MCP init error, pre-stream stall) before
+    // the SDK got that far, every subsequent stage saw "session initiated; use
+    // resume:" and fell back when the JSONL didn't exist. The session was lost
+    // for the run's lifetime.
+    //
+    // Fix: ignore `isFirstResumableStage`. Check `transcriptExists()` on every
+    // stage. JSONL present → `resume:`. JSONL absent → `sessionId:` (which
+    // re-attempts creation; the SDK pre-assigns the UUID and writes a fresh
+    // transcript if there's nothing on disk).
+    //
+    // The `isFirstResumableStage` field is retained on `ExecuteStageContext`
+    // for backwards compatibility with callers that still pass it; the value
+    // is now ignored. Runner cleanup is in the companion runner.ts edit.
+    const resolvedModel = context.stageModels?.[stage] ?? effectiveProfile.model;
+    const agentSessionId = context.agentSessionId ?? null;
+    const wantsResume =
+      agentSessionId !== null &&
+      !!resolvedModel &&
+      isResumable(stage, resolvedModel);
+    let sessionOpts: { sessionId?: string; resume?: string } = {};
+    if (wantsResume) {
+      const exists = transcriptExists({
+        projectsRoot: defaultProjectsRoot(),
+        cwd: workdir,
+        sessionId: agentSessionId!,
+      });
+      if (exists) {
+        // Transcript present — resume the conversation.
+        sessionOpts = { resume: agentSessionId! };
+        try {
+          const { readFileSync } = await import("node:fs");
+          const tp = (await import("./session-store.js")).transcriptPath({
+            projectsRoot: defaultProjectsRoot(),
+            cwd: workdir,
+            sessionId: agentSessionId!,
+          });
+          const priorMessageCount = readFileSync(tp, "utf8")
+            .split("\n")
+            .filter((line) => line.trim().length > 0).length;
+          void logAuditEvent(
+            db,
+            agentSessionResumedEvent({
+              runId,
+              issueId,
+              sessionId: agentSessionId!,
+              stage,
+              priorMessageCount,
+            }),
+          );
+        } catch (err) {
+          log.warn(
+            { err: (err as Error).message },
+            "failed to count prior session messages — emitting resumed event with count=0",
+          );
+          void logAuditEvent(
+            db,
+            agentSessionResumedEvent({
+              runId,
+              issueId,
+              sessionId: agentSessionId!,
+              stage,
+              priorMessageCount: 0,
+            }),
+          );
+        }
+      } else {
+        // Transcript absent — (re-)create the session. The SDK pre-assigns
+        // our UUID; if a prior call started but failed before writing, this
+        // call gets a fresh shot at writing the first message.
+        sessionOpts = { sessionId: agentSessionId! };
+      }
+    }
+
     const messages = query({
       prompt,
       options: {
@@ -197,11 +361,19 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
         maxTurns: effectiveProfile.maxTurns,
         cwd: workdir,
         ...buildStagePermissionOptions(stage),
-        ...(context.stageModels?.[stage] ?? effectiveProfile.model
-          ? { model: context.stageModels?.[stage] ?? effectiveProfile.model! }
-          : {}),
+        ...(resolvedModel ? { model: resolvedModel } : {}),
         ...(mcpServerNames.length > 0 ? { mcpServers: tooling.mcpServers } : {}),
         ...(tooling.plugins.length > 0 ? { plugins: tooling.plugins } : {}),
+        ...sessionOpts,
+        // BEC-227 Track C-1: strip per-session dynamic sections (cwd, git
+        // status) from the claude_code preset so the system prompt is
+        // stable across stages. Improves cache hit rate even when no SDK
+        // session is involved, so we ship it on unconditionally in Phase 1.
+        systemPrompt: {
+          type: "preset" as const,
+          preset: "claude_code" as const,
+          excludeDynamicSections: true,
+        },
       },
     });
     log.info("iterating agent messages");
@@ -300,6 +472,25 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       workdir,
       `origin/${repoConfig.defaultBranch}`,
     );
+
+    // BEC-227 Phase 4 / Track D — persist the agent's decision artifact when
+    // the implement stage emitted one. Fire-and-forget; persistDecisionArtifact
+    // already swallows errors internally (best-effort by design), but we still
+    // wrap in try/catch to defend against an unexpected throw outside the
+    // helper's contract. Only implement-stage emits decisions — other stages'
+    // outputs aren't shaped for this artifact.
+    if (stage === "implement" && handoffResult.decisions) {
+      try {
+        await persistDecisionArtifact(db, {
+          pipelineRunId: runId,
+          iteration: context.iteration ?? 0,
+          stage: "implement",
+          payload: handoffResult.decisions,
+        });
+      } catch (err) {
+        log.warn({ err }, "persistDecisionArtifact threw despite internal swallow — ignoring");
+      }
+    }
 
     await db
       .update(stageRuns)
