@@ -54,7 +54,12 @@ Autonomous backlog manager in `packages/core/src/pm/`:
 - Fallback: missing JSONL → legacy handoff path, emits `pipeline.agent_session_missing_fallback` audit event
 - Track C-1: `excludeDynamicSections: true` on the `claude_code` SDK preset (always on, lifts cache hit ~95% → ~99%)
 - Track C-2: `PM_AGENT_STUCK_RUN_AGE_MIN` default 60 → 120 min (real RALPH work routinely exceeds 60)
-- Spec: `docs/superpowers/specs/2026-05-19-agent-session-continuity-design.md`. Plan: `docs/superpowers/plans/2026-05-19-agent-session-continuity-phase1.md`.
+- Spec: `docs/superpowers/specs/2026-05-19-agent-session-continuity-design.md`. Plans: phase1 `2026-05-19-agent-session-continuity-phase1.md`, phase4 `2026-05-20-agent-session-continuity-phase4.md`.
+
+## Phase 4 (BEC-227 Track B + Track D)
+- Implement agent emits `<decisions>{JSON}</decisions>` block at end of every implement turn (camelCase fields: `decisions`, `leftUnhandled`, `keyFiles`, inner `alternativesConsidered`). Parsed by `extract-handoff.ts:parseDecisionsBlock`, persisted to `pipeline_run_decisions` via `db/decisions-store.ts`. Persistence happens inside `executor.executeStage()` gated on `stage === "implement"`; iteration column = 0 (initial), RALPH counter (re-implement), or `rfIteration` (review-fix).
+- Review-fix loop takes the surgical path (`pipeline/run-surgical-review-fix.ts`) when `agent_session_id` non-null + JSONL on disk + blocking findings exist. Surgical = `executeStage` called with `promptOverride: surgicalReviewFixPrompt(findings, decisions)` + `suppressHandoff: true` — the resumed agent already has full implement-stage context in its SDK transcript. Legacy fallback = existing full implement-template re-run.
+- Audit event `pipeline.surgical_review_fix` records every review-fix invocation with `path: "surgical" | "legacy"`, `findingsCount`, `decisionPayloadBytes`. Always fires (both paths) so operators can monitor fallback rates. Bumps canonical event count 56 → 57.
 
 ## OpenRouter Multi-Model Review Fanout (BEC-134)
 - When `REVIEW_MODELS` and `OPENROUTER_API_KEY` are both set, each comma-separated model produces an advisory review alongside the Claude Agent SDK deep-review
