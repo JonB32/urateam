@@ -2,6 +2,7 @@ import type { HandoffParseResult } from "./handoff.js";
 import { parseHandoffArtifact, buildFallback } from "./handoff.js";
 import { gitExecSafe, gitExecRaw } from "../repo/git.js";
 import { createLogger } from "../logger.js";
+import { DecisionArtifactSchema, type DecisionArtifact } from "../types.js";
 
 const log = createLogger({ component: "ExtractHandoff" });
 
@@ -63,6 +64,34 @@ async function gitChangedFilesAcross(
 }
 
 /**
+ * BEC-227 Phase 4 / Track D. Extracts the LAST `<decisions>{ JSON }</decisions>`
+ * block from agent output. Returns null on any failure (missing block,
+ * malformed JSON, schema mismatch) — graceful degradation by design;
+ * Track B's surgical-review-fix path simply omits the "previously decided"
+ * preamble when this returns null.
+ */
+export function parseDecisionsBlock(agentOutput: string): DecisionArtifact | null {
+  if (!agentOutput) return null;
+  // Match all blocks; take the last (an agent that revises its decisions
+  // mid-turn ends with the canonical version).
+  const re = /<decisions>([\s\S]*?)<\/decisions>/g;
+  let lastMatch: string | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(agentOutput)) !== null) {
+    lastMatch = m[1] ?? null;
+  }
+  if (lastMatch === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(lastMatch.trim());
+  } catch {
+    return null;
+  }
+  const result = DecisionArtifactSchema.safeParse(parsed);
+  return result.success ? result.data : null;
+}
+
+/**
  * Extract a structured handoff artifact from the stage agent's raw output
  * and the actual worktree state.
  *
@@ -96,6 +125,13 @@ export async function extractHandoff(
    */
   baseRef?: string,
 ): Promise<HandoffParseResult> {
+  // BEC-227 Phase 4 / Track D — extract the `<decisions>` block from the
+  // raw agent output up front so we can attach it to every return below.
+  // Returns null when absent / malformed / schema-mismatch; downstream code
+  // (executor's implement-stage persistence, surgical-review-fix prompt)
+  // already handles null gracefully.
+  const decisions = parseDecisionsBlock(agentOutput);
+
   // Fast path: if the agent already produced valid structured JSON, use it
   const fastResult = parseHandoffArtifact(agentOutput, runId, issueId, stage);
   if (fastResult.structured) {
@@ -125,6 +161,12 @@ export async function extractHandoff(
         fastResult.artifact.filesChanged = gitFilesChanged;
       }
     }
+    // BEC-227 Phase 4 / Track D — parseHandoffArtifact() never sees the
+    // raw agent output (only the handoff JSON block) so it always returns
+    // `decisions: null`. Overlay the real value parsed from the outer
+    // agentOutput here. Mutation of fastResult is safe — it's a local var
+    // and not aliased before this return.
+    fastResult.decisions = decisions;
     return fastResult;
   }
 
@@ -209,6 +251,7 @@ export async function extractHandoff(
         tokenBudget: { contextTokensUsed: 0, recommendedMaxTurns: 10 },
       },
       structured: false, // programmatically constructed from git, not agent-produced JSON
+      decisions, // BEC-227 Phase 4 / Track D — null when no <decisions> block
     };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -218,5 +261,9 @@ export async function extractHandoff(
   return {
     artifact: buildFallback(metadata, `[extraction failed — see stage logs for stage "${stage}"]`),
     structured: false,
+    // BEC-227 Phase 4 / Track D — extraction failure means we lost the
+    // worktree/git signal; the parsed decisions value from the agent's
+    // raw output is still valid and worth surfacing here.
+    decisions,
   };
 }

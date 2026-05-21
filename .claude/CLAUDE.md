@@ -46,6 +46,21 @@ Autonomous backlog manager in `packages/core/src/pm/`:
 - `slack-interface.ts` — bidirectional Slack bot: slash commands, @mentions, natural language via Haiku
 - `coordination.ts` — DB-backed active work tracking for parallel conflict detection
 
+## Agent Session Continuity (BEC-227)
+- One Claude SDK session per pipeline run (Phase 3 default ON; opt out via `URATEAM_DISABLE_AGENT_SESSION_RESUME=true`, strict equality, read at call time)
+- `agent_session_id` column on `pipeline_runs`; mint at `runner.start()`, thread through executor, ralph, deep-review
+- `isResumable(stage, model)` in `executor/session-policy.ts` — validator + Haiku ralph-check + non-Claude fanout providers always fresh
+- JSONL transcripts written by SDK at `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl` — mounted as `urateam-dogfood-agent-sessions` volume in dogfood compose
+- Fallback: missing JSONL → legacy handoff path, emits `pipeline.agent_session_missing_fallback` audit event
+- Track C-1: `excludeDynamicSections: true` on the `claude_code` SDK preset (always on, lifts cache hit ~95% → ~99%)
+- Track C-2: `PM_AGENT_STUCK_RUN_AGE_MIN` default 60 → 120 min (real RALPH work routinely exceeds 60)
+- Spec: `docs/superpowers/specs/2026-05-19-agent-session-continuity-design.md`. Plans: phase1 `2026-05-19-agent-session-continuity-phase1.md`, phase4 `2026-05-20-agent-session-continuity-phase4.md`.
+
+## Phase 4 (BEC-227 Track B + Track D)
+- Implement agent emits `<decisions>{JSON}</decisions>` block at end of every implement turn (camelCase fields: `decisions`, `leftUnhandled`, `keyFiles`, inner `alternativesConsidered`). Parsed by `extract-handoff.ts:parseDecisionsBlock`, persisted to `pipeline_run_decisions` via `db/decisions-store.ts`. Persistence happens inside `executor.executeStage()` gated on `stage === "implement"`; iteration column = 0 (initial), RALPH counter (re-implement), or `rfIteration` (review-fix).
+- Review-fix loop takes the surgical path (`pipeline/run-surgical-review-fix.ts`) when `agent_session_id` non-null + JSONL on disk + blocking findings exist. Surgical = `executeStage` called with `promptOverride: surgicalReviewFixPrompt(findings, decisions)` + `suppressHandoff: true` — the resumed agent already has full implement-stage context in its SDK transcript. Legacy fallback = existing full implement-template re-run.
+- Audit event `pipeline.surgical_review_fix` records every review-fix invocation with `path: "surgical" | "legacy"`, `findingsCount`, `decisionPayloadBytes`. Always fires (both paths) so operators can monitor fallback rates. Bumps canonical event count 56 → 57.
+
 ## OpenRouter Multi-Model Review Fanout (BEC-134)
 - When `REVIEW_MODELS` and `OPENROUTER_API_KEY` are both set, each comma-separated model produces an advisory review alongside the Claude Agent SDK deep-review
 - Symmetric requirement: both must be set or both unset (enforced at startup)

@@ -55,7 +55,14 @@ describe("AgenticDeepReviewProvider", () => {
     expect(runs[0].outputTokens).toBe(50);
     expect(runs[0].durationMs).toBeGreaterThanOrEqual(0);
     expect(runDeepReviewMock).toHaveBeenCalledOnce();
-    expect(runDeepReviewMock).toHaveBeenCalledWith(handoff, "/tmp/x");
+    // BEC-227: signature converted to single options object so session
+    // resume info (`agentSessionId`, `isFirstResumableStage`, `model`)
+    // can be threaded through. Legacy callers omit those fields; the
+    // provider defaults `agentSessionId` to null and isFirstResumableStage
+    // to false, which yields the same fresh-session SDK call shape.
+    expect(runDeepReviewMock).toHaveBeenCalledWith(
+      expect.objectContaining({ handoff, workdir: "/tmp/x" }),
+    );
   });
 
   it("returns failed run with errorMessage when runDeepReview throws", async () => {

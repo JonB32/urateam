@@ -5,6 +5,8 @@ import type {
   ReviewFeedbackContext,
   ReviewComment,
   MergeConflictContext,
+  ReviewFinding,
+  DecisionArtifact,
 } from "../../types.js";
 import {
   SECURITY_REVIEW_CHECKLIST,
@@ -84,8 +86,19 @@ const MAX_ERROR_SNIPPET_LENGTH = 500;
 /**
  * Wraps handoff artifact in a `<previous-stage-context>` block.
  * Returns empty string when handoff is undefined.
+ *
+ * @param opts.suppress - BEC-227: when `true`, returns empty string regardless
+ *   of handoff content. Used by the RALPH re-implement path on resumed
+ *   iterations: the agent already saw the same handoff in turn 1 (via the
+ *   resumed SDK session's transcript), so re-injecting it as prompt text would
+ *   be redundant and waste input tokens. Default `false` preserves legacy
+ *   behavior.
  */
-export function handoffBlock(handoff?: HandoffArtifact): string {
+export function handoffBlock(
+  handoff?: HandoffArtifact,
+  opts: { suppress?: boolean } = {},
+): string {
+  if (opts.suppress) return "";
   if (!handoff) return "";
 
   // Sanitize all agent-provided fields: previous agent output is untrusted and
@@ -194,6 +207,7 @@ export function triageTemplate(
   issue: SanitizedIssue,
   repo: RepoConfig,
   handoff?: HandoffArtifact,
+  opts: { suppressHandoff?: boolean } = {},
 ): string {
   return `You are the triage agent. Your job is to analyse the incoming issue, determine its scope, complexity, and relevant areas of the codebase.
 
@@ -201,7 +215,7 @@ ${issueDataBlock(issue)}
 
 ${repoContextBlock(repo)}
 
-${handoffBlock(handoff)}
+${handoffBlock(handoff, { suppress: opts.suppressHandoff })}
 
 Instructions:
 - Classify the issue (bug, feature, chore, security).
@@ -215,6 +229,7 @@ export function reproduceTemplate(
   issue: SanitizedIssue,
   repo: RepoConfig,
   handoff?: HandoffArtifact,
+  opts: { suppressHandoff?: boolean } = {},
 ): string {
   return `You are the reproduce agent. Your job is to reproduce the issue described below and confirm it exists.
 
@@ -222,7 +237,7 @@ ${issueDataBlock(issue)}
 
 ${repoContextBlock(repo)}
 
-${handoffBlock(handoff)}
+${handoffBlock(handoff, { suppress: opts.suppressHandoff })}
 
 Instructions:
 - Write or run a minimal reproduction of the issue.
@@ -237,6 +252,7 @@ export function implementTemplate(
   handoff?: HandoffArtifact,
   reviewFeedback?: ReviewFeedbackContext,
   mergeConflict?: MergeConflictContext,
+  opts: { suppressHandoff?: boolean } = {},
 ): string {
   if (mergeConflict) {
     return `You are the merge-conflict-resolution agent. The current branch has rebase conflicts with origin/${mergeConflict.defaultBranch}. Your only job is to resolve those conflicts so the rebase can continue.
@@ -265,7 +281,7 @@ ${repoContextBlock(repo)}
 
 ${reviewFeedbackBlock(reviewFeedback)}
 
-${handoffBlock(handoff)}
+${handoffBlock(handoff, { suppress: opts.suppressHandoff })}
 
 Instructions:
 - Stay on the current branch (\`${reviewFeedback.prBranch}\`) — the worktree is already configured. Do NOT run \`git checkout\`; switching branches inside a worktree is unsafe and can corrupt other concurrent runs.
@@ -289,7 +305,7 @@ ${issueDataBlock(issue)}
 
 ${repoContextBlock(repo)}
 
-${handoffBlock(handoff)}
+${handoffBlock(handoff, { suppress: opts.suppressHandoff })}
 
 Instructions:
 - Create a branch named: agent/${issue.id}-${issue.slug}
@@ -317,6 +333,33 @@ ${(issue.acceptanceCriteria ?? []).map((ac, i) => `  ${i + 1}. ${ac}`).join("\n"
 For each criterion, confirm in your response that it is addressed by your code changes.
 If any criterion cannot be met, explain why and what partial progress was made.
 Do NOT claim work is complete if acceptance criteria are not satisfied.
+
+BEFORE you finish, emit a structured decision artifact so downstream
+stages can see your reasoning without re-deriving it from the diff.
+Output a single XML block at the very end of your final message:
+
+<decisions>
+{
+  "decisions": [
+    { "choice": "<short label of a non-obvious design choice you made>",
+      "reason": "<why this over the alternatives>",
+      "alternativesConsidered": ["<other approach you weighed>"] }
+  ],
+  "leftUnhandled": [
+    { "case": "<edge case you noticed but did NOT fix>",
+      "reason": "<why it's out of scope>" }
+  ],
+  "keyFiles": ["<path/to/file.ts>", "..."]
+}
+</decisions>
+
+Rules:
+- Emit the block exactly once, at the END of your final message.
+- Use valid JSON (double-quoted keys + strings; no trailing commas).
+- Keep each "choice" / "reason" / "case" to one sentence.
+- If you had no non-obvious decisions, "leftUnhandled" cases, or relevant
+  files, emit empty arrays: { "decisions": [], "leftUnhandled": [], "keyFiles": [] }.
+- A reviewer will see this — keep it terse and honest, NOT marketing.
 `.trim();
 }
 
@@ -324,6 +367,7 @@ export function testTemplate(
   issue: SanitizedIssue,
   repo: RepoConfig,
   handoff?: HandoffArtifact,
+  opts: { suppressHandoff?: boolean } = {},
 ): string {
   return `You are the test agent. Your job is to verify the implementation by running and writing tests.
 
@@ -331,7 +375,7 @@ ${issueDataBlock(issue)}
 
 ${repoContextBlock(repo)}
 
-${handoffBlock(handoff)}
+${handoffBlock(handoff, { suppress: opts.suppressHandoff })}
 
 Instructions:
 - Run the full test suite: ${repo.testCommand}
@@ -346,6 +390,7 @@ export function reviewTemplate(
   issue: SanitizedIssue,
   repo: RepoConfig,
   handoff?: HandoffArtifact,
+  opts: { suppressHandoff?: boolean } = {},
 ): string {
   return `You are the review agent. Your job is to perform a thorough code review, security audit, and acceptance criteria verification.
 
@@ -353,7 +398,7 @@ ${issueDataBlock(issue)}
 
 ${repoContextBlock(repo)}
 
-${handoffBlock(handoff)}
+${handoffBlock(handoff, { suppress: opts.suppressHandoff })}
 
 ${SECURITY_REVIEW_CHECKLIST}
 
@@ -369,5 +414,50 @@ Instructions:
 - FINAL OUTPUT: After completing your review, emit a single HandoffArtifact JSON block as your last output (format below). The \`summary\` field must be 1–2 sentences of prose describing what was reviewed and the overall verdict — NOT JSON. All fields are required even when there are no findings.
 
 ${REVIEW_OUTPUT_FORMAT}
+`.trim();
+}
+
+/**
+ * BEC-227 Phase 4 / Track B. Used by the review-fix loop when the
+ * per-run Agent SDK session is intact AND there is a populated decision
+ * artifact AND `URATEAM_ENABLE_AGENT_SESSION_RESUME` was on at run start.
+ *
+ * The prompt is intentionally narrow: the resumed agent already has the
+ * full implement-stage context (tool calls, file edits, reasoning). All
+ * we need to give it is the list of blocking findings + a reminder of
+ * its own prior decisions so it can choose to preserve or revise them.
+ */
+export function surgicalReviewFixPrompt(
+  findings: ReviewFinding[],
+  decisions: DecisionArtifact | null,
+): string {
+  const findingsBlock = findings
+    .map((f, i) => {
+      const loc = `${f.file} line ${f.line}`;
+      const fix = f.fix ? ` — suggested fix: ${f.fix}` : "";
+      return `${i + 1}. [${f.severity} / ${f.category}] ${loc} — ${f.description}${fix}`;
+    })
+    .join("\n");
+
+  const hasDecisions =
+    decisions !== null &&
+    ((decisions.decisions?.length ?? 0) > 0 || (decisions.leftUnhandled?.length ?? 0) > 0);
+
+  const decisionsBlock = hasDecisions
+    ? `\n\nPrior decisions you made during the implement stage (review BEFORE deciding whether to preserve or revise each):\n${JSON.stringify(decisions, null, 2)}`
+    : "";
+
+  return `Review surfaced blocking findings on the diff you produced. Address each one.
+
+Blocking findings:
+${findingsBlock}${decisionsBlock}
+
+Instructions:
+- You already have the full implement-stage context — the diff, file contents, your reasoning. Reuse it; do not re-read files you already know.
+- Address every finding above. If a finding contradicts a prior decision listed above, choose the better answer and explain the trade-off in your reply (do NOT silently revert).
+- Make ONLY the changes needed to resolve the findings. No drive-by refactors, no scope creep, no doc-rewrites unrelated to the findings.
+- Commit your fixes (conventional commits, one logical commit per finding cluster) and push to the same branch.
+- Do NOT create a new PR. Do NOT switch branches inside the worktree.
+- After your edits, run the build + test commands you used in the implement stage and verify they still pass before declaring done.
 `.trim();
 }
