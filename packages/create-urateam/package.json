@@ -1,6 +1,6 @@
 {
   "name": "create-urateam",
-  "version": "0.1.53",
+  "version": "0.1.58",
   "license": "BUSL-1.1",
   "type": "module",
   "bin": {

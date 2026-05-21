@@ -48,6 +48,8 @@ export const pipelineRuns = sqliteTable("pipeline_runs", {
   issueTitle: text("issue_title").notNull(),
   pipelineKey: text("pipeline_key").notNull(),
   repoUrl: text("repo_url").notNull(),
+  /** BEC-227 — Claude Agent SDK session UUID; null = legacy/flag-off, populated = SDK session UUID for resumption. */
+  agentSessionId: text("agent_session_id"),
   branch: text("branch"),
   status: text("status").notNull(),
   startedAt: crossTimestamp("started_at")
