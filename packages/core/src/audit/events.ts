@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AuditEvent } from "../types.js";
+import { getAuthExpiredMessages } from "./auth-error-messages.js";
 
 function base(
   partial: Partial<AuditEvent> & Pick<AuditEvent, "eventType" | "actor" | "actorType">,
@@ -642,10 +643,7 @@ export function claudeAuthExpiredEvent(args: {
   detectedAt: Date;
   authMethod: "oauth-token" | "mounted-session";
 }): AuditEvent {
-  const hint =
-    args.authMethod === "oauth-token"
-      ? "Run `claude setup-token` to regenerate the token, update CLAUDE_CODE_OAUTH_TOKEN in your env, and restart the container. See deploy/CLAUDE_AUTH.md."
-      : "Run `claude login` in the container, or switch to CLAUDE_CODE_OAUTH_TOKEN (see deploy/CLAUDE_AUTH.md)";
+  const { hint } = getAuthExpiredMessages(args.authMethod);
   return base({
     eventType: "claude.auth_expired",
     actor: "system",

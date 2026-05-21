@@ -19,6 +19,7 @@ import { execFile } from "node:child_process";
 import { createLogger } from "../logger.js";
 import { postSlackMessage } from "../pm/slack-helpers.js";
 import { claudeAuthExpiredEvent } from "../audit/events.js";
+import { getAuthExpiredMessages } from "../audit/auth-error-messages.js";
 import { logAuditEventUnchecked } from "../audit/writer.js";
 import { resetAuthCheckCache } from "./auth-check.js";
 import type { AnyDb } from "../db/client.js";
@@ -91,30 +92,16 @@ export async function runAuthMonitorCheck(
   }
 
   // Auth invalid — alert and record.
-  if (authMethod === "oauth-token") {
-    log.error(
-      "AuthMonitor: CLAUDE_CODE_OAUTH_TOKEN has expired or been revoked. " +
-      "Run `claude setup-token` to regenerate the token, update CLAUDE_CODE_OAUTH_TOKEN in your env, " +
-      "and restart the container. See deploy/CLAUDE_AUTH.md.",
-    );
-  } else {
-    log.error(
-      "AuthMonitor: mounted Claude session expired. " +
-      "Run `claude login` in the container, or switch to CLAUDE_CODE_OAUTH_TOKEN (see deploy/CLAUDE_AUTH.md).",
-    );
-  }
+  const { hint, slackText } = getAuthExpiredMessages(authMethod);
+  const logPrefix =
+    authMethod === "oauth-token"
+      ? "AuthMonitor: CLAUDE_CODE_OAUTH_TOKEN has expired or been revoked. "
+      : "AuthMonitor: mounted Claude session expired. ";
+  log.error(logPrefix + hint);
 
   // Slack alert — text branches on auth method so operators get actionable instructions.
   if (opts.slackBotToken && opts.slackErrorChannel) {
-    const text =
-      authMethod === "oauth-token"
-        ? "⚠ *Claude OAuth token expired or revoked* — new pipeline runs will fail immediately.\n" +
-          "Fix: run `claude setup-token` to regenerate the token, set `CLAUDE_CODE_OAUTH_TOKEN` in your `.env`, and restart the container.\n" +
-          "See `deploy/CLAUDE_AUTH.md` for details."
-        : "⚠ *Claude session auth expired* — new pipeline runs will fail immediately.\n" +
-          "Fix: `docker compose exec <service> claude login`\n" +
-          "Or switch to `CLAUDE_CODE_OAUTH_TOKEN` (run `claude setup-token` once). " +
-          "See `deploy/CLAUDE_AUTH.md` for details.";
+    const text = slackText;
     try {
       await postSlackMessage(opts.slackBotToken, {
         channel: opts.slackErrorChannel,
