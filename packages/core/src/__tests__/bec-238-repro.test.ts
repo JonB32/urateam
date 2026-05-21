@@ -1,17 +1,17 @@
 /**
- * BEC-238 reproduction: Slack bot token missing reactions:read scope.
+ * BEC-238: Slack bot token missing reactions:read scope.
  *
- * Confirms three gaps in the current implementation:
- * 1. checkApprovalReactions warns (not errors) on missing_scope and silently
- *    returns "pending" — approval is silently ignored.
- * 2. With N pending approvals, N warn lines fire per tick — no dedup.
- * 3. No startup probe exists on PmSlackNotifier.
+ * Verifies the fix:
+ * 1. probeReactionsScope() logs error exactly once on missing_scope.
+ * 2. probeReactionsScope() stays silent when scope is present (any other error).
+ * 3. checkApprovalReactions() deduplicates missing_scope warns to one per
+ *    notifier instance — no 7×/tick flood.
+ * 4. checkApprovalReactions() still logs every occurrence of non-missing_scope
+ *    errors (other error types are not deduped).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PmSlackNotifier } from "../pm/slack.js";
 
-// Capture pino log calls via the module logger.
-// We spy on the underlying createLogger output.
 vi.mock("../logger.js", () => {
   const warnSpy = vi.fn();
   const errorSpy = vi.fn();
@@ -40,68 +40,107 @@ beforeEach(() => {
   errorSpy.mockReset();
 });
 
-function makeMissingScope() {
-  return {
-    ok: true,
-    json: () => Promise.resolve({ ok: false, error: "missing_scope" }),
-  };
+function fetchReturning(body: object) {
+  return { ok: true, json: () => Promise.resolve(body) };
 }
 
-describe("BEC-238: reactions:read scope missing", () => {
-  const notifier = new PmSlackNotifier({
-    botToken: "xoxb-test",
-    channelId: "C0000",
+// ── probeReactionsScope ───────────────────────────────────────────────────────
+
+describe("PmSlackNotifier.probeReactionsScope (BEC-238 AC2)", () => {
+  it("logs error exactly once when reactions:read scope is missing", async () => {
+    mockFetch.mockResolvedValueOnce(fetchReturning({ ok: false, error: "missing_scope" }));
+    const notifier = new PmSlackNotifier({ botToken: "xoxb-test", channelId: "C0000" });
+
+    await notifier.probeReactionsScope();
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    const [ctx, msg] = errorSpy.mock.calls[0];
+    expect(ctx?.error).toBe("missing_scope");
+    expect(msg).toMatch(/reactions:read/);
+    expect(msg).toMatch(/Fix:/);
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 
-  /**
-   * Gap 1: missing_scope is logged at warn level, not error.
-   * The operator has no idea the scope is absent without reading daemon logs.
-   * Approval silently stays "pending" indefinitely.
-   */
-  it("Gap 1 — missing_scope logs warn (not error) and returns pending, silently ignoring the approval", async () => {
-    mockFetch.mockResolvedValueOnce(makeMissingScope());
+  it("stays silent when scope is present (message_not_found means token can call reactions.get)", async () => {
+    mockFetch.mockResolvedValueOnce(fetchReturning({ ok: false, error: "message_not_found" }));
+    const notifier = new PmSlackNotifier({ botToken: "xoxb-test", channelId: "C0000" });
 
-    const result = await notifier.checkApprovalReactions("ts-1");
+    await notifier.probeReactionsScope();
 
-    expect(result).toBe("pending");
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
 
-    // BUG: currently logs warn, not error — operator sees no clear signal
+  it("stays silent when reactions.get succeeds (scope definitely present)", async () => {
+    mockFetch.mockResolvedValueOnce(fetchReturning({ ok: true, message: { reactions: [] } }));
+    const notifier = new PmSlackNotifier({ botToken: "xoxb-test", channelId: "C0000" });
+
+    await notifier.probeReactionsScope();
+
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("logs warn (not error) on fetch exception — probe is best-effort", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("network timeout"));
+    const notifier = new PmSlackNotifier({ botToken: "xoxb-test", channelId: "C0000" });
+
+    await notifier.probeReactionsScope();
+
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][1]).toMatch(/scope probe failed/);
+  });
+});
+
+// ── checkApprovalReactions dedup (AC3) ───────────────────────────────────────
+
+describe("PmSlackNotifier.checkApprovalReactions missing_scope dedup (BEC-238 AC3)", () => {
+  it("logs warn only once across 7 consecutive missing_scope calls", async () => {
+    const PENDING_COUNT = 7;
+    for (let i = 0; i < PENDING_COUNT; i++) {
+      mockFetch.mockResolvedValueOnce(fetchReturning({ ok: false, error: "missing_scope" }));
+    }
+    const notifier = new PmSlackNotifier({ botToken: "xoxb-test", channelId: "C0000" });
+
+    for (let i = 0; i < PENDING_COUNT; i++) {
+      const result = await notifier.checkApprovalReactions(`ts-${i}`);
+      expect(result).toBe("pending");
+    }
+
+    // First call logs; subsequent 6 are silently deduped.
     expect(warnSpy).toHaveBeenCalledTimes(1);
     const [ctx, msg] = warnSpy.mock.calls[0];
     expect(ctx?.error).toBe("missing_scope");
     expect(msg).toMatch(/reactions\.get.*ok:false/i);
-
-    // There should be an error-level log for a permanent scope issue,
-    // but there isn't — this is the gap.
-    expect(errorSpy).not.toHaveBeenCalled();
   });
 
-  /**
-   * Gap 2: with 7 pending approvals in a tick, the warn fires 7× — no dedup.
-   * The issue reports "7 occurrences in a single tick" in the dogfood logs.
-   */
-  it("Gap 2 — N pending approvals produce N warn lines per tick (no dedup)", async () => {
-    const PENDING_COUNT = 7;
-    for (let i = 0; i < PENDING_COUNT; i++) {
-      mockFetch.mockResolvedValueOnce(makeMissingScope());
+  it("does NOT dedup non-missing_scope errors — each occurrence is logged", async () => {
+    const ERROR_COUNT = 3;
+    for (let i = 0; i < ERROR_COUNT; i++) {
+      mockFetch.mockResolvedValueOnce(fetchReturning({ ok: false, error: "channel_not_found" }));
     }
+    const notifier = new PmSlackNotifier({ botToken: "xoxb-test", channelId: "C0000" });
 
-    for (let i = 0; i < PENDING_COUNT; i++) {
+    for (let i = 0; i < ERROR_COUNT; i++) {
       await notifier.checkApprovalReactions(`ts-${i}`);
     }
 
-    // BUG: emits 7 duplicate warns — the flood described in the issue
-    expect(warnSpy).toHaveBeenCalledTimes(PENDING_COUNT);
+    expect(warnSpy).toHaveBeenCalledTimes(ERROR_COUNT);
   });
 
-  /**
-   * Gap 3: PmSlackNotifier has no probeReactionsScope() startup method.
-   * A missing scope is only discovered after the first tick fires live approvals.
-   */
-  it("Gap 3 — PmSlackNotifier exposes no startup scope probe", () => {
-    // BUG: no probeReactionsScope / validateScopes method exists
-    expect(typeof (notifier as any).probeReactionsScope).toBe("undefined");
-    expect(typeof (notifier as any).validateScopes).toBe("undefined");
-    expect(typeof (notifier as any).probeScopes).toBe("undefined");
+  it("returns approved / rejected normally when scope is present", async () => {
+    mockFetch.mockResolvedValueOnce(
+      fetchReturning({ ok: true, message: { reactions: [{ name: "white_check_mark", count: 1 }] } }),
+    );
+    mockFetch.mockResolvedValueOnce(
+      fetchReturning({ ok: true, message: { reactions: [{ name: "x", count: 1 }] } }),
+    );
+    const notifier = new PmSlackNotifier({ botToken: "xoxb-test", channelId: "C0000" });
+
+    expect(await notifier.checkApprovalReactions("ts-approved")).toBe("approved");
+    expect(await notifier.checkApprovalReactions("ts-rejected")).toBe("rejected");
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
   });
 });
