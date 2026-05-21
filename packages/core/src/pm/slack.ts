@@ -73,11 +73,10 @@ export class PmSlackNotifier {
    */
   async probeReactionsScope(): Promise<void> {
     try {
-      const url = `https://slack.com/api/reactions.get?channel=${encodeURIComponent(this.channelId)}&timestamp=0.000000`;
-      const resp = await fetch(url, {
-        headers: { Authorization: `Bearer ${this.botToken}` },
+      const data = await this._callSlackApi("reactions.get", {
+        channel: this.channelId,
+        timestamp: "0.000000",
       });
-      const data = await resp.json() as any;
       if (!data?.ok && data?.error === "missing_scope") {
         log.error(
           { error: "missing_scope" },
@@ -208,11 +207,10 @@ export class PmSlackNotifier {
 
   async checkApprovalReactions(messageTs: string): Promise<"approved" | "rejected" | "pending"> {
     try {
-      const url = `https://slack.com/api/reactions.get?channel=${encodeURIComponent(this.channelId)}&timestamp=${encodeURIComponent(messageTs)}`;
-      const resp = await fetch(url, {
-        headers: { Authorization: `Bearer ${this.botToken}` },
+      const data = await this._callSlackApi("reactions.get", {
+        channel: this.channelId,
+        timestamp: messageTs,
       });
-      const data = await resp.json() as any;
 
       if (!data?.ok) {
         if (data?.error === "missing_scope") {
@@ -277,6 +275,15 @@ export class PmSlackNotifier {
         },
       ],
     });
+  }
+
+  private async _callSlackApi(endpoint: string, params: Record<string, string>): Promise<any> {
+    const qs = new URLSearchParams(params).toString();
+    const url = `https://slack.com/api/${endpoint}?${qs}`;
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${this.botToken}` },
+    });
+    return resp.json();
   }
 
   private async postMessage(payload: object): Promise<any> {
