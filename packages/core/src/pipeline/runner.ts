@@ -139,6 +139,7 @@ import {
   startFeedbackPipeline,
   type FeedbackStartContext,
 } from "./feedback-pipeline.js";
+import { runSurgicalReviewFix } from "./run-surgical-review-fix.js";
 
 // Re-export from extracted module so existing callers (including tests) still
 // find buildReviewFeedbackContext at pipeline/runner.js without changing their
@@ -1153,6 +1154,11 @@ export class PipelineRunner {
               agentSessionId: runAgentSessionId,
               isFirstResumableStage: isFirstResumableStageForRalph,
               suppressHandoff: suppressRalphHandoff,
+              // BEC-227 Phase 4 / Track D — RALPH iteration counter (1..N)
+              // surfaces in pipeline_run_decisions.iteration so operators
+              // can correlate persisted decisions with the RALPH loop pass
+              // that produced them.
+              iteration,
             });
 
             // Accumulate each RALPH iteration's tokens
@@ -1291,6 +1297,11 @@ export class PipelineRunner {
             {
               artifact: result.handoffArtifact,
               structured: result.handoffIsStructured ?? false,
+              // BEC-227 Phase 4 / Track D — validator doesn't consume the
+              // decisions artifact (Track B's review-fix loop does). The
+              // executor already persisted it before returning; we don't
+              // need to thread it through validateHandoff.
+              decisions: null,
             },
             sanitizedIssue,
             repoConfig,
@@ -1342,6 +1353,8 @@ export class PipelineRunner {
                     {
                       artifact: result.handoffArtifact,
                       structured: result.handoffIsStructured ?? false,
+                      // BEC-227 Phase 4 / Track D — see main-stage call above.
+                      decisions: null,
                     },
                     sanitizedIssue,
                     repoConfig,
@@ -1484,6 +1497,35 @@ export class PipelineRunner {
           for (const fixStage of fixStages) {
             runLog.info({ stage: fixStage, rfIteration }, "review-fix: executing stage");
 
+            // BEC-227 Phase 4 / Track B — for the implement fixStage, decide
+            // surgical vs legacy review-fix. Surgical = the per-run SDK session
+            // is intact (JSONL on disk) so we can send a focused
+            // findings-plus-prior-decisions prompt instead of re-running the
+            // full implement template. The audit event fires inside
+            // runSurgicalReviewFix for BOTH paths so operators can monitor
+            // fallback rates.
+            let surgicalPrompt: string | undefined;
+            let surgicalSuppressHandoff = false;
+            if (fixStage === "implement") {
+              const blocking = (handoff?.context?.reviewFindings ?? []).filter(
+                (f) => f.severity === "blocking",
+              );
+              if (blocking.length > 0) {
+                const decision = await runSurgicalReviewFix({
+                  db: this.db as AnyDb,
+                  runId,
+                  issueId: sanitizedIssue.id,
+                  agentSessionId: runAgentSessionId,
+                  worktreePath,
+                  blockingFindings: blocking,
+                });
+                if (decision.path === "surgical") {
+                  surgicalPrompt = decision.prompt;
+                  surgicalSuppressHandoff = true;
+                }
+              }
+            }
+
             const isFirstResumableStageForFix = claimFirstResumableStage(fixStage);
             const fixResult = await executeStage({
               runId,
@@ -1499,6 +1541,16 @@ export class PipelineRunner {
               stageModels: config.stageModels,
               agentSessionId: runAgentSessionId,
               isFirstResumableStage: isFirstResumableStageForFix,
+              // BEC-227 Phase 4 / Track D — review-fix iteration counter
+              // (1..N) for the implement fixStage's decision artifact. Other
+              // fixStages (test/review) don't emit decisions, so the value
+              // is harmless when unused.
+              iteration: rfIteration,
+              // BEC-227 Phase 4 / Track B — undefined when the surgical
+              // decision returned `legacy` (or fixStage !== "implement"),
+              // which preserves the legacy assembled-prompt path.
+              promptOverride: surgicalPrompt,
+              suppressHandoff: surgicalSuppressHandoff,
             });
 
             // BEC-134: track latest review stage_run id for fanout persistence.
@@ -1545,7 +1597,12 @@ export class PipelineRunner {
                     : "resumed";
               const validation = await validateHandoff(
                 fixStage,
-                { artifact: fixResult.handoffArtifact, structured: fixResult.handoffIsStructured ?? false },
+                {
+                  artifact: fixResult.handoffArtifact,
+                  structured: fixResult.handoffIsStructured ?? false,
+                  // BEC-227 Phase 4 / Track D — see main-stage call above.
+                  decisions: null,
+                },
                 sanitizedIssue,
                 repoConfig,
                 worktreePath,

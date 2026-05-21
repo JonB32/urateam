@@ -294,6 +294,31 @@ export const HandoffArtifactSchema = z.object({
 });
 export type HandoffArtifact = z.infer<typeof HandoffArtifactSchema>;
 
+/**
+ * BEC-227 Phase 4 / Track D. The implement agent emits this as a
+ * `<decisions>{ JSON }</decisions>` XML block at the end of its turn.
+ * Used by the review-fix loop's surgical prompt and by future Track F
+ * cross-run inheritance. Every field is optional — malformed or missing
+ * blocks degrade silently to an empty artifact.
+ */
+export const DecisionArtifactSchema = z.object({
+  decisions: z.array(
+    z.object({
+      choice: z.string(),
+      reason: z.string(),
+      alternativesConsidered: z.array(z.string()).default([]),
+    }),
+  ).default([]),
+  leftUnhandled: z.array(
+    z.object({
+      case: z.string(),
+      reason: z.string(),
+    }),
+  ).default([]),
+  keyFiles: z.array(z.string()).default([]),
+});
+export type DecisionArtifact = z.infer<typeof DecisionArtifactSchema>;
+
 // --- Review Feedback Context ---
 export const ReviewCommentSchema = z.object({
   author: z.string(),
@@ -584,6 +609,15 @@ export const AuditEventTypeSchema = z.enum([
    *  survive container restarts. Payload carries the projectsDir path and
    *  the failure reason so operators can fix their mount config. */
   "system.session_volume_warning",
+  /** BEC-227 Phase 4 / Track B — the review-fix loop took the surgical path:
+   *  it resumed the per-run Agent SDK session and prompted the agent with
+   *  just the blocking review findings (plus the previously-persisted
+   *  decision artifact when available), instead of re-running the full
+   *  implement template. Payload: `runId`, `issueId`, `path` ("surgical" |
+   *  "legacy"), `findingsCount`, `decisionPayloadBytes` (0 when no
+   *  artifact was found). The `legacy` path is logged too so operators
+   *  can audit fallback rates. */
+  "pipeline.surgical_review_fix",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 

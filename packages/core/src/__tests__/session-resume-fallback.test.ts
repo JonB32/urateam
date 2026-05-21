@@ -46,6 +46,7 @@ vi.mock("../executor/extract-handoff.js", () => ({
       tokenBudget: { contextTokensUsed: 0, recommendedMaxTurns: 1 },
     },
     structured: true,
+    decisions: null,
   }),
 }));
 
