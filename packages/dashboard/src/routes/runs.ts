@@ -12,13 +12,19 @@ import {
   systemHaltedEvent,
   isFeatureLicensed,
   canAccess,
+  createLogger,
+  getSessionMessages,
   type Role,
   type StopMode,
+  type SessionMessage,
 } from "@urateam/core";
 import { layout } from "../views/layout.js";
 import { runFeedView, type RunRow } from "../views/run-feed.js";
 import { runDetailView, type RunInfo, type StageInfo, type LogEntry } from "../views/run-detail.js";
+import { runTranscriptView, type TranscriptMessage } from "../views/run-transcript.js";
 import { requirePermission } from "../middleware/rbac.js";
+
+const log = createLogger({ component: "dashboard.runs" });
 
 type AnyDb = any;
 
@@ -255,6 +261,64 @@ export function createRunsRouter(
     });
     return c.html(layout(`Run ${id}`, content, effectiveBasePath, { userEmail: user?.email }));
   });
+
+  /**
+   * BEC-227 — render the SDK session transcript for a run, when one exists.
+   *
+   * Read-only view: requires only `runs.view` (same gate as the run-detail
+   * page). Fail-open semantics: if the SDK can't locate or parse the session
+   * file (e.g. transcript pruned, volume mount missing on a new container),
+   * the page still renders with an empty-state message — operators see "no
+   * transcript" instead of a 500. No audit event beyond the implicit route
+   * logging — this is purely diagnostic.
+   */
+  router.get(
+    "/runs/:id/transcript",
+    requirePermission("runs.view"),
+    async (c) => {
+      const id = c.req.param("id");
+      const user = c.get("user" as never) as
+        | { id: string; email: string; role?: Role }
+        | undefined;
+
+      const run = await fetchRunById(id);
+      if (!run) {
+        return c.html(
+          layout("Not Found", "<p>Run not found</p>", effectiveBasePath, {
+            userEmail: user?.email,
+          }),
+          404,
+        );
+      }
+
+      let messages: SessionMessage[] = [];
+      if (run.agentSessionId) {
+        try {
+          messages = await getSessionMessages(run.agentSessionId);
+        } catch (err) {
+          log.warn(
+            {
+              runId: id,
+              sessionId: run.agentSessionId,
+              err: (err as Error).message,
+            },
+            "failed to read session messages — rendering empty transcript",
+          );
+        }
+      }
+
+      const content = runTranscriptView(
+        id,
+        messages as TranscriptMessage[],
+        effectiveBasePath,
+      );
+      return c.html(
+        layout(`Transcript ${id}`, content, effectiveBasePath, {
+          userEmail: user?.email,
+        }),
+      );
+    },
+  );
 
   router.post(
     "/runs/:id/retry",

@@ -17,7 +17,7 @@ import {
   type StageCostBreakdown,
 } from "./cost-summary.js";
 import { executeStage } from "../executor/executor.js";
-import { validateHandoff } from "../executor/validate.js";
+import { validateHandoff, type ValidateRunMode } from "../executor/validate.js";
 import { isFeatureLicensed } from "../license.js";
 import { checkRequirements, buildRalphContext } from "../executor/ralph.js";
 import { computeEffectiveRalphIterations } from "./runner-ralph-helpers.js";
@@ -104,6 +104,8 @@ import {
 } from "../pm/coordination.js";
 import { eq, and, or, sql, gte, lt, inArray } from "drizzle-orm";
 import { nanoid } from "nanoid";
+import { randomUUID } from "node:crypto";
+import { isAgentSessionResumeEnabled, isAlwaysFreshStage } from "../executor/session-policy.js";
 import { createLogger, runWithLogContext } from "../logger.js";
 import { isTransientError, MAX_TRANSIENT_RETRIES } from "./error-classifier.js";
 import { evaluatePolicyGates } from "../policy/evaluate.js";
@@ -117,6 +119,7 @@ import {
   pipelineSpecVsImplFailedEvent,
   pipelineAutoDeepReviewBumpedEvent,
   pmTriageQualityScoreEvent,
+  agentSessionCreatedEvent,
 } from "../audit/index.js";
 import {
   computeAffectedFilesPredictionQuality,
@@ -249,6 +252,11 @@ export class PipelineRunner {
     }
 
     const runId = nanoid();
+    // BEC-227: mint a per-run agent session UUID when the flag is on. The
+    // first resumable stage opens its SDK session with this id; downstream
+    // stages reuse it via `resume:`. Read env at call time so flipping the
+    // var takes effect on the next pipeline run without a daemon restart.
+    const agentSessionId = isAgentSessionResumeEnabled() ? randomUUID() : null;
     const branch = branchName(issue.identifier, sanitizedIssue.slug);
     const db = this.db as AnyDb;
     const runLog = createLogger({ component: "PipelineRunner", runId, issueId: issue.identifier });
@@ -265,8 +273,20 @@ export class PipelineRunner {
         branch,
         status: "queued",
         linearTeamId,
+        agentSessionId, // null when flag is off; UUID when BEC-227 is enabled
       });
     runLog.info({ branch }, "run queued");
+
+    if (agentSessionId !== null) {
+      void logAuditEvent(
+        db,
+        agentSessionCreatedEvent({
+          runId,
+          issueId: issue.identifier,
+          sessionId: agentSessionId,
+        }),
+      );
+    }
 
     const run = this.buildPipelineRun(
       runId,
@@ -293,6 +313,8 @@ export class PipelineRunner {
             repoConfig,
             sanitizedIssue,
             branch,
+            undefined,
+            agentSessionId,
           )
         );
       } catch (err) {
@@ -494,6 +516,10 @@ export class PipelineRunner {
               startStageIndex: pausedRun.currentStageIndex!,
               worktreePath,
               initialHandoff: handoff ?? undefined,
+              // BEC-227 — carry the per-run SDK session id across the
+              // await-approval pause so the post-resume stages keep
+              // talking to the same transcript.
+              agentSessionId: pausedRun.agentSessionId ?? null,
             },
           )
         );
@@ -709,10 +735,53 @@ export class PipelineRunner {
       worktreePath: string;
       /** Handoff artifact from the last completed stage before the pause. */
       initialHandoff: HandoffArtifact | undefined;
+      /**
+       * BEC-227 — per-run SDK session UUID carried across resume boundaries.
+       * Null when the flag is off (or the original run was started before
+       * BEC-227 was enabled). The resume path always re-reads it from the
+       * paused pipeline_runs row so the same session id continues across
+       * await-approval pauses.
+       */
+      agentSessionId: string | null;
     },
+    /**
+     * BEC-227 — per-run SDK session UUID minted at start(). Null when the
+     * `URATEAM_ENABLE_AGENT_SESSION_RESUME` flag is off. On the resume path
+     * this is ignored in favour of `resumeOptions.agentSessionId`.
+     */
+    agentSessionId: string | null = null,
   ): Promise<void> {
     const db = this.db as AnyDb;
     const runLog = createLogger({ component: "PipelineRunner", runId, issueId: run.issueId });
+
+    // BEC-227 — resolve the session id from the resume path (preferred) or
+    // the start() path. Tracks whether the first resumable stage in this run
+    // has already opened the SDK session so subsequent stages switch from
+    // `sessionId` (create) to `resume` (reuse). The flag stays scoped to a
+    // single executePipeline() invocation: on resume after await-approval the
+    // SDK session created in the pre-pause run has already been initiated, so
+    // we start this second invocation with `hasInitiatedSession = true` —
+    // every resumable stage uses the `resume:` shape, never re-creates the
+    // session.
+    const runAgentSessionId = resumeOptions
+      ? resumeOptions.agentSessionId
+      : agentSessionId;
+    let hasInitiatedSession = !!resumeOptions;
+
+    /**
+     * Returns `true` for the first non-fresh stage in this run, flips the
+     * `hasInitiatedSession` flag as a side effect. Always-fresh stages
+     * (validate, ralph-check) never count as the first resumable stage —
+     * they don't take a session id. Returns false when the flag is off
+     * (`runAgentSessionId === null`).
+     */
+    const claimFirstResumableStage = (stage: string): boolean => {
+      if (runAgentSessionId === null) return false;
+      if (hasInitiatedSession) return false;
+      if (isAlwaysFreshStage(stage)) return false;
+      hasInitiatedSession = true;
+      return true;
+    };
 
     let handoff: HandoffArtifact | undefined;
     let worktreePath: string | undefined;
@@ -945,6 +1014,7 @@ export class PipelineRunner {
           }
         }
 
+        const isFirstResumableStageForMain = claimFirstResumableStage(stageType);
         let result = await executeStage({
           runId,
           issueId: sanitizedIssue.id,
@@ -957,6 +1027,8 @@ export class PipelineRunner {
           techStack,
           devcontainerSession,
           stageModels: config.stageModels,
+          agentSessionId: runAgentSessionId,
+          isFirstResumableStage: isFirstResumableStageForMain,
         });
 
         // Operator stop check (cancel path) — the AbortController inside the
@@ -1053,6 +1125,18 @@ export class PipelineRunner {
 
             const ralphContext = buildRalphContext(iteration, check, handoffResult.artifact);
 
+            // BEC-227 — RALPH re-implement runs inside the implement stage's
+            // main invocation, which already claimed the first-resumable slot
+            // if eligible. Re-claim is a no-op (returns false) so this call
+            // takes the `resume` shape when the flag is on.
+            const isFirstResumableStageForRalph = claimFirstResumableStage(stageType);
+            // BEC-227 — when this RALPH iteration is a resumed call (session
+            // active AND not the first resumable stage), the prior handoff is
+            // already in the agent's resumed SDK transcript. Suppress the
+            // `<previous-stage-context>` block to avoid duplicating that
+            // context as prompt input tokens.
+            const suppressRalphHandoff =
+              runAgentSessionId !== null && !isFirstResumableStageForRalph;
             result = await executeStage({
               runId,
               issueId: sanitizedIssue.id,
@@ -1066,6 +1150,9 @@ export class PipelineRunner {
               devcontainerSession,
               ralphContext,
               stageModels: config.stageModels,
+              agentSessionId: runAgentSessionId,
+              isFirstResumableStage: isFirstResumableStageForRalph,
+              suppressHandoff: suppressRalphHandoff,
             });
 
             // Accumulate each RALPH iteration's tokens
@@ -1108,6 +1195,9 @@ export class PipelineRunner {
               );
               run.stageRetries ??= {};
               run.stageRetries[stageType] = (run.stageRetries[stageType] ?? 0) + 1;
+              // BEC-227 — retry of an already-attempted stage. If the main
+              // invocation above claimed the session, this is a no-op.
+              const isFirstResumableStageForRetry = claimFirstResumableStage(stageType);
               result = await executeStage({
                 runId,
                 issueId: sanitizedIssue.id,
@@ -1120,6 +1210,8 @@ export class PipelineRunner {
                 techStack,
                 devcontainerSession,
                 stageModels: config.stageModels,
+                agentSessionId: runAgentSessionId,
+                isFirstResumableStage: isFirstResumableStageForRetry,
               });
               if (result.status === "completed") break;
             } else if (config.retry.strategy === "escalate") {
@@ -1184,6 +1276,16 @@ export class PipelineRunner {
         ) {
           runLog.info({ stage }, "validating handoff");
           let validationPassed = false;
+          // BEC-227 — runMode tells the validator whether this stage is the
+          // first resumable stage of the run (paranoia check still runs),
+          // a subsequent resumable stage (skip — agent inherits context),
+          // or a non-session run (validate as before).
+          const mainStageRunMode: ValidateRunMode =
+            runAgentSessionId === null
+              ? "fallback"
+              : isFirstResumableStageForMain
+                ? "first-resumed"
+                : "resumed";
           const validation = await validateHandoff(
             stage,
             {
@@ -1193,6 +1295,7 @@ export class PipelineRunner {
             sanitizedIssue,
             repoConfig,
             worktreePath,
+            mainStageRunMode,
           );
           validationPassed = validation.valid;
 
@@ -1206,6 +1309,9 @@ export class PipelineRunner {
             // Retry with the last known-good handoff (not the failed artifact)
             if (config.retry.strategy === "fix-and-retry") {
               for (let attempt = 0; attempt < config.retry.maxAttempts; attempt++) {
+                // BEC-227 — validation-failed retry. Same stage as the main
+                // invocation; claim is a no-op when the session is open.
+                const isFirstResumableStageForValRetry = claimFirstResumableStage(stageType);
                 result = await executeStage({
                   runId,
                   issueId: sanitizedIssue.id,
@@ -1218,8 +1324,19 @@ export class PipelineRunner {
                   techStack,
                   devcontainerSession,
                   stageModels: config.stageModels,
+                  agentSessionId: runAgentSessionId,
+                  isFirstResumableStage: isFirstResumableStageForValRetry,
                 });
                 if (result.status === "completed" && result.handoffArtifact) {
+                  // BEC-227 — `isFirstResumableStageForValRetry` reflects the
+                  // retry execution that just produced `result`. Same formula
+                  // as the main-loop validation.
+                  const valRetryRunMode: ValidateRunMode =
+                    runAgentSessionId === null
+                      ? "fallback"
+                      : isFirstResumableStageForValRetry
+                        ? "first-resumed"
+                        : "resumed";
                   const retryValidation = await validateHandoff(
                     stage,
                     {
@@ -1229,6 +1346,7 @@ export class PipelineRunner {
                     sanitizedIssue,
                     repoConfig,
                     worktreePath,
+                    valRetryRunMode,
                   );
                   if (retryValidation.valid) {
                     validationPassed = true;
@@ -1366,6 +1484,7 @@ export class PipelineRunner {
           for (const fixStage of fixStages) {
             runLog.info({ stage: fixStage, rfIteration }, "review-fix: executing stage");
 
+            const isFirstResumableStageForFix = claimFirstResumableStage(fixStage);
             const fixResult = await executeStage({
               runId,
               issueId: sanitizedIssue.id,
@@ -1378,6 +1497,8 @@ export class PipelineRunner {
               techStack,
               devcontainerSession,
               stageModels: config.stageModels,
+              agentSessionId: runAgentSessionId,
+              isFirstResumableStage: isFirstResumableStageForFix,
             });
 
             // BEC-134: track latest review stage_run id for fanout persistence.
@@ -1412,12 +1533,23 @@ export class PipelineRunner {
 
             // Validate handoff (same as main stage loop)
             if (fixResult.handoffArtifact && config.validateHandoffs === true) {
+              // BEC-227 — runMode derived from the review-fix executeStage
+              // claim. The review-fix loop runs after the main stage loop,
+              // so `isFirstResumableStageForFix` is virtually always false
+              // (session already initiated). Formula is the same.
+              const fixStageRunMode: ValidateRunMode =
+                runAgentSessionId === null
+                  ? "fallback"
+                  : isFirstResumableStageForFix
+                    ? "first-resumed"
+                    : "resumed";
               const validation = await validateHandoff(
                 fixStage,
                 { artifact: fixResult.handoffArtifact, structured: fixResult.handoffIsStructured ?? false },
                 sanitizedIssue,
                 repoConfig,
                 worktreePath,
+                fixStageRunMode,
               );
               if (!validation.valid) {
                 runLog.warn({ stage: fixStage, rfIteration, issues: validation.issues }, "review-fix: handoff validation failed");
@@ -1607,13 +1739,27 @@ export class PipelineRunner {
           // review stage_run row (from the main stage loop or review-fix loop).
           // PR doesn't exist yet here, so prNumber stays null; the runner posts
           // fanout PR comments after PR creation using `pendingFanoutRuns`.
+          //
+          // BEC-227 Task 11 — thread agent-session info through so the
+          // agentic deep-review provider can resume the per-run SDK session
+          // in its 3 parallel sub-agents. `claimFirstResumableStage` flips
+          // the runner-level latch exactly once across the whole run; deep
+          // review may be the first resumable consumer (e.g. when the main
+          // review stage was skipped or used a fresh model).
+          const isFirstResumableStageForDeepReview =
+            claimFirstResumableStage("review");
           const reviewCtx = {
             runId,
+            issueId: sanitizedIssue.id,
             stageRunId: lastReviewStageRunId,
             workdir: worktreePath,
             handoff,
             baseRef: repoConfig.defaultBranch ?? "main",
             prNumber: null,
+            agentSessionId: runAgentSessionId,
+            isFirstResumableStage: isFirstResumableStageForDeepReview,
+            reviewModel: config.stageModels?.["review"],
+            db: this.db as AnyDb,
           };
           const reviewResult = await runReviewProviders(reviewCtx, {
             env: drPass === 1 ? process.env : ({} as NodeJS.ProcessEnv),
@@ -1682,6 +1828,7 @@ export class PipelineRunner {
           const deepReviewContext = buildDeepReviewContext(drPass, deepFindingsForContext, handoff);
           runLog.info({ drPass }, "deep review: re-running implement stage");
 
+          const isFirstResumableStageForDrImpl = claimFirstResumableStage("implement");
           const drImplementResult = await executeStage({
             runId,
             issueId: sanitizedIssue.id,
@@ -1695,6 +1842,8 @@ export class PipelineRunner {
             devcontainerSession,
             ralphContext: deepReviewContext,
             stageModels: config.stageModels,
+            agentSessionId: runAgentSessionId,
+            isFirstResumableStage: isFirstResumableStageForDrImpl,
           });
 
           run.totalInputTokens += drImplementResult.inputTokens;
@@ -1725,6 +1874,7 @@ export class PipelineRunner {
 
           // Re-run review stage to verify fixes
           runLog.info({ drPass }, "deep review: re-running review stage");
+          const isFirstResumableStageForDrReview = claimFirstResumableStage("review");
           const drReviewResult = await executeStage({
             runId,
             issueId: sanitizedIssue.id,
@@ -1737,6 +1887,8 @@ export class PipelineRunner {
             techStack,
             devcontainerSession,
             stageModels: config.stageModels,
+            agentSessionId: runAgentSessionId,
+            isFirstResumableStage: isFirstResumableStageForDrReview,
           });
 
           // BEC-134: refresh latest review stage_run id for any subsequent
@@ -2150,6 +2302,7 @@ export class PipelineRunner {
           } else {
             runLog.warn("push queue: rebase conflicts detected, running implement pass to resolve");
 
+            const isFirstResumableStageForResolve = claimFirstResumableStage("implement");
             const resolveResult = await executeStage({
               runId,
               issueId: sanitizedIssue.id,
@@ -2163,6 +2316,8 @@ export class PipelineRunner {
               devcontainerSession,
               mergeConflictContext: { defaultBranch: repoConfig.defaultBranch },
               stageModels: config.stageModels,
+              agentSessionId: runAgentSessionId,
+              isFirstResumableStage: isFirstResumableStageForResolve,
             });
 
             run.totalInputTokens += resolveResult.inputTokens;
