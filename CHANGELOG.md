@@ -406,7 +406,8 @@ Bumps:
 - **`deploy/CLAUDE_AUTH.md`** ([#248](https://github.com/JonB32/urateam/pull/248)) — new guide covering the three Claude auth paths (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` via `claude setup-token`, and the local CLI session) with a recommendation matrix. Surfaces the long-lived programmatic OAuth token flow that we weren't previously documenting.
 - **CLAUDE.md additions** — new Claude Authentication subsection + new "Codebase Optimization Pass — In Flight" section enumerating BEC-187..207 and listing known limitations contributors should not compound.
 
-<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+### Fixed (OSS+)
+- **BEC-186** — Linear issues whose PRs were manually merged (or merged via GitHub's auto-merge-when-ready) no longer stay stuck in "In Review" indefinitely. The GitHub webhook handler now handles `pull_request.closed` with `merged: true`, looks up the originating pipeline run by PR URL or branch, marks `pipeline_runs.auto_merged = true` in the DB, and calls `notifier.onPRMerged()` which transitions the Linear issue to Done and posts a brief "PR merged" comment. Idempotent: replayed webhooks or re-deliveries are no-ops (the DB `auto_merged` flag gates the notification). The `notifier` is wired into `createGitHubWebhookHandler` from `server.ts` so all deployments with `githubWebhookSecret` configured pick this up automatically.
 ## [0.1.44] — 2026-05-11
 
 Bumps:

@@ -508,10 +508,11 @@ export interface Notifier {
   /** Called by sendDailyTokenSummary() with aggregated usage for a given date. */
   onDailyTokenSummary?(summary: DailyTokenSummary): Promise<void>;
   /**
-   * BEC-186: called when a PR is merged externally — either by a human via
-   * the GitHub UI or by GitHub's "auto-merge when ready" feature — after
-   * the pipeline has already completed. Implementations should transition
-   * the Linear issue to Done.
+   * BEC-186: called when a GitHub pull_request.closed webhook arrives with
+   * merged=true — either from a human merge via the GitHub UI or from
+   * GitHub's "auto-merge when ready" feature — after the pipeline has already
+   * completed. Transitions the Linear issue to Done and posts a "PR merged"
+   * comment.
    */
   onPRMerged?(run: PipelineRun): Promise<void>;
 }
