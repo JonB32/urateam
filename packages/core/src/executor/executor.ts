@@ -22,16 +22,7 @@ import type { DevcontainerSession } from "../repo/devcontainer.js";
 import { createLogger } from "../logger.js";
 import { consumeAgentStream, StagePreStreamStalledError, type StreamMessage } from "./agent-stream.js";
 import { isClaudeAuthValid, resolveClaudeAuth } from "./auth-check.js";
-import { isResumable } from "./session-policy.js";
-import { transcriptExists, defaultProjectsRoot } from "./session-store.js";
-// BEC-231 — `agentSessionMissingFallbackEvent` was previously fired from this
-// module when the resume branch found the JSONL absent. The new logic always
-// picks the right shape (`sessionId:` to create, `resume:` to continue) based
-// on actual disk state, so the missing-fallback path is unreachable from here.
-// The event type itself is kept in `audit/events.ts` for callers (e.g. the
-// session-volume boot check) that may need it.
-import { agentSessionResumedEvent } from "../audit/index.js";
-import { logAuditEvent } from "../audit/writer.js";
+import { resolveSessionOpts } from "./session-resolver.js";
 import { persistDecisionArtifact } from "../db/decisions-store.js";
 
 /**
@@ -263,96 +254,22 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       log.info({ plugins: tooling.plugins.map((p) => p.path) }, "plugins resolved");
     }
 
-    // BEC-227 — resolve per-stage session opts. The runner mints
-    // `agentSessionId` once per run and flips `isFirstResumableStage` on the
-    // first resumable stage. Combined with `isResumable(stage, model)` this
-    // chooses between three call shapes: create (`sessionId`), reuse
-    // (`resume`), or no session opts (always-fresh stages, non-Claude models,
-    // or flag off).
-    //
-    // Task 7 (this block): on the resume branch (non-first resumable stage),
-    // verify the SDK's JSONL transcript file actually exists on disk before
-    // setting `resume`. If the JSONL is missing (e.g. container tmpfs lost,
-    // operator wiped `~/.claude/projects`), the SDK would throw on resume.
-    // Drop to a fresh-session shape, emit a `missing_fallback` audit event,
-    // and warn so operators can spot loss patterns.
-    // BEC-231 — derive session-shape from on-disk state, not from an in-memory
-    // flag. The previous implementation passed `isFirstResumableStage` (set by
-    // the runner via `hasInitiatedSession`) and used it to pick `sessionId:` vs.
-    // `resume:`. That flag flipped after the first resumable stage's CALL —
-    // before the SDK had actually written a single message to the JSONL. If the
-    // first stage failed (auth 401, MCP init error, pre-stream stall) before
-    // the SDK got that far, every subsequent stage saw "session initiated; use
-    // resume:" and fell back when the JSONL didn't exist. The session was lost
-    // for the run's lifetime.
-    //
-    // Fix: ignore `isFirstResumableStage`. Check `transcriptExists()` on every
-    // stage. JSONL present → `resume:`. JSONL absent → `sessionId:` (which
-    // re-attempts creation; the SDK pre-assigns the UUID and writes a fresh
-    // transcript if there's nothing on disk).
-    //
-    // The `isFirstResumableStage` field is retained on `ExecuteStageContext`
-    // for backwards compatibility with callers that still pass it; the value
-    // is now ignored. Runner cleanup is in the companion runner.ts edit.
+    // BEC-228 — resolve per-stage session opts via shared helper (extracted
+    // from the ~70-line inline block that was duplicated in deep-review.ts).
+    // BEC-231 — session-resolver derives the shape from on-disk state, not
+    // from `isFirstResumableStage` (which flipped before the SDK wrote
+    // anything; first-stage failures left the session lost forever).
     const resolvedModel = context.stageModels?.[stage] ?? effectiveProfile.model;
     const agentSessionId = context.agentSessionId ?? null;
-    const wantsResume =
-      agentSessionId !== null &&
-      !!resolvedModel &&
-      isResumable(stage, resolvedModel);
-    let sessionOpts: { sessionId?: string; resume?: string } = {};
-    if (wantsResume) {
-      const exists = transcriptExists({
-        projectsRoot: defaultProjectsRoot(),
-        cwd: workdir,
-        sessionId: agentSessionId!,
-      });
-      if (exists) {
-        // Transcript present — resume the conversation.
-        sessionOpts = { resume: agentSessionId! };
-        try {
-          const { readFileSync } = await import("node:fs");
-          const tp = (await import("./session-store.js")).transcriptPath({
-            projectsRoot: defaultProjectsRoot(),
-            cwd: workdir,
-            sessionId: agentSessionId!,
-          });
-          const priorMessageCount = readFileSync(tp, "utf8")
-            .split("\n")
-            .filter((line) => line.trim().length > 0).length;
-          void logAuditEvent(
-            db,
-            agentSessionResumedEvent({
-              runId,
-              issueId,
-              sessionId: agentSessionId!,
-              stage,
-              priorMessageCount,
-            }),
-          );
-        } catch (err) {
-          log.warn(
-            { err: (err as Error).message },
-            "failed to count prior session messages — emitting resumed event with count=0",
-          );
-          void logAuditEvent(
-            db,
-            agentSessionResumedEvent({
-              runId,
-              issueId,
-              sessionId: agentSessionId!,
-              stage,
-              priorMessageCount: 0,
-            }),
-          );
-        }
-      } else {
-        // Transcript absent — (re-)create the session. The SDK pre-assigns
-        // our UUID; if a prior call started but failed before writing, this
-        // call gets a fresh shot at writing the first message.
-        sessionOpts = { sessionId: agentSessionId! };
-      }
-    }
+    const sessionOpts = await resolveSessionOpts({
+      stage,
+      model: resolvedModel,
+      agentSessionId,
+      workdir,
+      runId,
+      issueId,
+      db,
+    });
 
     const messages = query({
       prompt,
