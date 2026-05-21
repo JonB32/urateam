@@ -136,6 +136,17 @@ export interface ExecuteStageContext {
    * iterations creates a useful audit trail. Defaults to 0.
    */
   iteration?: number;
+  /**
+   * BEC-227 Phase 4 / Track B. When set, replaces the prompt that
+   * `assemblePrompt()` + RALPH-context + devcontainer-context would
+   * produce. Used by the surgical-review-fix path: the resumed agent
+   * already has full context in its SDK transcript, so we send only the
+   * focused findings-plus-prior-decisions prompt. Always combine with
+   * `suppressHandoff: true` for clarity — the override skips the existing
+   * prompt entirely; suppressing the handoff doc-string is logically
+   * redundant but makes the call-site intent explicit.
+   */
+  promptOverride?: string;
 }
 
 export async function executeStage(
@@ -196,6 +207,13 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
   // Append RALPH context if this is a re-run with gap analysis
   if (context.ralphContext) {
     prompt += `\n\n${context.ralphContext}`;
+  }
+
+  // BEC-227 Phase 4 / Track B — `promptOverride` replaces the assembled prompt
+  // entirely. Used by the surgical-review-fix path; the resumed SDK session
+  // already carries all upstream context.
+  if (context.promptOverride) {
+    prompt = context.promptOverride;
   }
 
   await db.insert(stageRuns).values({
