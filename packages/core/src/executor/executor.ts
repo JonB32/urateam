@@ -23,6 +23,7 @@ import { createLogger } from "../logger.js";
 import { consumeAgentStream, StagePreStreamStalledError, type StreamMessage } from "./agent-stream.js";
 import { isClaudeAuthValid, resolveClaudeAuth } from "./auth-check.js";
 import { resolveSessionOpts } from "./session-resolver.js";
+import { persistDecisionArtifact } from "../db/decisions-store.js";
 
 /**
  * BEC-183: wall-clock stage timeouts. Independent of the in-stream watchdog
@@ -116,6 +117,27 @@ export interface ExecuteStageContext {
    * confusing the model with duplicated context. Defaults to `false`.
    */
   suppressHandoff?: boolean;
+  /**
+   * BEC-227 Phase 4 / Track D. RALPH iteration index (0 = initial implement,
+   * 1..N = re-implement after RALPH gap check) used as the persistence
+   * iteration column for `pipeline_run_decisions`. Other implement-stage
+   * re-entries (e.g. review-fix loop) may pass their own iteration index
+   * when relevant. Purely informational; Track B's surgical-review-fix
+   * path reads only the highest-iteration row, but stages logging different
+   * iterations creates a useful audit trail. Defaults to 0.
+   */
+  iteration?: number;
+  /**
+   * BEC-227 Phase 4 / Track B. When set, replaces the prompt that
+   * `assemblePrompt()` + RALPH-context + devcontainer-context would
+   * produce. Used by the surgical-review-fix path: the resumed agent
+   * already has full context in its SDK transcript, so we send only the
+   * focused findings-plus-prior-decisions prompt. Always combine with
+   * `suppressHandoff: true` for clarity — the override skips the existing
+   * prompt entirely; suppressing the handoff doc-string is logically
+   * redundant but makes the call-site intent explicit.
+   */
+  promptOverride?: string;
 }
 
 export async function executeStage(
@@ -178,6 +200,13 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
     prompt += `\n\n${context.ralphContext}`;
   }
 
+  // BEC-227 Phase 4 / Track B — `promptOverride` replaces the assembled prompt
+  // entirely. Used by the surgical-review-fix path; the resumed SDK session
+  // already carries all upstream context.
+  if (context.promptOverride) {
+    prompt = context.promptOverride;
+  }
+
   await db.insert(stageRuns).values({
     id: stageRunId,
     pipelineRunId: runId,
@@ -227,14 +256,15 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
 
     // BEC-228 — resolve per-stage session opts via shared helper (extracted
     // from the ~70-line inline block that was duplicated in deep-review.ts).
+    // BEC-231 — session-resolver derives the shape from on-disk state, not
+    // from `isFirstResumableStage` (which flipped before the SDK wrote
+    // anything; first-stage failures left the session lost forever).
     const resolvedModel = context.stageModels?.[stage] ?? effectiveProfile.model;
     const agentSessionId = context.agentSessionId ?? null;
-    const isFirstResumableStage = context.isFirstResumableStage ?? false;
     const sessionOpts = await resolveSessionOpts({
       stage,
       model: resolvedModel,
       agentSessionId,
-      isFirstResumableStage,
       workdir,
       runId,
       issueId,
@@ -359,6 +389,25 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       workdir,
       `origin/${repoConfig.defaultBranch}`,
     );
+
+    // BEC-227 Phase 4 / Track D — persist the agent's decision artifact when
+    // the implement stage emitted one. Fire-and-forget; persistDecisionArtifact
+    // already swallows errors internally (best-effort by design), but we still
+    // wrap in try/catch to defend against an unexpected throw outside the
+    // helper's contract. Only implement-stage emits decisions — other stages'
+    // outputs aren't shaped for this artifact.
+    if (stage === "implement" && handoffResult.decisions) {
+      try {
+        await persistDecisionArtifact(db, {
+          pipelineRunId: runId,
+          iteration: context.iteration ?? 0,
+          stage: "implement",
+          payload: handoffResult.decisions,
+        });
+      } catch (err) {
+        log.warn({ err }, "persistDecisionArtifact threw despite internal swallow — ignoring");
+      }
+    }
 
     await db
       .update(stageRuns)

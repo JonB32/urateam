@@ -28,6 +28,50 @@ notes call out when a change affects only a single package.
 - **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
 - **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
 
+## [0.1.69] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.54 → 0.1.55
+- `@urateam/cli`: 0.1.56 → 0.1.57
+- `@urateam/dashboard`: 0.1.54 → 0.1.55
+- `create-urateam`: 0.1.57 → 0.1.58
+
+### Fixed
+- **Dogfood container: install `bash` + set `SHELL=/bin/bash`** (#351, BEC-234): two-line Dockerfile change. The Alpine base image ships only `/bin/sh` (busybox) and leaves `SHELL` empty. The Claude Agent SDK's "no suitable shell" check uses `process.env.SHELL` to decide whether to run Bash tool calls, and refuses to invoke any when it's empty. Effect: **every Bash tool call across every pipeline run silently failed** — agents ran on Read/Edit/Grep only, couldn't run tests, builds, git inspection, or any shell-mediated work. Discovered by auditing the BEC-231 run `Mvl1OtDQKbrHQMgGkwenS` JSONL transcript: 11/11 Bash attempts errored with "No suitable shell found ...", including `npx vitest`, `git status`, `git log`, `pnpm build`. The agent compensated with inspection-only verification (no real test execution), almost certainly contributing to several historical "Reached maximum number of turns" failures on the currently-circuit-broken issues. After this lands, the next pipeline run's transcript should show successful Bash tool results.
+
+## [0.1.68] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.53 → 0.1.54
+- `@urateam/cli`: 0.1.55 → 0.1.56
+- `@urateam/dashboard`: 0.1.53 → 0.1.54
+- `create-urateam`: 0.1.56 → 0.1.57
+
+### Changed
+- **Agent session continuity: Phase 3 — default ON** (#349, BEC-227): the Phase 2 dogfood soak verified session resume works end-to-end (with the BEC-231 lazy-creation fix in v0.1.66 and the BEC-232 path-encoding fix in v0.1.67). Observable signal from BEC-232's run: 1 `agent_session_created` + 3 `agent_session_resumed` events across implement/review/implement stages, `priorMessageCount: 35` on the first resume — full continuity, no synthetic handoff blob. This release flips the default from opt-in to opt-out. The new env var is `URATEAM_DISABLE_AGENT_SESSION_RESUME=true` (strict equality, matching BEC-218 precedent). The Phase-1/2 var `URATEAM_ENABLE_AGENT_SESSION_RESUME` is ignored — operators with it set in their `.env` see no behavior change since the new default is on; operators who want the legacy handoff path can set `URATEAM_DISABLE_AGENT_SESSION_RESUME=true`.
+
+## [0.1.67] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.52 → 0.1.53
+- `@urateam/cli`: 0.1.54 → 0.1.55
+- `@urateam/dashboard`: 0.1.52 → 0.1.53
+- `create-urateam`: 0.1.55 → 0.1.56
+
+### Fixed
+- **Agent session continuity: encodeCwd path encoding** (#346, BEC-232): one-line fix to `session-store.ts:encodeCwd()`. The Claude Agent SDK writes JSONL transcripts to a directory whose name is the cwd with ALL path separators (including the leading `/`) replaced with `-` — producing a LEADING-DASH directory like `-home-ura-data-runs-<run>-worktree`. The previous urateam implementation stripped the leading `/` before replacing, producing `home-...` (no leading dash). `transcriptExists()` therefore looked at the wrong path and returned false for every absolute cwd, making the BEC-231 lazy-creation fix (v0.1.66) effectively moot — every BEC-227 session-resume attempt fell back to legacy handoff despite the JSONLs being correctly written by the SDK. Verified on the dogfood instance with 268KB transcript files present at the leading-dash paths. Combined with v0.1.66, this completes the BEC-227 session-resume wiring; post-deploy the next pipeline run should produce ≥1 `pipeline.agent_session_resumed` audit event.
+
+## [0.1.66] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.51 → 0.1.52
+- `@urateam/cli`: 0.1.53 → 0.1.54
+- `@urateam/dashboard`: 0.1.51 → 0.1.52
+- `create-urateam`: 0.1.54 → 0.1.55
+
+### Fixed
+- **Agent session continuity: lazy session creation** (#343, BEC-231): the BEC-227 Phase 1 implementation used an in-memory `hasInitiatedSession` flag that flipped after the first resumable stage's CALL, regardless of whether the SDK actually wrote any JSONL message. When stage 1 failed before any SDK message (the auth 401 hit during Phase 2 soak, MCP init failure, pre-stream stall, container SIGTERM), every subsequent stage tried `query({ resume: sessionId })`, found the JSONL absent, and dropped to legacy fresh-session-no-opts. The session was lost for the run's lifetime — confirmed on BEC-228 with **1** `agent_session_created`, **8** `agent_session_missing_fallback`, **0** `agent_session_resumed` events. Fix: `executeStage()` now derives the session shape from `transcriptExists()` on every entry (JSONL present → `resume:`; JSONL absent → `sessionId:` to create or retry creation). The `isFirstResumableStage` field stays on `ExecuteStageContext` for backwards compat but its value is now ignored. The `missing_fallback` audit event is no longer emitted from the executor; the new logic always picks the correct shape based on on-disk state. New `session-lazy-creation.test.ts` covers both directions (false flag + missing JSONL → create; true flag + present JSONL → resume).
+
 ## [0.1.65] — 2026-05-20
 
 Bumps:
@@ -362,7 +406,8 @@ Bumps:
 - **`deploy/CLAUDE_AUTH.md`** ([#248](https://github.com/JonB32/urateam/pull/248)) — new guide covering the three Claude auth paths (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` via `claude setup-token`, and the local CLI session) with a recommendation matrix. Surfaces the long-lived programmatic OAuth token flow that we weren't previously documenting.
 - **CLAUDE.md additions** — new Claude Authentication subsection + new "Codebase Optimization Pass — In Flight" section enumerating BEC-187..207 and listing known limitations contributors should not compound.
 
-<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+### Fixed (OSS+)
+- **BEC-186** — Linear issues whose PRs were manually merged (or merged via GitHub's auto-merge-when-ready) no longer stay stuck in "In Review" indefinitely. The GitHub webhook handler now handles `pull_request.closed` with `merged: true`, looks up the originating pipeline run by PR URL or branch, marks `pipeline_runs.auto_merged = true` in the DB, and calls `notifier.onPRMerged()` which transitions the Linear issue to Done and posts a brief "PR merged" comment. Idempotent: replayed webhooks or re-deliveries are no-ops (the DB `auto_merged` flag gates the notification). The `notifier` is wired into `createGitHubWebhookHandler` from `server.ts` so all deployments with `githubWebhookSecret` configured pick this up automatically.
 ## [0.1.44] — 2026-05-11
 
 Bumps:

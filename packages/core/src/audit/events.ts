@@ -976,6 +976,35 @@ export function agentSessionResumedEvent(args: {
 }
 
 /**
+ * BEC-227 Phase 4 / Track B. The review-fix loop's branch decision — was
+ * the surgical path taken (resume + findings + decisions prompt) or the
+ * legacy path (full implement-template re-run)? Always emitted, even on
+ * the legacy path, so operators can audit fallback rates.
+ */
+export function surgicalReviewFixEvent(args: {
+  runId: string;
+  issueId: string;
+  path: "surgical" | "legacy";
+  findingsCount: number;
+  decisionPayloadBytes: number;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.surgical_review_fix",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      runId: args.runId,
+      issueId: args.issueId,
+      path: args.path,
+      findingsCount: args.findingsCount,
+      decisionPayloadBytes: args.decisionPayloadBytes,
+    },
+  });
+}
+
+/**
  * BEC-227 — a stage attempted to resume the per-run session but the
  * underlying JSONL was missing, unreadable, or the SDK rejected the resume.
  * The runner fell back to a fresh session for this stage. `reason` captures

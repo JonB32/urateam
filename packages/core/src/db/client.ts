@@ -156,6 +156,16 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
   -- BEC-187: hot-path index — kept in sync with migration files.
   CREATE INDEX IF NOT EXISTS idx_pm_approvals_issue_id ON pm_approvals(issue_id);
 
+  CREATE TABLE IF NOT EXISTS pipeline_run_decisions (
+    id TEXT PRIMARY KEY,
+    pipeline_run_id TEXT NOT NULL REFERENCES pipeline_runs(id),
+    iteration INTEGER NOT NULL,
+    stage TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at ${ts} NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_pipeline_run_decisions_run ON pipeline_run_decisions(pipeline_run_id, iteration);
+
   CREATE TABLE IF NOT EXISTS active_work (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL UNIQUE,

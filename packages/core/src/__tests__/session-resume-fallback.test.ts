@@ -1,18 +1,22 @@
 /**
- * Tests for BEC-227 — Task 7:
- * JSONL-exists pre-check on the resume path of `executeStage()`.
+ * Tests for BEC-227 Task 7, AS UPDATED BY BEC-231 (lazy session creation).
  *
- * Scenario covered:
- *  - When `agentSessionId` is set and `isFirstResumableStage=false` BUT the
- *    SDK transcript JSONL file does NOT exist on disk for the (cwd, sessionId)
- *    tuple, the executor must:
- *      1. Drop the resume option (call shape is fresh: no `sessionId`, no `resume`)
- *      2. Emit the `pipeline.agent_session_missing_fallback` audit event with
- *         `reason: "jsonl-not-found"`
- *      3. Log a warning
+ * Original BEC-227 design (T7): when `isFirstResumableStage=false` AND the
+ * JSONL is missing, drop to fresh-session shape (no opts) + emit
+ * `missing_fallback` audit event. The bug: the in-memory `hasInitiatedSession`
+ * flag flipped after the first stage's CALL, not after the SDK actually wrote
+ * the JSONL. If the first stage failed (auth 401, etc.) before writing, every
+ * later stage thought "session initiated; use resume:" but the JSONL didn't
+ * exist, so they all dropped to fresh-session-with-no-opts — losing the
+ * session permanently for the run's lifetime.
  *
- * The SDK `query` and `logAuditEvent` are mocked, and `transcriptExists` is
- * forced to return `false` so this test does not depend on the host filesystem.
+ * BEC-231 fix: derive the shape from on-disk state, not from the in-memory
+ * flag. JSONL present → `resume:`. JSONL absent → `sessionId:` (retries
+ * creation). The `missing_fallback` audit event is no longer emitted from
+ * the executor — the new logic always picks the right shape.
+ *
+ * This test now verifies the new behavior: missing JSONL → SDK call shape
+ * is `{ sessionId: <uuid> }` (the create/retry path), NOT empty opts.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -42,6 +46,7 @@ vi.mock("../executor/extract-handoff.js", () => ({
       tokenBudget: { contextTokensUsed: 0, recommendedMaxTurns: 1 },
     },
     structured: true,
+    decisions: null,
   }),
 }));
 
@@ -118,7 +123,7 @@ function makeMinimalStream() {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-describe("executeStage — session resume fallback (BEC-227, Task 7)", () => {
+describe("executeStage — lazy session creation when JSONL absent (BEC-231 update of BEC-227 T7)", () => {
   let db: Db;
 
   beforeEach(async () => {
@@ -128,38 +133,45 @@ describe("executeStage — session resume fallback (BEC-227, Task 7)", () => {
     logAuditEventMock.mockResolvedValue(undefined);
   });
 
-  it("transcript missing → falls back to fresh session and emits missing_fallback audit event", async () => {
+  it("transcript missing → retries session creation (sessionId set), does NOT emit missing_fallback (BEC-231)", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     (query as any).mockReturnValue(makeMinimalStream());
 
-    await seedPipelineRun(db, "run-fallback-t7");
+    await seedPipelineRun(db, "run-bec231-retry-create");
 
+    // Even though the caller passes isFirstResumableStage=false (the old
+    // pre-BEC-231 callers do this for non-first stages), the new logic checks
+    // transcriptExists() and routes to sessionId: when it returns false.
     await executeStage({
-      runId: "run-fallback-t7",
+      runId: "run-bec231-retry-create",
       issueId: testIssue.id,
       stage: "implement",
       sanitizedIssue: testIssue,
       repoConfig: testRepoConfig,
-      workdir: "/nonexistent/path/bec227-t7",
+      workdir: "/nonexistent/path/bec231",
       db,
-      agentSessionId: "uuid-nonexistent",
-      isFirstResumableStage: false,
+      agentSessionId: "uuid-bec231-recreate",
+      isFirstResumableStage: false, // ← ignored under BEC-231
     });
 
-    // SDK call shape: no resume, no sessionId (fresh)
     expect(query).toHaveBeenCalledOnce();
     const opts = (query as any).mock.calls[0][0].options;
+    // BEC-231: when JSONL is absent, we (re-)create with sessionId: rather
+    // than dropping to legacy fresh-session shape.
+    expect(opts.sessionId).toBe("uuid-bec231-recreate");
     expect(opts.resume).toBeUndefined();
-    expect(opts.sessionId).toBeUndefined();
 
-    // Audit event emitted with jsonl-not-found reason
+    // BEC-231: missing_fallback audit event is no longer emitted from the
+    // executor — the new logic always picks the right shape.
     const fallbackCall = logAuditEventMock.mock.calls.find(
       (call: any[]) => call[1]?.eventType === "pipeline.agent_session_missing_fallback",
     );
-    expect(fallbackCall).toBeDefined();
-    expect(fallbackCall![1].payload.reason).toBe("jsonl-not-found");
-    expect(fallbackCall![1].payload.sessionId).toBe("uuid-nonexistent");
-    expect(fallbackCall![1].payload.runId).toBe("run-fallback-t7");
-    expect(fallbackCall![1].payload.issueId).toBe(testIssue.id);
+    expect(fallbackCall).toBeUndefined();
+
+    // resumed event is also not emitted (we're creating, not resuming).
+    const resumedCall = logAuditEventMock.mock.calls.find(
+      (call: any[]) => call[1]?.eventType === "pipeline.agent_session_resumed",
+    );
+    expect(resumedCall).toBeUndefined();
   });
 });

@@ -40,6 +40,7 @@ import {
   consumeApprovalRow,
   getMaxAttemptCountForReason,
   tryFileQaGapIssue,
+  clearFailureRowsForSha,
   MAX_QA_RETRY_ATTEMPTS,
 } from "./release-helpers.js";
 import type { SlackPoster, SlackDedupState } from "./release-helpers.js";
@@ -287,9 +288,11 @@ export async function tick(ctx: TickContext): Promise<void> {
     let finalReason = result.reason;
 
     if (result.qaActionNeeded?.reason === "qa_needs_trigger") {
-      // Look up the highest attempt count across all qa_needs_trigger rows for this
-      // (branch, sha) pair. Using MAX instead of ORDER BY + LIMIT 1 to be stable
-      // when multiple rows share the same decidedAt timestamp.
+      // BEC-146: read the most-recent row's attemptCount (ORDER BY decidedAt DESC LIMIT 1)
+      // rather than MAX(attemptCount) across all rows for this (branch, sha) pair.
+      // Using MAX caused false permanent skips: after a successful dispatch reset
+      // attemptCount to 0, the MAX query still returned the old high-water mark
+      // from earlier failure rows, causing the next failure to immediately escalate.
       attemptCount = await getMaxAttemptCountForReason(
         db, repoUrl, branch, "qa_needs_trigger", state.headSha,
       );
@@ -302,6 +305,10 @@ export async function tick(ctx: TickContext): Promise<void> {
         inputs: config.triggers.qaCheck!.workflowInputs,
       });
       if (dispatch.kind === "ok") {
+        // BEC-146: clear prior failure rows for this SHA so MAX(attemptCount)
+        // naturally returns 0 if the run subsequently fails and we re-enter
+        // the dispatch path on a later tick.
+        await clearFailureRowsForSha(db, repoUrl, branch, "qa_needs_trigger", state.headSha);
         attemptCount = 0; // reset on successful dispatch
         qaRunId = dispatch.runId;
         qaRunSha = state.headSha;
@@ -323,11 +330,17 @@ export async function tick(ctx: TickContext): Promise<void> {
         finalReason = "qa_dispatch_error";
         attemptCount = 99; // permanent skip — workflow misconfigured, retrying won't help
       } else if (dispatch.kind === "dispatch_pending") {
-        // GitHub eventual-consistency window. Don't count against retry budget; next tick
-        // will re-evaluate and the run should be findable by then.
-        // Tag with qaRunSha so the per-SHA retry counter query can find these rows.
+        // GitHub eventual-consistency window. The HTTP dispatch DID succeed (204 OK), so
+        // reset the retry counter to 0 — a successful dispatch is not a failure.
+        // BEC-146: clear prior failure rows for this SHA so MAX(attemptCount) returns 0
+        // for subsequent ticks. Without this, old dispatch_error rows (attemptCount=1,2)
+        // would cause MAX to keep returning their high-water mark and the next failure
+        // would immediately escalate to qa_dispatch_error, bypassing the retry budget.
+        await clearFailureRowsForSha(db, repoUrl, branch, "qa_needs_trigger", state.headSha);
+        attemptCount = 0;
+        // Tag with qaRunSha so the per-SHA retry counter query can find this row.
         qaRunSha = state.headSha;
-        // attemptCount stays as-is; finalReason stays as "qa_needs_trigger" for next tick to retry.
+        // finalReason stays as "qa_needs_trigger" for next tick to retry.
       } else {
         // dispatch_error — increment attempt counter.
         // Tag with qaRunSha so the per-SHA retry counter query can find these rows.

@@ -276,12 +276,10 @@ async function runSubAgent(
     // operators can spot per-sub-agent resume patterns in the audit log.
     const resolvedModel = sessionOptsCtx.model ?? DEEP_REVIEW_MODEL;
     const agentSessionId = sessionOptsCtx.agentSessionId ?? null;
-    const isFirstResumableStage = sessionOptsCtx.isFirstResumableStage ?? false;
     const sessionOpts = await resolveSessionOpts({
       stage: `${DEEP_REVIEW_STAGE_LABEL}:${agentName}`,
       model: resolvedModel,
       agentSessionId,
-      isFirstResumableStage,
       workdir,
       runId: sessionOptsCtx.runId,
       issueId: sessionOptsCtx.issueId,

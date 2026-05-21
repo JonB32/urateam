@@ -10,7 +10,7 @@
  *   - maybePostSlack              — post to Slack with 24-hour same-reason dedup
  *   - persistDecision             — write a release_decisions row
  *   - consumeApprovalRow          — mark the most-recent fresh approval as consumed
- *   - getMaxAttemptCountForReason — query the highest attempt count for a (repo, branch, reason) triple
+ *   - getMaxAttemptCountForReason — query the attempt count from the most-recent row for a (repo, branch, reason) triple
  *   - tryFileQaGapIssue           — file a QA gap issue via Linear and handle transient errors
  */
 import { and, desc, eq, isNull, max } from "drizzle-orm";
@@ -167,8 +167,16 @@ export async function consumeApprovalRow(
 /**
  * Query the highest `attemptCount` stored for a given `(repoUrl, branch, reason)` triple.
  *
- * Uses `MAX(attemptCount)` rather than `ORDER BY + LIMIT 1` to be stable when
- * multiple rows share the same `decidedAt` timestamp (e.g. rapid consecutive ticks).
+ * Uses `MAX(attemptCount)` rather than `ORDER BY decidedAt DESC + LIMIT 1` to be stable
+ * when multiple rows share the same `decidedAt` timestamp (e.g. rapid consecutive ticks
+ * within the same second — `crossTimestamp` stores SQLite epoch with second resolution).
+ *
+ * BEC-146: the original ORDER BY+LIMIT version was non-deterministic on timestamp ties
+ * and caused two regressions: (a) reset row sometimes missed → false escalation, (b)
+ * latest failure row sometimes missed → escalation never fires when it should. The
+ * counter-reset behavior on `dispatch_pending` is now handled by `clearFailureRowsForSha`
+ * (called from release-tick.ts before persisting the reset row), which removes prior
+ * failure rows so MAX naturally returns 0 after a reset.
  *
  * @param db        - Database client.
  * @param repoUrl   - Repository URL.
@@ -203,6 +211,32 @@ export async function getMaxAttemptCountForReason(
           ),
     );
   return rows?.[0]?.maxAttempts ?? 0;
+}
+
+/**
+ * BEC-146: clear prior QA-retry failure rows for a (repoUrl, branch, qaRunSha) so that
+ * after a successful dispatch (or `dispatch_pending` — HTTP 204 succeeded but listWorkflowRuns
+ * hasn't seen the run yet) the retry counter naturally starts from 0 again.
+ *
+ * The audit log (`audit_events`) retains the full history; `releaseDecisions` is
+ * working state for retry tracking and dedup, not the historical record.
+ */
+export async function clearFailureRowsForSha(
+  db: AnyDb,
+  repoUrl: string,
+  branch: string,
+  reason: string,
+  qaRunSha: string,
+): Promise<void> {
+  await (db as any).delete(releaseDecisions).where(
+    and(
+      eq(releaseDecisions.repoUrl, repoUrl),
+      eq(releaseDecisions.branch, branch),
+      eq(releaseDecisions.reason, reason),
+      eq(releaseDecisions.qaRunSha, qaRunSha),
+      isNull(releaseDecisions.qaRunId),
+    ),
+  );
 }
 
 /**

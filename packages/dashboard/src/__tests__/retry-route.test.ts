@@ -47,6 +47,11 @@ function appWith(
 }
 
 describe("POST /runs/:id/retry", () => {
+  beforeEach(async () => {
+    // Ensure license is not set before the unlicensed test runs
+    await restoreLicense();
+  });
+
   it("unlicensed → 404 even for valid retry requests", async () => {
     // Do NOT install enterprise license
     const runner = { resume: vi.fn(), start: vi.fn() };
@@ -68,7 +73,7 @@ describe("POST /runs/:id/retry", () => {
       expect(res.status).toBe(403);
     });
 
-    it("operator → 302 redirect, runner.resume called, audit event written", async () => {
+    it("operator → 302 redirect, runner.resume called with issueId, audit event written", async () => {
       // Give the run a resumePayload so runner.resume is called (not start).
       await db
         .update(pipelineRuns)
@@ -81,7 +86,8 @@ describe("POST /runs/:id/retry", () => {
       const app = appWith("operator", runner);
       const res = await app.request("/runs/run_1/retry", { method: "POST" });
       expect(res.status).toBe(302);
-      expect(runner.resume).toHaveBeenCalledWith("run_1");
+      // retryRun must pass issueId ("BEC-42"), not the run primary key ("run_1")
+      expect(runner.resume).toHaveBeenCalledWith("BEC-42");
       // Give fire-and-forget logAuditEvent a chance to flush
       await new Promise((r) => setTimeout(r, 50));
       const events = await db.select().from(auditEvents);
@@ -90,6 +96,37 @@ describe("POST /runs/:id/retry", () => {
           typeof e.payload === "string" ? JSON.parse(e.payload) : e.payload;
         return (
           e.eventType === "dashboard.manual_action" && p.action === "retry_run"
+        );
+      });
+      expect(retry).toBeDefined();
+    });
+
+    it("operator retrying a retriable run → 302, runner.resume called with issueId", async () => {
+      await db
+        .update(pipelineRuns)
+        .set({
+          status: "retriable",
+          resumePayload: JSON.stringify({ stageIndex: 2 }),
+        })
+        .where(eq(pipelineRuns.id, "run_1"));
+      const runner = {
+        resume: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(),
+      };
+      const app = appWith("operator", runner);
+      const res = await app.request("/runs/run_1/retry", { method: "POST" });
+      expect(res.status).toBe(302);
+      expect(runner.resume).toHaveBeenCalledWith("BEC-42");
+      // Audit event must fire for retriable retries too
+      await new Promise((r) => setTimeout(r, 50));
+      const events = await db.select().from(auditEvents);
+      const retry = events.find((e: any) => {
+        const p =
+          typeof e.payload === "string" ? JSON.parse(e.payload) : e.payload;
+        return (
+          e.eventType === "dashboard.manual_action" &&
+          p.action === "retry_run" &&
+          p.previousStatus === "retriable"
         );
       });
       expect(retry).toBeDefined();
@@ -110,7 +147,7 @@ describe("POST /runs/:id/retry", () => {
       expect(runner.resume).not.toHaveBeenCalled();
     });
 
-    it("admin → 302, runner.resume called (with resumePayload)", async () => {
+    it("admin → 302, runner.resume called with issueId (with resumePayload)", async () => {
       await db
         .update(pipelineRuns)
         .set({ resumePayload: JSON.stringify({ stageIndex: 1 }) })
@@ -122,7 +159,7 @@ describe("POST /runs/:id/retry", () => {
       const app = appWith("admin", runner);
       const res = await app.request("/runs/run_1/retry", { method: "POST" });
       expect(res.status).toBe(302);
-      expect(runner.resume).toHaveBeenCalled();
+      expect(runner.resume).toHaveBeenCalledWith("BEC-42");
     });
 
     it("operator retrying a completed run → 409", async () => {
@@ -160,7 +197,7 @@ describe("POST /runs/:id/retry", () => {
       expect(res.status).toBe(200);
       expect(res.headers.get("HX-Redirect")).toBe("/runs/run_1");
       expect(res.headers.get("Location")).toBeNull();
-      expect(runner.resume).toHaveBeenCalledWith("run_1");
+      expect(runner.resume).toHaveBeenCalledWith("BEC-42");
     });
   });
 });

@@ -57,6 +57,7 @@ function makeHandoffResult(
   return {
     artifact: makeHandoff(overrides),
     structured,
+    decisions: null,
   };
 }
 

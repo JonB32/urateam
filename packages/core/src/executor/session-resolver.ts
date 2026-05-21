@@ -14,10 +14,7 @@ import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import { isResumable } from "./session-policy.js";
 import { transcriptExists, defaultProjectsRoot, transcriptPath } from "./session-store.js";
-import {
-  agentSessionMissingFallbackEvent,
-  agentSessionResumedEvent,
-} from "../audit/index.js";
+import { agentSessionResumedEvent } from "../audit/index.js";
 import { logAuditEvent } from "../audit/writer.js";
 import { createLogger } from "../logger.js";
 import type { AnyDb } from "../db/client.js";
@@ -43,11 +40,6 @@ export interface ResolveSessionOptsParams {
   model: string | undefined;
   /** Per-run SDK session UUID, or `null` when the feature flag is off. */
   agentSessionId: string | null;
-  /**
-   * True only on the first resumable stage of the run. Determines whether
-   * to use `sessionId` (create) vs `resume` (reuse) in the SDK call.
-   */
-  isFirstResumableStage: boolean;
   /** Worktree path — used to locate the JSONL transcript file. */
   workdir: string;
   /** Required (with `issueId` and `db`) to emit audit events. Optional to
@@ -60,25 +52,28 @@ export interface ResolveSessionOptsParams {
 /**
  * Resolves the SDK session options for a single stage or sub-agent call.
  *
+ * BEC-231 — the shape is derived from ON-DISK state (transcriptExists), not
+ * from an in-memory `isFirstResumableStage` flag. The flag flipped before the
+ * SDK had written a single message, so first-stage failures (auth 401, MCP
+ * init error, pre-stream stall) left every subsequent stage stuck on the
+ * `resume:` shape pointing at a non-existent JSONL — session lost for the
+ * run's lifetime.
+ *
  * Returns one of three shapes:
- *  - `{ sessionId }` — first resumable stage; creates the SDK session.
- *  - `{ resume }`   — subsequent resumable stage with transcript on disk.
- *  - `{}`           — always-fresh stage, non-Claude model, flag off, or
- *                     transcript missing (fallback + audit event).
+ *  - `{ sessionId }` — transcript absent: create (or re-create after failure)
+ *                       the SDK session. The SDK pre-assigns our UUID and
+ *                       writes a fresh transcript when the first message lands.
+ *  - `{ resume }`   — transcript on disk: continue the existing conversation.
+ *  - `{}`           — always-fresh stage, non-Claude model, or flag off.
  */
 export async function resolveSessionOpts(
   params: ResolveSessionOptsParams,
 ): Promise<{ sessionId?: string; resume?: string }> {
-  const { stage, model, agentSessionId, isFirstResumableStage, workdir, runId, issueId, db } =
-    params;
+  const { stage, model, agentSessionId, workdir, runId, issueId, db } = params;
 
   // Early returns narrow agentSessionId to string and model to string for the rest of the function.
   if (agentSessionId === null || !model || !isResumable(stage, model)) {
     return {};
-  }
-
-  if (isFirstResumableStage) {
-    return { sessionId: agentSessionId };
   }
 
   const exists = transcriptExists({
@@ -87,42 +82,38 @@ export async function resolveSessionOpts(
     sessionId: agentSessionId,
   });
 
-  if (exists) {
-    if (db && runId && issueId) {
-      try {
-        const tp = transcriptPath({
-          projectsRoot: defaultProjectsRoot(),
-          cwd: workdir,
-          sessionId: agentSessionId,
-        });
-        const priorMessageCount = await countLines(tp);
-        void logAuditEvent(
-          db,
-          agentSessionResumedEvent({ runId, issueId, sessionId: agentSessionId, stage, priorMessageCount }),
-        );
-      } catch (err) {
-        log.warn(
-          { err: (err as Error).message, stage },
-          "failed to count prior session messages — emitting resumed event with count=0",
-        );
-        void logAuditEvent(
-          db,
-          agentSessionResumedEvent({ runId, issueId, sessionId: agentSessionId, stage, priorMessageCount: 0 }),
-        );
-      }
-    }
-    return { resume: agentSessionId };
-  } else {
-    if (db && runId && issueId) {
+  if (!exists) {
+    // Transcript absent — (re-)create the session. Could be the first
+    // resumable stage of a fresh run, OR a re-attempt after the first stage
+    // failed before writing anything to disk. Either way, `sessionId:` is
+    // the right shape.
+    return { sessionId: agentSessionId };
+  }
+
+  // Transcript present — resume the conversation. Emit the audit event with
+  // the prior message count so operators can see how much context inherited.
+  if (db && runId && issueId) {
+    try {
+      const tp = transcriptPath({
+        projectsRoot: defaultProjectsRoot(),
+        cwd: workdir,
+        sessionId: agentSessionId,
+      });
+      const priorMessageCount = await countLines(tp);
       void logAuditEvent(
         db,
-        agentSessionMissingFallbackEvent({ runId, issueId, sessionId: agentSessionId, reason: "jsonl-not-found" }),
+        agentSessionResumedEvent({ runId, issueId, sessionId: agentSessionId, stage, priorMessageCount }),
+      );
+    } catch (err) {
+      log.warn(
+        { err: (err as Error).message, stage },
+        "failed to count prior session messages — emitting resumed event with count=0",
+      );
+      void logAuditEvent(
+        db,
+        agentSessionResumedEvent({ runId, issueId, sessionId: agentSessionId, stage, priorMessageCount: 0 }),
       );
     }
-    log.warn(
-      { runId, sessionId: agentSessionId, stage, cwd: workdir },
-      "agent session JSONL missing — falling back to fresh session",
-    );
-    return {};
   }
+  return { resume: agentSessionId };
 }

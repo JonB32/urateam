@@ -41,20 +41,25 @@ vi.mock("../executor/extract-handoff.js", () => ({
       tokenBudget: { contextTokensUsed: 0, recommendedMaxTurns: 1 },
     },
     structured: true,
+    decisions: null,
   }),
 }));
 
-// BEC-227 Task 7: the resume branch now checks JSONL existence on disk before
-// setting `resume`. These tests fixture a `/tmp/bec227-workdir` cwd that does
-// not actually have a transcript, so we force the existence check to return
-// true to keep the resume call shape exercised here.
+// BEC-227 Task 7 / BEC-231 update: under BEC-231 the executor derives the
+// session shape from `transcriptExists()` on every stage entry, not from an
+// in-memory `isFirstResumableStage` flag. Mock the helper so each test below
+// can set the return value to exercise either the "first/create" path
+// (false → `sessionId:`) or the "resume" path (true → `resume:`).
+const { transcriptExistsMock } = vi.hoisted(() => ({
+  transcriptExistsMock: vi.fn().mockReturnValue(true),
+}));
 vi.mock("../executor/session-store.js", async () => {
   const real = await vi.importActual<typeof import("../executor/session-store.js")>(
     "../executor/session-store.js",
   );
   return {
     ...real,
-    transcriptExists: vi.fn().mockReturnValue(true),
+    transcriptExists: transcriptExistsMock,
   };
 });
 
@@ -117,9 +122,12 @@ describe("executeStage — agent session options (BEC-227, Task 6)", () => {
     vi.clearAllMocks();
   });
 
-  it("first resumable stage: passes options.sessionId, NOT options.resume", async () => {
+  it("first resumable stage (JSONL absent): passes options.sessionId, NOT options.resume", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     (query as any).mockReturnValue(makeMinimalStream());
+    // BEC-231: "first resumable stage" semantically means "JSONL doesn't
+    // exist yet" — the create path. Force the existence check to false.
+    transcriptExistsMock.mockReturnValue(false);
 
     await seedPipelineRun(db, "run-first-resumable");
 
@@ -132,7 +140,7 @@ describe("executeStage — agent session options (BEC-227, Task 6)", () => {
       workdir: "/tmp/bec227-workdir",
       db,
       agentSessionId: "uuid-1",
-      isFirstResumableStage: true,
+      isFirstResumableStage: true, // BEC-231: ignored; transcriptExists drives the shape
     });
 
     expect(query).toHaveBeenCalledOnce();
@@ -147,9 +155,11 @@ describe("executeStage — agent session options (BEC-227, Task 6)", () => {
     });
   });
 
-  it("non-first resumable stage: passes options.resume, NOT options.sessionId", async () => {
+  it("non-first resumable stage (JSONL present): passes options.resume, NOT options.sessionId", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     (query as any).mockReturnValue(makeMinimalStream());
+    // BEC-231: JSONL is present on disk → resume path
+    transcriptExistsMock.mockReturnValue(true);
 
     await seedPipelineRun(db, "run-non-first-resumable");
 

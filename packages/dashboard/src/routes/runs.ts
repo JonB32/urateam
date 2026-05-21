@@ -130,7 +130,8 @@ export function createRunsRouter(
           "Linear or trigger a fresh pipeline run from the webhook.",
       );
     }
-    await runner!.resume(id);
+    // Pass issueId, not the run primary key — runner.resume() queries by issueId.
+    await runner!.resume(run.issueId);
   }
 
   /**
