@@ -33,17 +33,21 @@ import { createAuthMonitor, type AuthMonitor } from "../executor/auth-monitor.js
 const log = createLogger({ component: "PmAgent:scheduler" });
 
 /**
- * BEC-184: parse the PM_AGENT_STUCK_RUN_AGE_MIN env var (default 60 min).
+ * BEC-184 / BEC-227: parse the PM_AGENT_STUCK_RUN_AGE_MIN env var (default 120 min).
  * Controls how long a 'running' run must be active before it's treated as a
  * zombie and eligible for stuck-issue recovery.
  *
- * Uses an isNaN guard so '0' doesn't silently fall back to 60 via a falsy
- * `||` check; clamps to ≥1 min to prevent overly-aggressive recovery on
+ * Default raised from 60 → 120 in BEC-227 — real RALPH-iterated implementation
+ * work routinely takes 60-90 min, and the prior 60-min default produced
+ * false-positive reaps on healthy long runs.
+ *
+ * Uses an isNaN guard so '0' doesn't silently fall back via a falsy `||`
+ * check; clamps to ≥1 min to prevent overly-aggressive recovery on
  * mis-configured deployments.
  */
-function parseStuckRunAgeMinutes(envValue: string | undefined): number {
+export function parseStuckRunAgeMinutes(envValue: string | undefined): number {
   const parsed = parseInt(envValue ?? "", 10);
-  return isNaN(parsed) ? 60 : Math.max(1, parsed);
+  return isNaN(parsed) ? 120 : Math.max(1, parsed);
 }
 
 export interface PmSchedulerDeps {

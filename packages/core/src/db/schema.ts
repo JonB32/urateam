@@ -48,6 +48,8 @@ export const pipelineRuns = sqliteTable("pipeline_runs", {
   issueTitle: text("issue_title").notNull(),
   pipelineKey: text("pipeline_key").notNull(),
   repoUrl: text("repo_url").notNull(),
+  /** BEC-227 — Claude Agent SDK session UUID; null = legacy/flag-off, populated = SDK session UUID for resumption. */
+  agentSessionId: text("agent_session_id"),
   branch: text("branch"),
   status: text("status").notNull(),
   startedAt: crossTimestamp("started_at")
@@ -148,6 +150,22 @@ export const pmApprovals = sqliteTable("pm_approvals", {
     .$defaultFn(() => new Date()),
   resolvedAt: crossTimestamp("resolved_at"),
 });
+
+/**
+ * BEC-227 Phase 4 / Track D. Persists the `<decisions>` JSON block emitted
+ * by the implement agent at the end of each implement turn. Multiple rows
+ * per pipeline_run when RALPH iterates (one per (iteration, stage)).
+ */
+export const pipelineRunDecisions = sqliteTable("pipeline_run_decisions", {
+  id: text("id").primaryKey(),
+  pipelineRunId: text("pipeline_run_id").notNull().references(() => pipelineRuns.id),
+  iteration: integer("iteration").notNull(),
+  stage: text("stage").notNull(),
+  payload: text("payload").notNull(),
+  createdAt: crossTimestamp("created_at").notNull(),
+});
+
+export type PipelineRunDecisionRow = typeof pipelineRunDecisions.$inferSelect;
 
 /**
  * Dedup table for budget threshold alerts. One row per (date, scope, threshold)

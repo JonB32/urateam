@@ -1,4 +1,4 @@
-import { and, eq, isNull, desc, gte } from "drizzle-orm";
+import { and, eq, isNull, desc, gte, isNotNull, type SQL } from "drizzle-orm";
 import type { Octokit } from "@octokit/rest";
 import type { AnyDb } from "../db/client.js";
 import { releaseApprovals, releaseDecisions } from "../db/schema.js";
@@ -7,6 +7,29 @@ import { parseRepoFromUrl } from "./github.js";
 import type { CollectedState } from "./types.js";
 
 const log = createLogger({ component: "ReleaseManager:state" });
+
+/** Matches semantic version tags with an optional leading "v" (e.g. "v1.2.3" or "1.2.3"). */
+const VERSION_TAG_PATTERN = /^v?\d+\.\d+\.\d+$/;
+
+/**
+ * Shared helper: fetch the latest single row from `releaseDecisions` filtered by
+ * repo/branch plus an additional predicate, ordered by `decidedAt DESC`.
+ * Both the `lastFired` and `latestQaRun` queries share this structure.
+ */
+async function queryLatestReleaseDecision(
+  db: AnyDb,
+  repoUrl: string,
+  branch: string,
+  additionalCondition: SQL<unknown> | undefined,
+  selectFields: Record<string, unknown>,
+): Promise<unknown[]> {
+  return (db as any)
+    .select(selectFields)
+    .from(releaseDecisions)
+    .where(and(eq(releaseDecisions.repoUrl, repoUrl), eq(releaseDecisions.branch, branch), additionalCondition))
+    .orderBy(desc(releaseDecisions.decidedAt))
+    .limit(1);
+}
 
 export interface CollectStateInput {
   octokit: Octokit;
@@ -36,13 +59,14 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
   let lastTagAt: Date | null = null;
   try {
     const tagsRes = await octokit.repos.listTags({ owner, repo, per_page: 30 });
-    const candidate = (tagsRes as any).data.find((t: any) => /^v?\d+\.\d+\.\d+$/.test(t.name));
+    const candidate = (tagsRes as any).data.find((t: any) => VERSION_TAG_PATTERN.test(t.name));
     if (candidate) {
       lastTag = candidate.name.startsWith("v") ? candidate.name : `v${candidate.name}`;
       lastTagSha = candidate.commit.sha;
       // Tag commit timestamp — use the commit's committer date for a wall-clock anchor.
       const commit = await octokit.repos.getCommit({ owner, repo, ref: lastTagSha! });
-      const dateStr = (commit as any).data?.commit?.committer?.date ?? (commit as any).data?.commit?.author?.date;
+      const commitData = (commit as any).data?.commit;
+      const dateStr = commitData?.committer?.date ?? commitData?.author?.date;
       lastTagAt = dateStr ? new Date(dateStr) : null;
     }
   } catch (err) {
@@ -51,18 +75,13 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
 
   // 3. Manual-tag detection: did any release_decisions with kind="fire" record
   //    a fired_tag, and does the current latest tag differ from it?
-  const lastFired = await (db as any)
-    .select({ firedTag: releaseDecisions.firedTag })
-    .from(releaseDecisions)
-    .where(
-      and(
-        eq(releaseDecisions.repoUrl, repoUrl),
-        eq(releaseDecisions.branch, branch),
-        eq(releaseDecisions.decision, "fire"),
-      ),
-    )
-    .orderBy(desc(releaseDecisions.decidedAt))
-    .limit(1);
+  const lastFired = await queryLatestReleaseDecision(
+    db,
+    repoUrl,
+    branch,
+    eq(releaseDecisions.decision, "fire"),
+    { firedTag: releaseDecisions.firedTag },
+  ) as Array<{ firedTag: string | null }>;
   const lastFiredTag: string | null = lastFired?.[0]?.firedTag ?? null;
   const manualTagDetected = lastTag !== null && lastFiredTag !== null && lastTag !== lastFiredTag;
 
@@ -147,23 +166,20 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
   const freshApprovalApprover = hasFreshApproval ? freshRows[0].approvedBy : null;
 
   // 7. BEC-136: most-recent in-flight QA run snapshot.
-  const qaRunRows = await (db as any)
-    .select({
+  // Uses the partial index idx_release_decisions_qa_run_id (WHERE qa_run_id IS NOT NULL)
+  // created in migrations 010_qa_run_columns.sql (SQLite) / 011_qa_run_columns.sql (Postgres).
+  const latestQaRows = await queryLatestReleaseDecision(
+    db,
+    repoUrl,
+    branch,
+    isNotNull(releaseDecisions.qaRunId),
+    {
       qaRunId: releaseDecisions.qaRunId,
       qaRunSha: releaseDecisions.qaRunSha,
       decidedAt: releaseDecisions.decidedAt,
-    })
-    .from(releaseDecisions)
-    .where(
-      and(
-        eq(releaseDecisions.repoUrl, repoUrl),
-        eq(releaseDecisions.branch, branch),
-      ),
-    )
-    .orderBy(desc(releaseDecisions.decidedAt))
-    .limit(20);
-  // Take the most recent row that actually has a qa_run_id.
-  const latestQaRow = qaRunRows.find((r: any) => r.qaRunId !== null && r.qaRunId !== undefined);
+    },
+  ) as Array<{ qaRunId: number | null; qaRunSha: string | null; decidedAt: Date | number }>;
+  const latestQaRow = latestQaRows[0] ?? null;
   const qaRun = latestQaRow
     ? {
         runId: latestQaRow.qaRunId as number,

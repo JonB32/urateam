@@ -385,6 +385,7 @@ describe("PipelineRunner", () => {
       repoConfig: mockRepoConfig,
       sanitizedIssue: mockSanitizedIssue,
       worktreePath: "/tmp/test-agent-runs/nonexistent-worktree-path-xyz-abc",
+      currentStageIndex: 1,
     });
 
     await (db as any).insert(pipelineRuns).values({
@@ -432,6 +433,7 @@ describe("PipelineRunner", () => {
       repoConfig: mockRepoConfig,
       sanitizedIssue: mockSanitizedIssue,
       worktreePath,
+      currentStageIndex: 1,
     });
 
     await (db as any).insert(pipelineRuns).values({
@@ -460,6 +462,141 @@ describe("PipelineRunner", () => {
     // Cleanup
     const { rm } = await import("node:fs/promises");
     await rm(worktreePath, { recursive: true, force: true });
+  });
+
+  // ---------------------------------------------------------------------------
+  // resume() — ResumePayloadSchema Zod validation (BEC-192)
+  // ---------------------------------------------------------------------------
+
+  it("resume() marks run as failed when resumePayload is missing handoff field", async () => {
+    const { pipelineRuns } = await import("../db/schema.js");
+    const { eq } = await import("drizzle-orm");
+    const runId = "run-missing-handoff-1";
+
+    // Omit the required `handoff` field to trigger schema validation failure
+    const badPayload = JSON.stringify({
+      pipelineConfig: mockPipelineConfig,
+      repoConfig: mockRepoConfig,
+      sanitizedIssue: mockSanitizedIssue,
+      worktreePath: "/tmp/test-agent-runs/some-worktree",
+      currentStageIndex: 1,
+      // handoff is intentionally omitted
+    });
+
+    await (db as any).insert(pipelineRuns).values({
+      id: runId,
+      issueId: "TEAM-210",
+      issueTitle: "Missing handoff field",
+      pipelineKey: "auto-implement",
+      repoUrl: "https://github.com/test/repo.git",
+      branch: "agent/TEAM-210-missing-handoff",
+      status: "paused",
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      currentStageIndex: 1,
+      resumePayload: badPayload,
+    });
+
+    await runner.resume("TEAM-210");
+
+    const rows = await (db as any)
+      .select()
+      .from(pipelineRuns)
+      .where(eq(pipelineRuns.id, runId));
+
+    expect(rows[0].status).toBe("failed");
+    // Error message should mention the field that failed validation
+    expect(rows[0].errorMessage).toMatch(/Invalid resume payload structure/);
+    expect(rows[0].errorMessage).toMatch(/handoff/);
+    expect(runner.isActive("TEAM-210")).toBe(false);
+  });
+
+  it("resume() marks run as failed when currentStageIndex is a string instead of number", async () => {
+    const { pipelineRuns } = await import("../db/schema.js");
+    const { eq } = await import("drizzle-orm");
+    const runId = "run-bad-stage-index-1";
+
+    // currentStageIndex must be a number; passing a string should fail Zod validation
+    const badPayload = JSON.stringify({
+      handoff: null,
+      pipelineConfig: mockPipelineConfig,
+      repoConfig: mockRepoConfig,
+      sanitizedIssue: mockSanitizedIssue,
+      worktreePath: "/tmp/test-agent-runs/some-worktree",
+      currentStageIndex: "not-a-number",  // wrong type: string instead of number
+    });
+
+    await (db as any).insert(pipelineRuns).values({
+      id: runId,
+      issueId: "TEAM-211",
+      issueTitle: "Bad currentStageIndex type",
+      pipelineKey: "auto-implement",
+      repoUrl: "https://github.com/test/repo.git",
+      branch: "agent/TEAM-211-bad-stage-index",
+      status: "paused",
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      currentStageIndex: 0,
+      resumePayload: badPayload,
+    });
+
+    await runner.resume("TEAM-211");
+
+    const rows = await (db as any)
+      .select()
+      .from(pipelineRuns)
+      .where(eq(pipelineRuns.id, runId));
+
+    expect(rows[0].status).toBe("failed");
+    expect(rows[0].errorMessage).toMatch(/Invalid resume payload structure/);
+    expect(rows[0].errorMessage).toMatch(/currentStageIndex/);
+    expect(runner.isActive("TEAM-211")).toBe(false);
+  });
+
+  it("resume() falls back to pausedRun.currentStageIndex when resumePayload omits the field (pre-BEC-192 BC)", async () => {
+    // Paused runs created before BEC-192 introduced currentStageIndex in the
+    // resume_payload JSON only have the field on the DB row. The runner must
+    // inject it from the row before parsing so those in-flight runs survive
+    // the deploy of this PR.
+    const { pipelineRuns } = await import("../db/schema.js");
+    const { eq } = await import("drizzle-orm");
+    const runId = "run-bc-stage-index-from-row";
+
+    // Pre-BEC-192 payload: NO currentStageIndex field.
+    const oldPayload = JSON.stringify({
+      handoff: null,
+      pipelineConfig: mockPipelineConfig,
+      repoConfig: mockRepoConfig,
+      sanitizedIssue: mockSanitizedIssue,
+      worktreePath: "/tmp/test-agent-runs/nonexistent-worktree-path-xyz-abc",
+    });
+
+    await (db as any).insert(pipelineRuns).values({
+      id: runId,
+      issueId: "TEAM-212",
+      issueTitle: "Pre-BEC-192 paused run",
+      pipelineKey: "auto-implement",
+      repoUrl: "https://github.com/test/repo.git",
+      branch: "agent/TEAM-212-old-paused",
+      status: "paused",
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      currentStageIndex: 1, // DB column has it; payload does not
+      resumePayload: oldPayload,
+    });
+
+    await runner.resume("TEAM-212");
+
+    const rows = await (db as any)
+      .select()
+      .from(pipelineRuns)
+      .where(eq(pipelineRuns.id, runId));
+
+    // Pre-BEC-192 payloads should NOT trigger schema-validation failure.
+    // The worktree-missing path will still fail the run (the path in the
+    // payload doesn't exist), but the failure must be about the worktree,
+    // not about an invalid resume payload structure.
+    expect(rows[0].errorMessage).not.toMatch(/Invalid resume payload structure/);
   });
 
   it("resume() handles in-memory active run (edge case: paused but still in activeRuns)", async () => {
