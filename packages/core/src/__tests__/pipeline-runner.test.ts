@@ -553,6 +553,52 @@ describe("PipelineRunner", () => {
     expect(runner.isActive("TEAM-211")).toBe(false);
   });
 
+  it("resume() falls back to pausedRun.currentStageIndex when resumePayload omits the field (pre-BEC-192 BC)", async () => {
+    // Paused runs created before BEC-192 introduced currentStageIndex in the
+    // resume_payload JSON only have the field on the DB row. The runner must
+    // inject it from the row before parsing so those in-flight runs survive
+    // the deploy of this PR.
+    const { pipelineRuns } = await import("../db/schema.js");
+    const { eq } = await import("drizzle-orm");
+    const runId = "run-bc-stage-index-from-row";
+
+    // Pre-BEC-192 payload: NO currentStageIndex field.
+    const oldPayload = JSON.stringify({
+      handoff: null,
+      pipelineConfig: mockPipelineConfig,
+      repoConfig: mockRepoConfig,
+      sanitizedIssue: mockSanitizedIssue,
+      worktreePath: "/tmp/test-agent-runs/nonexistent-worktree-path-xyz-abc",
+    });
+
+    await (db as any).insert(pipelineRuns).values({
+      id: runId,
+      issueId: "TEAM-212",
+      issueTitle: "Pre-BEC-192 paused run",
+      pipelineKey: "auto-implement",
+      repoUrl: "https://github.com/test/repo.git",
+      branch: "agent/TEAM-212-old-paused",
+      status: "paused",
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      currentStageIndex: 1, // DB column has it; payload does not
+      resumePayload: oldPayload,
+    });
+
+    await runner.resume("TEAM-212");
+
+    const rows = await (db as any)
+      .select()
+      .from(pipelineRuns)
+      .where(eq(pipelineRuns.id, runId));
+
+    // Pre-BEC-192 payloads should NOT trigger schema-validation failure.
+    // The worktree-missing path will still fail the run (the path in the
+    // payload doesn't exist), but the failure must be about the worktree,
+    // not about an invalid resume payload structure.
+    expect(rows[0].errorMessage).not.toMatch(/Invalid resume payload structure/);
+  });
+
   it("resume() handles in-memory active run (edge case: paused but still in activeRuns)", async () => {
     // Simulate the edge case where a run is in activeRuns but also has status "paused"
     // (e.g., pipeline paused via Linear webhook while activeRuns hasn't been cleaned up yet)

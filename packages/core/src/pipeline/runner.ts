@@ -417,9 +417,18 @@ export class PipelineRunner {
     // This replaces the former hand-rolled property-existence checks and catches
     // schema mismatches from older DB rows (e.g. missing handoff, wrong types)
     // before any git or executor operations run.
+    //
+    // BC: paused runs created before currentStageIndex was added to the payload
+    // schema (BEC-192) only have it on the DB row. Inject it from the DB column
+    // so those existing in-flight runs don't get falsely failed on first resume
+    // after deploy.
     let parsed: ReturnType<typeof ResumePayloadSchema.safeParse>;
     try {
-      parsed = ResumePayloadSchema.safeParse(JSON.parse(pausedRun.resumePayload));
+      const raw = JSON.parse(pausedRun.resumePayload) as Record<string, unknown>;
+      if (raw.currentStageIndex === undefined && pausedRun.currentStageIndex != null) {
+        raw.currentStageIndex = pausedRun.currentStageIndex;
+      }
+      parsed = ResumePayloadSchema.safeParse(raw);
     } catch {
       runLog.error("resume payload is invalid JSON — failing run");
       await db
@@ -435,7 +444,7 @@ export class PipelineRunner {
     }
 
     if (!parsed.success) {
-      const zodErrors = parsed.error.errors
+      const zodErrors = parsed.error.issues
         .map((e) => `${e.path.join(".") || "(root)"}: ${e.message}`)
         .join("; ");
       runLog.error({ zodErrors }, "resume payload failed schema validation — failing run");
