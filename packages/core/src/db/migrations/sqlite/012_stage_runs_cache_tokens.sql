@@ -1,6 +1,11 @@
--- 012_stage_runs_cache_tokens.sql
--- BEC: cache telemetry — capture prompt-cache token usage from the
--- Anthropic Agent SDK so we can measure hit-rate per stage.
-
-ALTER TABLE stage_runs ADD COLUMN cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE stage_runs ADD COLUMN cache_read_input_tokens INTEGER NOT NULL DEFAULT 0;
+-- BEC-149: This migration was renumbered to 013_stage_runs_cache_tokens to fix
+-- a duplicate prefix (012_qa_gap_issues and 012_stage_runs_cache_tokens shared
+-- prefix 012 after the initial BEC-149 rename pass).
+--
+-- This file is retained for git history only. The migrator skips it based on
+-- the SQLITE_MIGRATION_RENAMES map in migrator.ts, which also renames any
+-- existing "012_stage_runs_cache_tokens" entries in schema_migrations to
+-- "013_stage_runs_cache_tokens" so existing deployments do not re-run this
+-- migration.
+--
+-- Active migration: packages/core/src/db/migrations/sqlite/013_stage_runs_cache_tokens.sql

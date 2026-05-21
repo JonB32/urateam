@@ -82,6 +82,13 @@ export const SQLITE_MIGRATION_RENAMES: Record<string, string> = {
   "009_release_manager": "010_release_manager",
   "010_qa_run_columns": "011_qa_run_columns",
   "011_qa_gap_issues": "012_qa_gap_issues",
+  // BEC-149 follow-on: 3 migrations landed on main after the initial rename
+  // map was written and re-introduced prefix collisions (012_qa_gap_issues
+  // vs 012_stage_runs_cache_tokens, 013_missing_indexes vs 013_triage_results).
+  // Renumbering them keeps prefix-unique invariant intact.
+  "012_stage_runs_cache_tokens": "013_stage_runs_cache_tokens",
+  "013_missing_indexes": "014_missing_indexes",
+  "013_triage_results": "015_triage_results",
 };
 
 /**
@@ -95,6 +102,11 @@ export const POSTGRES_MIGRATION_RENAMES: Record<string, string> = {
   "010_release_manager": "011_release_manager",
   "011_qa_run_columns": "012_qa_run_columns",
   "012_qa_gap_issues": "013_qa_gap_issues",
+  // BEC-149 follow-on: 3 migrations landed on main after the initial rename
+  // map was written and re-introduced prefix collisions on 013.
+  "013_stage_runs_cache_tokens": "014_stage_runs_cache_tokens",
+  "014_missing_indexes": "015_missing_indexes",
+  "015_triage_results": "016_triage_results",
 };
 
 /**
