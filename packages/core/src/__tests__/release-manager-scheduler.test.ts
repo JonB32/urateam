@@ -469,24 +469,22 @@ describe("createReleaseManagerScheduler — qaCheck integration", () => {
       isLicensed: () => true, slack: undefined,
     });
 
-    await sched.tick(); // Tick 1: dispatch_error → attemptCount=1
-    await sched.tick(); // Tick 2: dispatch_error → attemptCount=2
-    await sched.tick(); // Tick 3: HTTP 204 OK but listWorkflowRuns=[] → dispatch_pending
-    await sched.tick(); // Tick 4: dispatch_error → BUG: MAX(1,2,2)=2 → 2+1=3 → qa_dispatch_error
+    await sched.tick(); // Tick 1: dispatch_error → row 1 (attemptCount=1)
+    await sched.tick(); // Tick 2: dispatch_error → row 2 (attemptCount=2)
+    await sched.tick(); // Tick 3: HTTP 204 OK → dispatch_pending. clearFailureRowsForSha
+                        //          removes rows 1+2, then writes the reset row.
+    await sched.tick(); // Tick 4: dispatch_error → row after reset (attemptCount=1)
 
+    // After the BEC-146 fix, the two pre-reset failure rows are cleared in tick 3
+    // by `clearFailureRowsForSha`, so only the reset row + the tick-4 failure remain.
+    // (Audit history is preserved in audit_events; releaseDecisions is working state.)
     const rows = await db.select().from(releaseDecisions).orderBy(releaseDecisions.decidedAt);
-    expect(rows).toHaveLength(4);
+    expect(rows).toHaveLength(2);
 
-    const row4 = rows[3];
-    // BUG: With the current code, row4.reason === "qa_dispatch_error" and
-    // row4.attemptCount === 3 because getMaxAttemptCountForReason returns MAX=2
-    // from old failure rows, ignoring that tick 3 was a successful dispatch.
-    //
-    // EXPECTED (after fix): row4.attemptCount === 1 because the counter should
-    // reset to 0 after the successful dispatch in tick 3, so the new failure
-    // starts counting from 1 and does NOT immediately escalate to permanent skip.
-    expect(row4.reason).not.toBe("qa_dispatch_error"); // FAILS due to BUG (actually "qa_dispatch_error")
-    expect(row4.attemptCount).toBe(1);                 // FAILS due to BUG (actually 3)
+    // The latest row (tick 4 failure) must NOT be the permanent-skip escalation.
+    const latest = rows[1];
+    expect(latest.reason).not.toBe("qa_dispatch_error");
+    expect(latest.attemptCount).toBe(1);
   });
 
   it("retry counter: 3 consecutive dispatch failures → permanent skip with qa_dispatch_error", async () => {
