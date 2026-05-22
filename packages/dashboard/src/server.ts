@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 import { Hono } from "hono";
 import { basicAuth } from "hono/basic-auth";
+import { HTTPException } from "hono/http-exception";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -64,8 +65,13 @@ export interface DashboardConfig {
   basePath?: string;
 }
 
-// Rate limiter constants
-const RATE_LIMIT_MAX = 10; // requests per window
+// Rate limiter constants.
+// The limiter counts FAILED-AUTH responses (HTTP 401) per IP — not total
+// requests. A legitimate operator clicking around the HTMX dashboard only
+// ever produces 200/3xx responses, so normal traversal never trips it. Only
+// repeated 401s (a brute-force attempt against basic-auth or the login flow)
+// accumulate toward the limit.
+const RATE_LIMIT_MAX = 10; // failed-auth (401) responses per window before 429
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
 
 export function createDashboard(config: DashboardConfig): Hono {
@@ -110,7 +116,17 @@ export function createDashboard(config: DashboardConfig): Hono {
     );
   });
 
-  // Rate limiting middleware — before auth to protect against brute-force
+  // Rate limiting middleware — brute-force protection.
+  //
+  // Counts only FAILED-AUTH (HTTP 401) responses per IP, not total requests.
+  // Normal dashboard traversal (page loads, static assets, HTMX partials —
+  // dozens of requests per click) returns 200/3xx and never increments the
+  // counter, so an operator is never rate-limited. A brute-force attempt
+  // (repeated bad basic-auth credentials, or repeated failed logins) produces
+  // a stream of 401s from one IP and trips the limit.
+  //
+  // basic-auth failures are thrown as HTTPException(401); RBAC failures are
+  // returned as a 401 response — both are detected below.
   app.use("*", async (c, next) => {
     const ip =
       c.req.header("x-forwarded-for") ||
@@ -119,16 +135,32 @@ export function createDashboard(config: DashboardConfig): Hono {
     const now = Date.now();
     const entry = rateLimitMap.get(ip);
 
-    if (entry && now - entry.windowStart < RATE_LIMIT_WINDOW_MS) {
-      entry.count++;
-      if (entry.count > RATE_LIMIT_MAX) {
-        return c.text("Too Many Requests", 429);
-      }
-    } else {
-      rateLimitMap.set(ip, { count: 1, windowStart: now });
+    // Block if this IP is already over the failed-auth threshold this window.
+    if (
+      entry &&
+      now - entry.windowStart < RATE_LIMIT_WINDOW_MS &&
+      entry.count > RATE_LIMIT_MAX
+    ) {
+      return c.text("Too Many Requests", 429);
     }
 
-    await next();
+    let authFailed = false;
+    try {
+      await next();
+      if (c.res.status === 401) authFailed = true;
+    } catch (err) {
+      if (err instanceof HTTPException && err.status === 401) authFailed = true;
+      throw err;
+    } finally {
+      if (authFailed) {
+        const e = rateLimitMap.get(ip);
+        if (e && now - e.windowStart < RATE_LIMIT_WINDOW_MS) {
+          e.count++;
+        } else {
+          rateLimitMap.set(ip, { count: 1, windowStart: now });
+        }
+      }
+    }
   });
 
   // CSRF / Origin validation for state-changing requests
