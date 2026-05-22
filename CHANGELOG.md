@@ -28,6 +28,33 @@ notes call out when a change affects only a single package.
 - **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
 - **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
 
+## [0.1.70] — 2026-05-22
+
+Bumps:
+- `@urateam/core`: 0.1.55 → 0.1.56
+- `@urateam/cli`: 0.1.57 → 0.1.58
+- `@urateam/dashboard`: 0.1.55 → 0.1.56
+- `create-urateam`: 0.1.58 → 0.1.59
+
+### Added
+- **BEC-227 Phase 4 — surgical review-fix + decision artifact** (#357). Implement agent emits a `<decisions>` block parsed to the new `pipeline_run_decisions` table; the review-fix loop resumes the per-run SDK session with a focused findings-plus-decisions prompt instead of re-running the full implement template. New audit event `pipeline.surgical_review_fix` (canonical count → 57).
+- **`auth-monitor` now detects `CLAUDE_CODE_OAUTH_TOKEN` expiry** (#362, BEC-237). The monitor previously skipped all env-var auth paths; it now probes whenever an OAuth token is set (only a bare `ANTHROPIC_API_KEY` static key is skipped), so `claude.auth_expired` fires with an `authMethod` discriminator.
+- **Slack `reactions:read` scope probe** (#361, BEC-238). `PmSlackNotifier.probeReactionsScope()` runs once at startup and logs an error if the scope is missing; per-tick `missing_scope` warnings are deduped.
+
+### Fixed
+- **Dashboard rate limiter counted all requests, not just failed auth** — normal HTMX traversal tripped "Too Many Requests" within a couple of clicks. Now counts only HTTP 401 responses per IP.
+- **`ura retry` silently no-op'd for `retriable` runs** (#353, BEC-229) — `runner.resume` now accepts both `paused` and `retriable`, and the dashboard retry route passes `issueId` (not the run PK).
+- **Push-queue rebase recovery** (#356, BEC-233) — aborts an in-progress rebase before the conflict-resolution implement pass, so the worktree HEAD is on the branch ref before auto-commits land.
+- **QA retry counter false escalation** (#335, BEC-146) — clears prior failure rows on dispatch reset so a successful dispatch genuinely resets the counter.
+- **Resume-payload validation** (#332, BEC-192) — replaces hand-rolled property checks with a Zod schema; pre-BEC-192 paused runs degrade gracefully.
+- **Linear stuck in "In Review" after manual PR merge** (#333, BEC-186) — `pull_request.closed` + `merged:true` now transitions the issue to Done.
+- **PM conflict detection blind to in-flight runs** (#363, BEC-239) — falls back to the run's worktree when its branch is not yet pushed.
+- **pnpm provisioned in the dogfood image** (BEC-240) — agents no longer fall back to `npm` and break the pnpm-workspace toolchain.
+- **QA Agent collectState partial-index query** (#338, BEC-145) and **migration prefix renumbering** (#334, BEC-149).
+
+### Chore
+- **`resolveSessionOpts` helper** (#342, BEC-228) extracted from `executor.ts` + `deep-review.ts`, reconciled with the BEC-231 on-disk session-shape logic.
+
 ## [0.1.69] — 2026-05-20
 
 Bumps:
