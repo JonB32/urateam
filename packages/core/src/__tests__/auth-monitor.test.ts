@@ -173,7 +173,10 @@ describe("runAuthMonitorCheck", () => {
       slackErrorChannel: "CERROR",
     }, SMALL_INTERVAL);
     expect(mockPostSlackMessage).toHaveBeenCalledTimes(1);
-    const [calledToken, calledPayload] = mockPostSlackMessage.mock.calls[0];
+    const [calledToken, calledPayload] = mockPostSlackMessage.mock.calls[0] as [
+      string,
+      { channel: string; text: string },
+    ];
     expect(calledToken).toBe("xoxb-bot-token");
     expect(calledPayload.channel).toBe("CERROR");
     // Alert text should mention setup-token, not claude login
@@ -208,7 +211,7 @@ describe("runAuthMonitorCheck", () => {
       db: fakeDb,
     }, SMALL_INTERVAL);
     expect(mockPostSlackMessage).toHaveBeenCalledTimes(1);
-    expect(mockPostSlackMessage.mock.calls[0][1].text).toContain("setup-token");
+    expect((mockPostSlackMessage.mock.calls[0][1] as { text: string }).text).toContain("setup-token");
     const [, calledEvent] = mockLogAuditEvent.mock.calls[0];
     expect(calledEvent.payload.authMethod).toBe("oauth-token");
   });
@@ -247,7 +250,7 @@ describe("runAuthMonitorCheck", () => {
       slackBotToken: "xoxb-test",
       slackErrorChannel: "CTEST",
     }, SMALL_INTERVAL);
-    const text = mockPostSlackMessage.mock.calls[0][1].text as string;
+    const text = (mockPostSlackMessage.mock.calls[0][1] as { text: string }).text;
     expect(text).toContain("claude login");
   });
 
