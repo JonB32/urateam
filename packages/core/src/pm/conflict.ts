@@ -4,6 +4,10 @@ import { createLogger } from "../logger.js";
 
 const log = createLogger({ component: "PmAgent:conflict" });
 
+function parseGitLines(output: string): string[] {
+  return output.split("\n").map((f) => f.trim()).filter(Boolean);
+}
+
 export interface ActiveRun {
   issueId: string;
   branch: string;
@@ -50,11 +54,7 @@ export async function getActiveFileMaps(
           ["diff", "--name-only", `origin/${defaultBranch}..origin/${run.branch}`],
           repoDir,
         );
-        const files = output
-          .split("\n")
-          .map((f) => f.trim())
-          .filter(Boolean);
-        fileMaps.set(run.issueId, new Set(files));
+        fileMaps.set(run.issueId, new Set(parseGitLines(output)));
       } catch (err) {
         log.warn({ issueId: run.issueId, branch: run.branch, err }, "git diff failed, treating as empty");
         fileMaps.set(run.issueId, new Set());
@@ -79,31 +79,30 @@ async function getWorktreeFiles(
 
   const files = new Set<string>();
 
-  // Committed changes on this branch since diverging from origin/defaultBranch.
-  try {
-    const committedOut = await execGit(
-      ["diff", "--name-only", `origin/${defaultBranch}...HEAD`],
-      run.worktreePath,
-    );
-    for (const f of committedOut.split("\n").map((l) => l.trim()).filter(Boolean)) {
+  // Run both git operations in parallel — they are independent reads.
+  const [diffResult, statusResult] = await Promise.allSettled([
+    execGit(["diff", "--name-only", `origin/${defaultBranch}...HEAD`], run.worktreePath),
+    execGit(["status", "--porcelain"], run.worktreePath),
+  ]);
+
+  if (diffResult.status === "fulfilled") {
+    for (const f of parseGitLines(diffResult.value)) {
       files.add(f);
     }
-  } catch (err) {
-    log.warn({ issueId: run.issueId, worktreePath: run.worktreePath, err }, "worktree diff failed, skipping committed files");
+  } else {
+    log.warn({ issueId: run.issueId, worktreePath: run.worktreePath, err: diffResult.reason }, "worktree diff failed, skipping committed files");
   }
 
-  // Uncommitted changes (staged and unstaged).
-  try {
-    const statusOut = await execGit(["status", "--porcelain"], run.worktreePath);
-    for (const line of statusOut.split("\n")) {
+  if (statusResult.status === "fulfilled") {
+    for (const line of statusResult.value.split("\n")) {
       if (line.length < 4) continue;
       const path = line.slice(3).trim();
       // Renamed files appear as "old -> new"; take the destination name.
       const parts = path.split(" -> ");
       files.add(parts[parts.length - 1]);
     }
-  } catch (err) {
-    log.warn({ issueId: run.issueId, worktreePath: run.worktreePath, err }, "worktree status failed, skipping uncommitted files");
+  } else {
+    log.warn({ issueId: run.issueId, worktreePath: run.worktreePath, err: statusResult.reason }, "worktree status failed, skipping uncommitted files");
   }
 
   return files;
