@@ -12,6 +12,7 @@ import {
   buildTriageV1Prompt,
   buildTriageV2Prompt,
   isV2Disabled,
+  parseHandWrittenACs,
 } from "./triage-prompt.js";
 import {
   renderTriageComment,
@@ -158,6 +159,14 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
           return result;
         }
 
+        // Pre-parse hand-written ACs from the issue description. When the
+        // operator has already written a `**Acceptance Criteria:**` section,
+        // we use those items verbatim so the triage result stays in sync with
+        // the description text that the implement-stage prompt also sees.
+        // When no pre-written ACs are found, fall back to Haiku generation.
+        const preSuppliedACs = parseHandWrittenACs(issue.description);
+        const hasPreSuppliedACs = preSuppliedACs.length > 0;
+
         // Tier 6a — pick v2 prompt by default; fall back to v1 when the
         // operator has set URATEAM_DISABLE_TRIAGE_V2=true. Reads env at
         // call time so flipping the var takes effect on the next PM tick
@@ -167,6 +176,7 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
           identifier: issue.identifier,
           title: issue.title,
           description: issue.description ?? "",
+          hasPreSuppliedACs,
         };
         const prompt = useV2
           ? buildTriageV2Prompt(promptInput, sanitize)
@@ -254,7 +264,11 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
         const teamId = team?.id;
         const backlogStateId = teamId ? stateMap.get(`${teamId}:Backlog`) : undefined;
 
-        const acceptanceCriteria: string[] = Array.isArray(parsed.acceptanceCriteria)
+        // Use pre-supplied ACs when the operator wrote them in the description;
+        // fall back to Haiku's generated list for fresh (no-AC) tickets.
+        const acceptanceCriteria: string[] = hasPreSuppliedACs
+          ? preSuppliedACs
+          : Array.isArray(parsed.acceptanceCriteria)
           ? parsed.acceptanceCriteria.filter((c: any) => typeof c === "string" && c.length > 0)
           : [];
 
