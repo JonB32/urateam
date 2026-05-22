@@ -38,6 +38,26 @@ function loadUserLevelEnv(): void {
   }
 }
 
+/**
+ * Call fn once at startup (awaited or fire-and-forget), then schedule it on a
+ * repeating interval. The interval is unref'd so it doesn't prevent process exit.
+ * Returns the handle so callers can clearInterval on shutdown.
+ */
+async function scheduleRepeatedly(
+  fn: () => Promise<void>,
+  intervalMs: number,
+  immediate: "await" | "void" = "void",
+): Promise<ReturnType<typeof setInterval>> {
+  if (immediate === "await") {
+    await fn();
+  } else {
+    void fn();
+  }
+  const handle = setInterval(() => void fn(), intervalMs);
+  handle.unref();
+  return handle;
+}
+
 export const startCommand = new Command("start")
   .description("Start production server (webhook + dashboard)")
   .option("--port <port>", "Webhook server port", "3000")
@@ -524,15 +544,12 @@ export const startCommand = new Command("start")
     const _parsedTtl = parseInt(process.env.WORKTREE_TTL_HOURS ?? "24", 10);
     const worktreeTtlHours = Number.isFinite(_parsedTtl) && _parsedTtl > 0 ? _parsedTtl : 24;
 
-    async function runCleanup() {
+    const cleanupInterval = await scheduleRepeatedly(async () => {
       const removed = await cleanupWorktrees(agentRunDir, worktreeTtlHours);
       if (removed.length > 0) {
         console.log(`Cleanup: removed ${removed.length} stale worktree(s)`);
       }
-    }
-    await runCleanup();
-    const cleanupInterval = setInterval(runCleanup, 60 * 60 * 1000);
-    cleanupInterval.unref();
+    }, 60 * 60 * 1000, "await");
 
     // --- Stale agent-branch sweep cron (BEC-174) ---
     // Sweeps `agent/*` branches on origin whose tip commit is older than
@@ -549,7 +566,7 @@ export const startCommand = new Command("start")
 
     // Compute repoUrls per-tick so hot-reloaded additions/removals are
     // picked up by the branch sweep without requiring a daemon restart.
-    async function runBranchSweepTick() {
+    const branchSweepInterval = await scheduleRepeatedly(async () => {
       const repoUrls = Object.values(config.repoConfigs).map(
         (r) => (r as { url: string }).url,
       );
@@ -563,13 +580,7 @@ export const startCommand = new Command("start")
       } catch (err) {
         console.error("Branch sweep tick failed:", (err as Error).message);
       }
-    }
-    void runBranchSweepTick();
-    const branchSweepInterval = setInterval(
-      () => void runBranchSweepTick(),
-      60 * 60 * 1000,
-    );
-    branchSweepInterval.unref();
+    }, 60 * 60 * 1000, "void");
 
     // --- PM Agent (opt-in) ---
     let pmInterval: ReturnType<typeof setInterval> | undefined;
@@ -612,12 +623,14 @@ export const startCommand = new Command("start")
       }
       const { createGitHubClient, createReleaseManagerScheduler, isFeatureLicensed,
         handleReleaseSubcommand, parseReleaseSubcommand } = await import("@urateam/core");
-      const rmOctokit = await createGitHubClient(github);
+      const [rmOctokit, linearSdk] = await Promise.all([
+        createGitHubClient(github),
+        rmConfig.triggers.qaCheck ? import("@linear/sdk") : Promise.resolve(null),
+      ]);
 
       let linearClient: import("@linear/sdk").LinearClient | undefined;
-      if (rmConfig.triggers.qaCheck) {
-        const { LinearClient } = await import("@linear/sdk");
-        linearClient = new LinearClient({ apiKey: process.env.LINEAR_API_KEY! });
+      if (rmConfig.triggers.qaCheck && linearSdk) {
+        linearClient = new linearSdk.LinearClient({ apiKey: process.env.LINEAR_API_KEY! });
       }
 
       rmScheduler = createReleaseManagerScheduler({
