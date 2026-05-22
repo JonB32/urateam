@@ -32,6 +32,11 @@ import { createAuthMonitor, type AuthMonitor } from "../executor/auth-monitor.js
 
 const log = createLogger({ component: "PmAgent:scheduler" });
 
+function captureTickError(tick: TickResult, key: string, err: unknown, msg: string): void {
+  log.error({ err }, msg);
+  tick.errors.push(`${key}: ${(err as Error).message}`);
+}
+
 /**
  * BEC-184 / BEC-227: parse the PM_AGENT_STUCK_RUN_AGE_MIN env var (default 120 min).
  * Controls how long a 'running' run must be active before it's treated as a
@@ -57,6 +62,8 @@ export interface PmSchedulerDeps {
   slackBotToken: string;
   repoCloneDir?: string;
   defaultBranch?: string;
+  /** Base directory where per-run worktrees are created. Defaults to $HOME/data/runs (matching runner default). */
+  agentRunDir?: string;
   runner?: {
     resume: (issueId: string) => Promise<void>;
     start: (issue: any, pipelineKey: string, pipelineConfig: any, repoConfig: any, sanitizedIssue: any) => Promise<void>;
@@ -175,8 +182,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
             ? await actions.evaluateBudget({ db, config })
             : await evaluateBudget({ db, config });
         } catch (err) {
-          log.error({ err }, "budget evaluation failed");
-          tick.errors.push(`budget: ${(err as Error).message}`);
+          captureTickError(tick, "budget", err, "budget evaluation failed");
           evaluation = {
             scopes: [],
             worstTier: "ok",
@@ -282,8 +288,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
             log.warn({ exhausted: recoveryResult.exhausted }, "retriable runs exhausted max retries");
           }
         } catch (err) {
-          log.error({ err }, "recovery sweep failed");
-          tick.errors.push(`recover: ${(err as Error).message}`);
+          captureTickError(tick, "recover", err, "recovery sweep failed");
         }
 
         // Fetch workflow states once per tick to avoid redundant Linear API round-trips
@@ -292,8 +297,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           try {
             stateMap = await resolveWorkflowStates(await getLinearClient(), config.teamIds);
           } catch (err) {
-            log.error({ err }, "resolveWorkflowStates failed");
-            tick.errors.push(`resolveWorkflowStates: ${(err as Error).message}`);
+            captureTickError(tick, "resolveWorkflowStates", err, "resolveWorkflowStates failed");
           }
         }
 
@@ -324,8 +328,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
               );
             }
           } catch (err) {
-            log.error({ err }, "stuck issue recovery sweep failed");
-            tick.errors.push(`recoverStuck: ${(err as Error).message}`);
+            captureTickError(tick, "recoverStuck", err, "stuck issue recovery sweep failed");
           }
         }
 
@@ -361,8 +364,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
               }
             }
           } catch (err) {
-            log.error({ err }, "startTodoIssues failed");
-            tick.errors.push(`startTodo: ${(err as Error).message}`);
+            captureTickError(tick, "startTodo", err, "startTodoIssues failed");
           }
         }
 
@@ -379,8 +381,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                 db,
               });
         } catch (err) {
-          log.error({ err }, "triage failed");
-          tick.errors.push(`triage: ${(err as Error).message}`);
+          captureTickError(tick, "triage", err, "triage failed");
         }
 
         try {
@@ -396,8 +397,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           tick.approvalsResolved = approvalResult.resolved;
           tick.approvalsPending = approvalResult.stillPending;
         } catch (err) {
-          log.error({ err }, "resolve approvals failed");
-          tick.errors.push(`resolveApprovals: ${(err as Error).message}`);
+          captureTickError(tick, "resolveApprovals", err, "resolve approvals failed");
         }
 
         if (isPmPaused()) {
@@ -410,30 +410,34 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
             if (actions) {
               tick.promoted = await actions.promoteReadyIssues({} as any);
             } else {
-              const activeRuns = await getActiveRunsFromDb(db);
+              const agentRunDir = deps.agentRunDir ?? join(homedir(), "data", "runs");
               const baseDir = deps.repoCloneDir ?? join(homedir(), "work", "repos");
               const defaultBranch = deps.defaultBranch ?? "main";
+              const { readdir, stat } = await import("node:fs/promises");
 
-              // Find the first cloned repo directory (runner clones to <repoCloneDir>/<slug>/)
-              let repoDir = baseDir;
-              try {
-                const { readdir, stat } = await import("node:fs/promises");
-                const entries = await readdir(baseDir);
-                const candidates = await Promise.all(
-                  entries.map(async (entry) => {
-                    const candidate = `${baseDir}/${entry}`;
-                    try {
-                      const s = await stat(`${candidate}/.git`);
-                      if (s.isDirectory()) return candidate;
-                    } catch { /* not a git repo */ }
-                    return null;
-                  }),
-                );
-                const found = candidates.find((c) => c !== null);
-                if (found) repoDir = found;
-              } catch {
-                log.warn("could not scan repoCloneDir for git repos");
-              }
+              // Fetch active runs from DB and scan for the first cloned repo dir in parallel.
+              const [activeRuns, repoDir] = await Promise.all([
+                getActiveRunsFromDb(db, agentRunDir),
+                (async () => {
+                  try {
+                    const entries = await readdir(baseDir);
+                    const candidates = await Promise.all(
+                      entries.map(async (entry) => {
+                        const candidate = `${baseDir}/${entry}`;
+                        try {
+                          const s = await stat(`${candidate}/.git`);
+                          if (s.isDirectory()) return candidate;
+                        } catch { /* not a git repo */ }
+                        return null;
+                      }),
+                    );
+                    return candidates.find((c) => c !== null) ?? baseDir;
+                  } catch {
+                    log.warn("could not scan repoCloneDir for git repos");
+                    return baseDir;
+                  }
+                })(),
+              ]);
 
               const fileMaps = await getActiveFileMaps({
                 activeRuns,
@@ -466,8 +470,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
               });
             }
           } catch (err) {
-            log.error({ err }, "promote failed");
-            tick.errors.push(`promote: ${(err as Error).message}`);
+            captureTickError(tick, "promote", err, "promote failed");
           }
         }
 
@@ -500,15 +503,13 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           if (depResult.status === "fulfilled") {
             tick.deprioritizeRequested = depResult.value;
           } else {
-            log.error({ err: depResult.reason }, "deprioritize failed");
-            tick.errors.push(`deprioritize: ${(depResult.reason as Error).message}`);
+            captureTickError(tick, "deprioritize", depResult.reason, "deprioritize failed");
           }
 
           if (cancelResult.status === "fulfilled") {
             tick.cancelRequested = cancelResult.value;
           } else {
-            log.error({ err: cancelResult.reason }, "cancel failed");
-            tick.errors.push(`cancel: ${(cancelResult.reason as Error).message}`);
+            captureTickError(tick, "cancel", cancelResult.reason, "cancel failed");
           }
         }
 
@@ -589,10 +590,11 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
   };
 }
 
-async function getActiveRunsFromDb(db: AnyDb): Promise<ActiveRun[]> {
+async function getActiveRunsFromDb(db: AnyDb, agentRunDir: string): Promise<ActiveRun[]> {
   try {
     const rows = await db
       .select({
+        id: pipelineRuns.id,
         issueId: pipelineRuns.issueId,
         branch: pipelineRuns.branch,
       })
@@ -603,7 +605,11 @@ async function getActiveRunsFromDb(db: AnyDb): Promise<ActiveRun[]> {
 
     return rows
       .filter((r: any) => r.branch)
-      .map((r: any) => ({ issueId: r.issueId, branch: r.branch }));
+      .map((r: any) => ({
+        issueId: r.issueId,
+        branch: r.branch,
+        worktreePath: join(agentRunDir, r.id, "worktree"),
+      }));
   } catch {
     return [];
   }
