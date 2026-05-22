@@ -141,6 +141,77 @@ describe("handleReleaseSubcommand", () => {
     });
     expect(r.text).toMatch(/Try.*approve.*skip.*status/i);
   });
+
+  it("status renders rich output (last tag, proposed next, per-trigger glyphs) when octokit + config provided", async () => {
+    const lastTagAt = new Date(Date.now() - 2 * 3600_000); // 2h ago → timeSinceLastHours=24 fails
+    const ciGreenSince = new Date(Date.now() - 45 * 60_000); // 45m ago → ciGreenForMinutes=30 passes
+
+    const mockOctokit = {
+      repos: {
+        getBranch: vi.fn().mockResolvedValue({ data: { commit: { sha: "abc123" } } }),
+        listTags: vi.fn().mockResolvedValue({
+          data: [{ name: "v0.1.30", commit: { sha: "tag_sha" } }],
+        }),
+        getCommit: vi.fn().mockResolvedValue({
+          data: { commit: { committer: { date: lastTagAt.toISOString() } } },
+        }),
+        compareCommits: vi.fn().mockResolvedValue({
+          data: {
+            commits: Array(7).fill({ commit: { message: "fix: something" } }),
+          },
+        }),
+        listCommits: vi.fn().mockResolvedValue({ data: [] }),
+      },
+      checks: {
+        listForRef: vi.fn().mockResolvedValue({
+          data: {
+            check_runs: [
+              { status: "completed", conclusion: "success", completed_at: ciGreenSince.toISOString() },
+            ],
+          },
+        }),
+      },
+    };
+
+    const config = {
+      enabled: true,
+      schedule: "*/30 * * * *",
+      versionBump: "patch" as const,
+      branch: "main",
+      triggers: {
+        mergedPRsSince: 5,
+        timeSinceLastHours: 24,
+        ciGreenForMinutes: 30,
+        requireSlackApproval: true as const,
+      },
+    };
+
+    const r = await handleReleaseSubcommand({
+      cmd: { kind: "status" },
+      db,
+      repoUrl,
+      branch,
+      slackUserId: "U123",
+      octokit: mockOctokit as any,
+      config: config as any,
+    });
+
+    expect(r.responseType).toBe("ephemeral");
+    // Rich header fields
+    expect(r.text).toMatch(/Last tag:.*v0\.1\.30/);
+    expect(r.text).toMatch(/Proposed next:.*v0\.1\.31/);
+    expect(r.text).toMatch(/Trigger state/);
+    // ✓ mergedPRsSince=5 — have 7 (>= 5)
+    expect(r.text).toMatch(/✓.*mergedPRsSince=5/);
+    // ✗ timeSinceLastHours — only 2h elapsed, need 24h
+    expect(r.text).toMatch(/✗.*timeSinceLastHours not met/);
+    // ✓ ciGreenForMinutes=30 — CI green for 45m
+    expect(r.text).toMatch(/✓.*ciGreenForMinutes=30/);
+    // ⏳ requireSlackApproval — no fresh approval in DB
+    expect(r.text).toMatch(/⏳.*requireSlackApproval=true \(no fresh approval\)/);
+    // Still includes Recent decisions
+    expect(r.text).toMatch(/Recent decisions/);
+  });
 });
 
 import { createSlackInterface } from "../pm/slack-interface.js";

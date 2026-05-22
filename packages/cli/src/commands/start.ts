@@ -650,6 +650,8 @@ export const startCommand = new Command("start")
             branch: rmConfig!.branch,
             slackUserId: userId,
             pauseDurationHours,
+            octokit: rmOctokit,
+            config: rmConfig!,
             onSkip: (_reason) => {
               rmScheduler!.pauseUntil(new Date(Date.now() + pauseDurationHours * 3600 * 1000));
             },
