@@ -53,10 +53,40 @@ export interface PmSlackConfig {
 export class PmSlackNotifier {
   private botToken: string;
   private channelId: string;
+  // Dedup flag: after the first missing_scope warn fires, subsequent per-tick
+  // calls stay silent. The startup probe (probeReactionsScope) handles the
+  // one-time error-level log; this flag prevents the 7×/tick warn flood.
+  private _missingScopeLogged = false;
 
   constructor(config: PmSlackConfig) {
     this.botToken = config.botToken;
     this.channelId = config.channelId;
+  }
+
+  /**
+   * One-time startup probe: call reactions.get with a bogus timestamp.
+   * Slack validates OAuth scopes before parameter values, so a missing_scope
+   * error means reactions:read is absent regardless of whether the message
+   * exists. Any other error (message_not_found, channel_not_found) means the
+   * scope is present. Logs a single error-level line if the scope is missing
+   * so operators see it at boot rather than buried in per-tick warn bursts.
+   */
+  async probeReactionsScope(): Promise<void> {
+    try {
+      const data = await this._callSlackApi("reactions.get", {
+        channel: this.channelId,
+        timestamp: "0.000000",
+      });
+      if (!data?.ok && data?.error === "missing_scope") {
+        log.error(
+          { error: "missing_scope" },
+          "Slack bot token is missing the reactions:read scope — approval-via-reaction will not work. " +
+          "Fix: add reactions:read to your Slack app's Bot Token Scopes and reinstall the app to the workspace.",
+        );
+      }
+    } catch (err) {
+      log.warn({ err }, "Slack startup scope probe failed (could not verify reactions:read)");
+    }
   }
 
   async postDigest(tick: TickResult, maxInFlight: number, minConsecutiveFailures: number = 3): Promise<void> {
@@ -177,14 +207,24 @@ export class PmSlackNotifier {
 
   async checkApprovalReactions(messageTs: string): Promise<"approved" | "rejected" | "pending"> {
     try {
-      const url = `https://slack.com/api/reactions.get?channel=${encodeURIComponent(this.channelId)}&timestamp=${encodeURIComponent(messageTs)}`;
-      const resp = await fetch(url, {
-        headers: { Authorization: `Bearer ${this.botToken}` },
+      const data = await this._callSlackApi("reactions.get", {
+        channel: this.channelId,
+        timestamp: messageTs,
       });
-      const data = await resp.json() as any;
 
       if (!data?.ok) {
-        log.warn({ error: data?.error, messageTs }, "Slack reactions.get returned ok:false");
+        if (data?.error === "missing_scope") {
+          if (!this._missingScopeLogged) {
+            log.warn(
+              { error: data.error, messageTs },
+              "Slack reactions.get returned ok:false (reactions:read scope missing — suppressing further per-tick warnings; see startup log for fix)",
+            );
+            this._missingScopeLogged = true;
+          }
+          // else: silently skip — flood deduped to one warn per notifier instance
+        } else {
+          log.warn({ error: data?.error, messageTs }, "Slack reactions.get returned ok:false");
+        }
         return "pending";
       }
 
@@ -235,6 +275,15 @@ export class PmSlackNotifier {
         },
       ],
     });
+  }
+
+  private async _callSlackApi(endpoint: string, params: Record<string, string>): Promise<any> {
+    const qs = new URLSearchParams(params).toString();
+    const url = `https://slack.com/api/${endpoint}?${qs}`;
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${this.botToken}` },
+    });
+    return resp.json();
   }
 
   private async postMessage(payload: object): Promise<any> {

@@ -122,6 +122,13 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
     return slackNotifier;
   }
 
+  // BEC-238: fire the reactions:read scope probe once at scheduler creation.
+  // Non-blocking — failure is caught inside probeReactionsScope and logged warn.
+  // Guard on slackBotToken so tests that pass an empty string skip the probe.
+  if (deps.slackBotToken && deps.config.slackChannelId) {
+    void getSlackNotifier().probeReactionsScope();
+  }
+
   async function tryAcquireLock(): Promise<boolean> {
     if (!isPostgres(deps.db)) return true;
     try {

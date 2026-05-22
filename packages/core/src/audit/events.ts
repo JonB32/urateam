@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AuditEvent } from "../types.js";
+import { getAuthExpiredMessages } from "./auth-error-messages.js";
 
 function base(
   partial: Partial<AuditEvent> & Pick<AuditEvent, "eventType" | "actor" | "actorType">,
@@ -625,10 +626,14 @@ export function reviewModelLowOutputRatioEvent(args: {
 }
 
 /**
- * BEC-207: emitted by AuthMonitor when `claude auth status` reports the
- * session has expired. Operational signal — the operator must run `claude
- * login` or configure CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY before
- * new pipeline runs will succeed.
+ * BEC-207 / BEC-237: emitted by AuthMonitor when a Claude auth probe fails.
+ * Covers both the mounted-session path (`claude login`) and the OAuth-token
+ * path (`CLAUDE_CODE_OAUTH_TOKEN`). Operational signal — the operator must
+ * take action before new pipeline runs will succeed.
+ *
+ * `authMethod` distinguishes the two paths so the operator knows whether to
+ * run `claude setup-token` (OAuth token expired/revoked) or `claude login`
+ * (mounted session expired).
  *
  * NOTE: this event is written via `logAuditEventUnchecked` (the bypass call
  * site list in CLAUDE.md), because session expiry is a base-tier operational
@@ -636,14 +641,17 @@ export function reviewModelLowOutputRatioEvent(args: {
  */
 export function claudeAuthExpiredEvent(args: {
   detectedAt: Date;
+  authMethod: "oauth-token" | "mounted-session";
 }): AuditEvent {
+  const { hint } = getAuthExpiredMessages(args.authMethod);
   return base({
     eventType: "claude.auth_expired",
     actor: "system",
     actorType: "system",
     payload: {
       detectedAt: args.detectedAt.toISOString(),
-      hint: "Run `claude login` in the container, or switch to CLAUDE_CODE_OAUTH_TOKEN (see deploy/CLAUDE_AUTH.md)",
+      authMethod: args.authMethod,
+      hint,
     },
   });
 }
