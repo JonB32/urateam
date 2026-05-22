@@ -1,7 +1,22 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { getActiveFileMaps, predictConflict } from "../pm/conflict.js";
 
+// Capture the warn spy so test (c) can assert on it without parsing log output.
+// vi.hoisted ensures the mock factory runs before the module imports above.
+const { mockLogWarn } = vi.hoisted(() => ({ mockLogWarn: vi.fn() }));
+
+vi.mock("../logger.js", () => ({
+  createLogger: vi.fn(() => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: mockLogWarn,
+    error: vi.fn(),
+  })),
+}));
+
 describe("getActiveFileMaps", () => {
+  beforeEach(() => { mockLogWarn.mockClear(); });
+
   it("builds file map from git diff output for pushed branch", async () => {
     const execGit = vi.fn()
       .mockResolvedValueOnce("") // fetch
@@ -127,15 +142,10 @@ describe("getActiveFileMaps", () => {
 
   // BEC-239 — AC (c): genuine git error on pushed run → empty set + warn-level log
   it("(c) genuine git error on pushed run → empty set, warn logged", async () => {
-    const warnMessages: string[] = [];
-    const debugMessages: string[] = [];
-
-    // Spy on the pino logger that the module creates internally.
-    // We verify behaviour by asserting on the returned file map (empty set).
     const execGit = vi.fn(async (args: string[]) => {
       if (args[0] === "fetch") return "";
       if (args[0] === "rev-parse") return "abc123"; // branch IS on origin
-      throw new Error("internal git corruption"); // genuine failure
+      throw new Error("internal git corruption"); // genuine diff failure
     });
 
     const fileMaps = await getActiveFileMaps({
@@ -145,8 +155,15 @@ describe("getActiveFileMaps", () => {
       execGit,
     });
 
-    // Must fail open — empty set, not a thrown error
+    // Fail open — empty set returned, no throw
     expect(fileMaps.get("BEC-99")).toEqual(new Set());
+
+    // The genuine diff failure must be logged at warn (not swallowed silently)
+    expect(mockLogWarn).toHaveBeenCalledOnce();
+    const [logObj, logMsg] = mockLogWarn.mock.calls[0];
+    expect(logMsg).toBe("git diff failed, treating as empty");
+    expect(logObj).toMatchObject({ issueId: "BEC-99", branch: "agent/BEC-99-real-error" });
+    expect(logObj.err).toBeInstanceOf(Error);
   });
 
   // BEC-239 — fail-open: worktree also unreadable → empty set, no throw
