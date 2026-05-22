@@ -57,6 +57,8 @@ export interface PmSchedulerDeps {
   slackBotToken: string;
   repoCloneDir?: string;
   defaultBranch?: string;
+  /** Base directory where per-run worktrees are created. Defaults to $HOME/data/runs (matching runner default). */
+  agentRunDir?: string;
   runner?: {
     resume: (issueId: string) => Promise<void>;
     start: (issue: any, pipelineKey: string, pipelineConfig: any, repoConfig: any, sanitizedIssue: any) => Promise<void>;
@@ -403,7 +405,8 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
             if (actions) {
               tick.promoted = await actions.promoteReadyIssues({} as any);
             } else {
-              const activeRuns = await getActiveRunsFromDb(db);
+              const agentRunDir = deps.agentRunDir ?? join(homedir(), "data", "runs");
+              const activeRuns = await getActiveRunsFromDb(db, agentRunDir);
               const baseDir = deps.repoCloneDir ?? join(homedir(), "work", "repos");
               const defaultBranch = deps.defaultBranch ?? "main";
 
@@ -582,10 +585,11 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
   };
 }
 
-async function getActiveRunsFromDb(db: AnyDb): Promise<ActiveRun[]> {
+async function getActiveRunsFromDb(db: AnyDb, agentRunDir: string): Promise<ActiveRun[]> {
   try {
     const rows = await db
       .select({
+        id: pipelineRuns.id,
         issueId: pipelineRuns.issueId,
         branch: pipelineRuns.branch,
       })
@@ -596,7 +600,11 @@ async function getActiveRunsFromDb(db: AnyDb): Promise<ActiveRun[]> {
 
     return rows
       .filter((r: any) => r.branch)
-      .map((r: any) => ({ issueId: r.issueId, branch: r.branch }));
+      .map((r: any) => ({
+        issueId: r.issueId,
+        branch: r.branch,
+        worktreePath: join(agentRunDir, r.id, "worktree"),
+      }));
   } catch {
     return [];
   }
