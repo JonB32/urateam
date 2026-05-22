@@ -1,10 +1,12 @@
 /**
- * Tests for AuthMonitor (BEC-207) — periodic Claude session health-check.
+ * Tests for AuthMonitor (BEC-207 / BEC-237) — periodic Claude session health-check.
  *
  * Covers:
- *  - Returns early when CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY is set.
- *  - Runs `claude auth status` only when neither env var is set.
- *  - On expiry: sends Slack alert and writes claude.auth_expired audit event.
+ *  - Returns early ONLY when ANTHROPIC_API_KEY is set and CLAUDE_CODE_OAUTH_TOKEN is NOT set.
+ *  - When CLAUDE_CODE_OAUTH_TOKEN is set, runs the auth probe regardless of ANTHROPIC_API_KEY.
+ *  - Runs `claude auth status` when neither env var is set (mounted-session path).
+ *  - On expiry: sends Slack alert (text branches on authMethod) and writes claude.auth_expired
+ *    audit event (payload includes authMethod).
  *  - 6-hour throttle: skips check if interval has not elapsed.
  *  - createAuthMonitor stateful wrapper manages lastCheckTime across calls.
  */
@@ -116,17 +118,9 @@ describe("runAuthMonitorCheck", () => {
     expect(mockExecFile).toHaveBeenCalledTimes(1);
   });
 
-  // --- Env-var short-circuit (AC #8) ---
+  // --- Env-var skip logic (BEC-237) ---
 
-  it("returns early without subprocess when CLAUDE_CODE_OAUTH_TOKEN is set", async () => {
-    process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-test";
-    await runAuthMonitorCheck(0, {}, SMALL_INTERVAL);
-    expect(mockExecFile).not.toHaveBeenCalled();
-    expect(mockPostSlackMessage).not.toHaveBeenCalled();
-    expect(mockLogAuditEvent).not.toHaveBeenCalled();
-  });
-
-  it("returns early without subprocess when ANTHROPIC_API_KEY is set", async () => {
+  it("skips check without subprocess when ANTHROPIC_API_KEY is set and CLAUDE_CODE_OAUTH_TOKEN is NOT set", async () => {
     process.env.ANTHROPIC_API_KEY = "sk-ant-api03-test";
     await runAuthMonitorCheck(0, {}, SMALL_INTERVAL);
     expect(mockExecFile).not.toHaveBeenCalled();
@@ -134,16 +128,97 @@ describe("runAuthMonitorCheck", () => {
     expect(mockLogAuditEvent).not.toHaveBeenCalled();
   });
 
-  it("returns early without subprocess when both env vars are set", async () => {
+  it("runs the auth probe when CLAUDE_CODE_OAUTH_TOKEN is set (OAuth tokens can expire)", async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-test";
+    simulateCliSuccess();
+    await runAuthMonitorCheck(0, {}, SMALL_INTERVAL);
+    expect(mockExecFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs the auth probe when both CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set", async () => {
+    // CLAUDE_CODE_OAUTH_TOKEN takes precedence — it can expire even if ANTHROPIC_API_KEY is also set
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-test";
     process.env.ANTHROPIC_API_KEY = "sk-ant-api03-test";
+    simulateCliSuccess();
     await runAuthMonitorCheck(0, {}, SMALL_INTERVAL);
-    expect(mockExecFile).not.toHaveBeenCalled();
+    expect(mockExecFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs the auth probe when neither env var is set (mounted-session path)", async () => {
+    simulateCliSuccess();
+    await runAuthMonitorCheck(0, {}, SMALL_INTERVAL);
+    expect(mockExecFile).toHaveBeenCalledTimes(1);
+  });
+
+  // --- OAuth token probe — success ---
+
+  it("does not alert when CLAUDE_CODE_OAUTH_TOKEN probe succeeds", async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-test";
+    simulateCliSuccess();
+    await runAuthMonitorCheck(0, {
+      slackBotToken: "xoxb-test",
+      slackErrorChannel: "CTEST",
+    }, SMALL_INTERVAL);
+    expect(mockPostSlackMessage).not.toHaveBeenCalled();
+    expect(mockLogAuditEvent).not.toHaveBeenCalled();
+  });
+
+  // --- OAuth token probe — failure (BEC-237 core scenario) ---
+
+  it("sends Slack alert with oauth-token instructions when CLAUDE_CODE_OAUTH_TOKEN probe fails", async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-test";
+    simulateCliFailure();
+    await runAuthMonitorCheck(0, {
+      slackBotToken: "xoxb-bot-token",
+      slackErrorChannel: "CERROR",
+    }, SMALL_INTERVAL);
+    expect(mockPostSlackMessage).toHaveBeenCalledTimes(1);
+    const [calledToken, calledPayload] = mockPostSlackMessage.mock.calls[0] as [
+      string,
+      { channel: string; text: string },
+    ];
+    expect(calledToken).toBe("xoxb-bot-token");
+    expect(calledPayload.channel).toBe("CERROR");
+    // Alert text should mention setup-token, not claude login
+    expect(calledPayload.text).toContain("setup-token");
+    expect(calledPayload.text).not.toContain("claude login");
+  });
+
+  it("logs claude.auth_expired with authMethod=oauth-token when CLAUDE_CODE_OAUTH_TOKEN probe fails", async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-test";
+    simulateCliFailure();
+    const fakeDb = {} as any;
+    await runAuthMonitorCheck(0, { db: fakeDb }, SMALL_INTERVAL);
+    expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
+    const [calledDb, calledEvent] = mockLogAuditEvent.mock.calls[0];
+    expect(calledDb).toBe(fakeDb);
+    expect(calledEvent.eventType).toBe("claude.auth_expired");
+    expect(calledEvent.actor).toBe("system");
+    expect(calledEvent.payload).toMatchObject({
+      detectedAt: expect.any(String),
+      authMethod: "oauth-token",
+    });
+  });
+
+  it("sends oauth-token Slack alert when both env vars set and probe fails", async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-test";
+    process.env.ANTHROPIC_API_KEY = "sk-ant-api03-test";
+    simulateCliFailure();
+    const fakeDb = {} as any;
+    await runAuthMonitorCheck(0, {
+      slackBotToken: "xoxb-test",
+      slackErrorChannel: "CTEST",
+      db: fakeDb,
+    }, SMALL_INTERVAL);
+    expect(mockPostSlackMessage).toHaveBeenCalledTimes(1);
+    expect((mockPostSlackMessage.mock.calls[0][1] as { text: string }).text).toContain("setup-token");
+    const [, calledEvent] = mockLogAuditEvent.mock.calls[0];
+    expect(calledEvent.payload.authMethod).toBe("oauth-token");
   });
 
   // --- Session valid ---
 
-  it("runs subprocess and skips alerts when session is valid", async () => {
+  it("runs subprocess and skips alerts when mounted session is valid", async () => {
     simulateCliSuccess();
     await runAuthMonitorCheck(0, {
       slackBotToken: "xoxb-test",
@@ -154,9 +229,9 @@ describe("runAuthMonitorCheck", () => {
     expect(mockLogAuditEvent).not.toHaveBeenCalled();
   });
 
-  // --- Session expired (AC #7, #15) ---
+  // --- Mounted session expired (existing behavior, preserved) ---
 
-  it("sends Slack alert to configured channel when session is expired", async () => {
+  it("sends Slack alert to configured channel when mounted session is expired", async () => {
     simulateCliFailure();
     await runAuthMonitorCheck(0, {
       slackBotToken: "xoxb-bot-token",
@@ -169,7 +244,17 @@ describe("runAuthMonitorCheck", () => {
     );
   });
 
-  it("logs claude.auth_expired audit event when session is expired and db provided (AC #7)", async () => {
+  it("Slack alert for mounted-session expiry mentions claude login, not setup-token", async () => {
+    simulateCliFailure();
+    await runAuthMonitorCheck(0, {
+      slackBotToken: "xoxb-test",
+      slackErrorChannel: "CTEST",
+    }, SMALL_INTERVAL);
+    const text = (mockPostSlackMessage.mock.calls[0][1] as { text: string }).text;
+    expect(text).toContain("claude login");
+  });
+
+  it("logs claude.auth_expired audit event with authMethod=mounted-session when session expired", async () => {
     simulateCliFailure();
     const fakeDb = {} as any;
     await runAuthMonitorCheck(0, { db: fakeDb }, SMALL_INTERVAL);
@@ -180,6 +265,7 @@ describe("runAuthMonitorCheck", () => {
     expect(calledEvent.actor).toBe("system");
     expect(calledEvent.payload).toMatchObject({
       detectedAt: expect.any(String),
+      authMethod: "mounted-session",
     });
   });
 
@@ -225,7 +311,7 @@ describe("runAuthMonitorCheck", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Tests: createAuthMonitor stateful wrapper (AC #6)
+// Tests: createAuthMonitor stateful wrapper
 // ---------------------------------------------------------------------------
 
 describe("createAuthMonitor", () => {
@@ -270,14 +356,23 @@ describe("createAuthMonitor", () => {
     expect(mockExecFile).toHaveBeenCalledTimes(1); // only one subprocess
   });
 
-  it("tick() skips session check when CLAUDE_CODE_OAUTH_TOKEN is set (AC #8)", async () => {
-    process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-test";
+  it("tick() skips session check when only ANTHROPIC_API_KEY is set (static key, never expires)", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-ant-api03-test";
     const monitor = createAuthMonitor({}, SMALL_INTERVAL);
     await monitor.tick();
     expect(mockExecFile).not.toHaveBeenCalled();
   });
 
-  it("tick() sends alert on expired session and logs audit event (AC #6, #7)", async () => {
+  it("tick() runs probe when CLAUDE_CODE_OAUTH_TOKEN is set (OAuth tokens can expire)", async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-test";
+    simulateCliSuccess();
+    const monitor = createAuthMonitor({}, SMALL_INTERVAL);
+    await monitor.tick();
+    expect(mockExecFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("tick() sends alert on expired OAuth token and logs audit event with authMethod=oauth-token", async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-test";
     simulateCliFailure();
     const fakeDb = {} as any;
     const monitor = createAuthMonitor({
@@ -293,5 +388,25 @@ describe("createAuthMonitor", () => {
     expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
     const [, calledEvent] = mockLogAuditEvent.mock.calls[0];
     expect(calledEvent.eventType).toBe("claude.auth_expired");
+    expect(calledEvent.payload.authMethod).toBe("oauth-token");
+  });
+
+  it("tick() sends alert on expired mounted session and logs audit event with authMethod=mounted-session", async () => {
+    simulateCliFailure();
+    const fakeDb = {} as any;
+    const monitor = createAuthMonitor({
+      slackBotToken: "xoxb-test",
+      slackErrorChannel: "CALERTS",
+      db: fakeDb,
+    }, SMALL_INTERVAL);
+    await monitor.tick();
+    expect(mockPostSlackMessage).toHaveBeenCalledWith(
+      "xoxb-test",
+      expect.objectContaining({ channel: "CALERTS" }),
+    );
+    expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
+    const [, calledEvent] = mockLogAuditEvent.mock.calls[0];
+    expect(calledEvent.eventType).toBe("claude.auth_expired");
+    expect(calledEvent.payload.authMethod).toBe("mounted-session");
   });
 });
