@@ -12,6 +12,7 @@ import {
   buildTriageV1Prompt,
   buildTriageV2Prompt,
   isV2Disabled,
+  parseHandWrittenACs,
 } from "./triage-prompt.js";
 import {
   renderTriageComment,
@@ -41,9 +42,17 @@ const OBSERVER_BODY_MARKER = "<!-- urateam-qo-observer:";
  * diagnostic. See CLAUDE.md "Quality Observer" for the rationale.
  */
 const OBSERVER_PIPELINE_LABEL = "needs-design";
+const BUG_LABEL = "bug";
 
 function isObserverOriginIssue(description: string | null | undefined): boolean {
   return typeof description === "string" && description.includes(OBSERVER_BODY_MARKER);
+}
+
+function warnMissingPipelineLabel(issueId: string, label: string, context: string): void {
+  log.warn(
+    { issueId, label },
+    `${context}: '${label}' label not found in Linear — issue will move to Backlog without pipeline label and won't be routed by promote`,
+  );
 }
 
 export interface TriageInput {
@@ -113,11 +122,7 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
             .map((l) => labelMap.get(l.toLowerCase()))
             .filter(Boolean);
           if (labelIds.length === 0) {
-            log.warn(
-              { issueId: issue.identifier, label: OBSERVER_PIPELINE_LABEL },
-              "observer-origin gate: '" + OBSERVER_PIPELINE_LABEL +
-                "' label not found in Linear — issue will move to Backlog without pipeline label and won't be routed by promote",
-            );
+            warnMissingPipelineLabel(issue.identifier, OBSERVER_PIPELINE_LABEL, "observer-origin gate");
           }
 
           const rationale =
@@ -127,14 +132,13 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
           if (labelIds.length > 0) updatePayload.labelIds = labelIds;
           if (backlogStateId) updatePayload.stateId = backlogStateId;
 
-          await linearClient.updateIssue(issue.id, updatePayload);
-          await linearClient.createComment({
-            issueId: issue.id,
-            body:
-              `🤖 **PM Agent — Triaged (Quality Observer finding)**\n\n` +
-              `**Pipeline:** ${OBSERVER_PIPELINE_LABEL}\n` +
-              `**Rationale:** ${rationale}`,
-          });
+          await Promise.all([
+            linearClient.updateIssue(issue.id, updatePayload),
+            linearClient.createComment({
+              issueId: issue.id,
+              body: `🤖 **PM Agent — Triaged (Quality Observer finding)**\n\n**Pipeline:** ${OBSERVER_PIPELINE_LABEL}\n**Rationale:** ${rationale}`,
+            }),
+          ]);
 
           const result: TriageResult = {
             issueId: issue.identifier,
@@ -158,6 +162,14 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
           return result;
         }
 
+        // Pre-parse hand-written ACs from the issue description. When the
+        // operator has already written a `**Acceptance Criteria:**` section,
+        // we use those items verbatim so the triage result stays in sync with
+        // the description text that the implement-stage prompt also sees.
+        // When no pre-written ACs are found, fall back to Haiku generation.
+        const preSuppliedACs = parseHandWrittenACs(issue.description);
+        const hasPreSuppliedACs = preSuppliedACs.length > 0;
+
         // Tier 6a — pick v2 prompt by default; fall back to v1 when the
         // operator has set URATEAM_DISABLE_TRIAGE_V2=true. Reads env at
         // call time so flipping the var takes effect on the next PM tick
@@ -167,6 +179,7 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
           identifier: issue.identifier,
           title: issue.title,
           description: issue.description ?? "",
+          hasPreSuppliedACs,
         };
         const prompt = useV2
           ? buildTriageV2Prompt(promptInput, sanitize)
@@ -215,9 +228,9 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
         // bug-severity gate). Treat the model's `pipelineLabel` as
         // telemetry only.
         const forceNeedsDesign = openQuestions.length > 0;
-        const hasBug = labels.some((l: string) => l.toLowerCase() === "bug");
+        const hasBug = labels.some((l: string) => l.toLowerCase() === BUG_LABEL);
         const pipelineLabel = forceNeedsDesign
-          ? OBSERVER_PIPELINE_LABEL // "needs-design" — same routing as observer-origin gate
+          ? OBSERVER_PIPELINE_LABEL // same routing as observer-origin gate
           : hasBug
           ? "bug"
           : complexity === "trivial"
@@ -236,11 +249,7 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
           // routing label is dropped silently. Surface this so operators can
           // diagnose why a ticket isn't being picked up by promote.
           if (!labelMap.get(OBSERVER_PIPELINE_LABEL.toLowerCase())) {
-            log.warn(
-              { issueId: issue.identifier, label: OBSERVER_PIPELINE_LABEL },
-              "Tier 4 routing: '" + OBSERVER_PIPELINE_LABEL +
-                "' label not found in Linear — issue will move to Backlog without pipeline label and won't be routed by promote",
-            );
+            warnMissingPipelineLabel(issue.identifier, OBSERVER_PIPELINE_LABEL, "Tier 4 routing");
           }
         }
 
@@ -254,7 +263,11 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
         const teamId = team?.id;
         const backlogStateId = teamId ? stateMap.get(`${teamId}:Backlog`) : undefined;
 
-        const acceptanceCriteria: string[] = Array.isArray(parsed.acceptanceCriteria)
+        // Use pre-supplied ACs when the operator wrote them in the description;
+        // fall back to Haiku's generated list for fresh (no-AC) tickets.
+        const acceptanceCriteria: string[] = hasPreSuppliedACs
+          ? preSuppliedACs
+          : Array.isArray(parsed.acceptanceCriteria)
           ? parsed.acceptanceCriteria.filter((c: any) => typeof c === "string" && c.length > 0)
           : [];
 
@@ -291,15 +304,13 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
           updatePayload.description = updatedDesc;
         }
 
-        await linearClient.updateIssue(issue.id, updatePayload);
-
-        await linearClient.createComment({
-          issueId: issue.id,
-          body: renderTriageComment(result, {
-            forceNeedsDesign,
-            pipelineLabel,
+        await Promise.all([
+          linearClient.updateIssue(issue.id, updatePayload),
+          linearClient.createComment({
+            issueId: issue.id,
+            body: renderTriageComment(result, { forceNeedsDesign, pipelineLabel }),
           }),
-        });
+        ]);
         if (input.db) {
           void logAuditEventUnchecked(input.db, pmTriageClassifiedEvent({
             issueId: issue.identifier,
