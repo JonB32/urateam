@@ -40,7 +40,7 @@ Autonomous backlog manager in `packages/core/src/pm/`:
 - `actions/triage.ts` — classifies issues via Claude Haiku, adds pipeline label (auto-implement/bug/quick-fix), generates acceptance criteria
 - `actions/promote.ts` — moves highest-priority non-conflicting issues Backlog → Todo
 - `actions/recover-stuck.ts` — detects issues stuck in "In Progress" with no active run, moves to Backlog
-- `actions/approval-helpers.ts` — shared `requestApprovalIfNotPending()` used by deprioritize + cancel
+- `actions/approval-helpers.ts` — shared `requestApprovalIfNotPending()` used by deprioritize + cancel (requires `reactions:read` bot-token scope; `PmSlackNotifier.probeReactionsScope()` checks this at scheduler startup — see `deploy/SLACK_SETUP.md`)
 - `conflict.ts` — two-phase: git diff for active branches + Claude prediction
 - `slack.ts` — digests (including BEC-223 circuit-broken section), approval requests via reactions
 - `slack-interface.ts` — bidirectional Slack bot: slash commands, @mentions, natural language via Haiku
