@@ -31,6 +31,18 @@ RUN npm install -g \
       @urateam/dashboard@${URATEAM_DASHBOARD_VERSION} \
       @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
+# BEC-240 — provision pnpm for the agent's Bash tool. urateam target repos are
+# pnpm workspaces (package.json `packageManager: pnpm@9.15.0`). Without pnpm on
+# PATH the agent's `pnpm install` fails with "command not found", falls back to
+# `npm`, and that breaks the workspace toolchain: wrong dependency versions
+# (e.g. `npx vitest` pulls vitest 4.x instead of the pinned 3.x), unresolved
+# workspace imports, and many wasted agent turns. corepack ships with Node 22.
+# COREPACK_HOME is a world-readable shared path so the pnpm version this root
+# build downloads is reachable by the non-root `ura` runtime user below.
+# Keep the version in sync with the repo's `packageManager` field.
+ENV COREPACK_HOME=/usr/local/corepack
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+
 # Non-root runtime user
 RUN addgroup -S ura && adduser -S -G ura ura
 USER ura
