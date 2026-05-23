@@ -584,6 +584,19 @@ export const AuditEventTypeSchema = z.enum([
    *  comment with the last failure's error message, and sending a Slack
    *  alert. Payload includes failureCount and a truncated errorMessage. */
   "pm.escalated_to_needs_design",
+  /** BEC-236 — PM tick selected this issue for a half-open circuit-breaker probe.
+   *  The breaker is currently engaged (≥ maxConsecutiveFailures), but the
+   *  cooldown window has elapsed and the per-tick probe cap allows it through.
+   *  Payload: issueId, consecutiveFailures, lastFailureAgeMin, probeAttempts. */
+  "pm.circuit_breaker_probe",
+  /** BEC-236 — A probe run reached terminal `completed` status, so the
+   *  circuit_breaker_state row was deleted and the Tier-5-added `needs-design`
+   *  label was removed. Payload: issueId, probeAttempts. */
+  "pm.circuit_breaker_recovered",
+  /** BEC-236 — `ura circuit reset` cleared the breaker for an issue. Payload:
+   *  issueId, scope ("single" | "bulk"), failedRunsDeleted (count of
+   *  pipeline_runs rows the reset deleted). */
+  "pm.circuit_breaker_reset_manual",
   /** `ura service install` succeeded — a launchd plist (macOS) or systemd-user
    *  unit (Linux) was written and the service was started. Operational signal
    *  so operators can audit unattended provisioning. */
