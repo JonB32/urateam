@@ -10,7 +10,7 @@ describe("circuit-breaker audit event constructors", () => {
     const ev = pmCircuitBreakerProbeEvent({
       issueId: "BEC-1",
       consecutiveFailures: 4,
-      lastFailureAgeMin: 90,
+      lastProbeAgeMin: 90,
       probeAttempts: 1,
     });
 
@@ -19,7 +19,7 @@ describe("circuit-breaker audit event constructors", () => {
     expect(ev.issueId).toBe("BEC-1");
     expect(ev.payload).toMatchObject({
       consecutiveFailures: 4,
-      lastFailureAgeMin: 90,
+      lastProbeAgeMin: 90,
       probeAttempts: 1,
     });
     expect(ev.id).toMatch(/^evt_/);

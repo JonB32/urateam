@@ -33,6 +33,12 @@ export async function selectProbeCandidates(
 ): Promise<Set<string>> {
   if (opts.disabled) return new Set();
 
+  // Defensive: when maxConsecutiveFailures is 0 the breaker is effectively
+  // disabled (BEC-181 documents this), so there's nothing to probe — and the
+  // downstream filter `count >= 0` would elect every state-row issue,
+  // including already-recovered ones.
+  if (opts.maxConsecutiveFailures <= 0) return new Set();
+
   // Pull all eligible rows: cooldown elapsed OR never probed.
   // Drizzle's lte() calls toDriver() on the Date, converting it to epoch-
   // seconds for SQLite (matching how last_probe_at is stored).
@@ -79,17 +85,20 @@ export async function selectProbeCandidates(
     .where(inArray(circuitBreakerState.issueId, pickedIds));
 
   // Emit one audit event per probe. Best-effort — failures don't block the tick.
+  // The "age" we know cheaply here is age since the previous probe (or null
+  // for never-probed issues, surfaced as -1). Age since the last actual
+  // failure would require a separate query per issue — not worth the N+1.
   for (const r of picked) {
-    const lastFailureAgeMin = r.lastProbeAt
+    const lastProbeAgeMin = r.lastProbeAt
       ? Math.floor((opts.now - r.lastProbeAt.getTime()) / 60_000)
-      : 0;
+      : -1;
     try {
       await logAuditEventUnchecked(
         db,
         pmCircuitBreakerProbeEvent({
           issueId: r.issueId,
           consecutiveFailures: failureCounts.get(r.issueId) ?? 0,
-          lastFailureAgeMin,
+          lastProbeAgeMin,
           probeAttempts: r.probeAttempts + 1,
         }),
       );

@@ -233,6 +233,14 @@ circuitCommand
         console.error("ura circuit reset: pass either <issueId> OR --all, not both");
         process.exit(1);
       }
+      // Check LINEAR_API_KEY BEFORE the confirmation prompt — otherwise the
+      // operator confirms a destructive bulk action and then learns we can't
+      // proceed because of a missing env var.
+      const linearApiKey = process.env.LINEAR_API_KEY;
+      if (!linearApiKey) {
+        console.error("ura circuit reset: LINEAR_API_KEY env var required");
+        process.exit(1);
+      }
       // Confirmation prompt unless --yes
       if (!opts.yes) {
         const readline = await import("node:readline/promises");
@@ -255,11 +263,6 @@ circuitCommand
       }
       const dbUrl = process.env.DATABASE_URL ?? "./urateam.db";
       const db = await createDb({ connectionString: dbUrl });
-      const linearApiKey = process.env.LINEAR_API_KEY;
-      if (!linearApiKey) {
-        console.error("ura circuit reset: LINEAR_API_KEY env var required");
-        process.exit(1);
-      }
       const linearClient = new LinearClient({ apiKey: linearApiKey });
       const max = Number.parseInt(process.env.PM_MAX_CONSECUTIVE_FAILURES ?? "3", 10);
       const threshold = Number.isFinite(max) && max > 0 ? max : 3;

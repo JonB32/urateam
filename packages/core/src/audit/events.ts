@@ -783,7 +783,13 @@ export function pmEscalatedToNeedsDesignEvent(args: {
 export function pmCircuitBreakerProbeEvent(args: {
   issueId: string;
   consecutiveFailures: number;
-  lastFailureAgeMin: number;
+  /**
+   * Minutes since this issue's previous probe. `-1` when there is no
+   * previous probe (= this is the first probe for the issue). NOT the age
+   * since the last failure — that would require a separate per-issue
+   * query and wasn't worth the N+1.
+   */
+  lastProbeAgeMin: number;
   probeAttempts: number;
 }): AuditEvent {
   return base({
@@ -793,7 +799,7 @@ export function pmCircuitBreakerProbeEvent(args: {
     issueId: args.issueId,
     payload: {
       consecutiveFailures: args.consecutiveFailures,
-      lastFailureAgeMin: args.lastFailureAgeMin,
+      lastProbeAgeMin: args.lastProbeAgeMin,
       probeAttempts: args.probeAttempts,
     },
   });

@@ -587,7 +587,9 @@ export const AuditEventTypeSchema = z.enum([
   /** BEC-236 — PM tick selected this issue for a half-open circuit-breaker probe.
    *  The breaker is currently engaged (≥ maxConsecutiveFailures), but the
    *  cooldown window has elapsed and the per-tick probe cap allows it through.
-   *  Payload: issueId, consecutiveFailures, lastFailureAgeMin, probeAttempts. */
+   *  Payload: issueId, consecutiveFailures, lastProbeAgeMin (minutes since the
+   *  previous probe; -1 for the first probe — NOT the age since the last
+   *  failure), probeAttempts. */
   "pm.circuit_breaker_probe",
   /** BEC-236 — A probe run reached terminal `completed` status, so the
    *  circuit_breaker_state row was deleted and the Tier-5-added `needs-design`
