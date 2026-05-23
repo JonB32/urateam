@@ -96,6 +96,10 @@ describe("BEC-103: security headers present on all responses", () => {
       // Must restrict scripts to 'self' and https://unpkg.com only
       expect(csp).toContain("default-src 'self'");
       expect(csp).toContain("script-src 'self' https://unpkg.com");
+      // BEC-131: style-src must allow inline styles and Google Fonts stylesheet
+      expect(csp).toContain("style-src 'self' 'unsafe-inline' https://fonts.googleapis.com");
+      // BEC-131: font-src must allow Google Fonts CDN for font files
+      expect(csp).toContain("font-src 'self' https://fonts.gstatic.com");
     },
   );
 

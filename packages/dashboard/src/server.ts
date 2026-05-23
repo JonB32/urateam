@@ -24,6 +24,7 @@ import { createUsersRouter } from "./routes/users.js";
 import { createAuthRouter } from "./routes/auth.js";
 import { createSsoMiddleware } from "./middleware/sso.js";
 import { createCostRouter } from "./routes/cost.js";
+import { DASHBOARD_CSP } from "./csp.js";
 
 const logger = createLogger({ component: "dashboard" });
 
@@ -102,7 +103,7 @@ export function createDashboard(config: DashboardConfig): Hono {
     c.res.headers.set("X-Frame-Options", "DENY");
     c.res.headers.set(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self'",
+      DASHBOARD_CSP,
     );
     c.res.headers.set("X-XSS-Protection", "0");
     c.res.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
