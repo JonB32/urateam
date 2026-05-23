@@ -130,6 +130,22 @@ export const webhookDedup = sqliteTable("webhook_dedup", {
   expiresAt: crossTimestamp("expires_at").notNull(),
 });
 
+/**
+ * BEC-236 — tracks Tier-5 circuit-breaker escalations so the half-open
+ * probe can distinguish them from human/triage-added `needs-design`
+ * labels. Insert on Tier-5 escalation (idempotent via the issue_id PK),
+ * update last_probe_at + probe_attempts in selectProbeCandidates, delete
+ * on probe-recovery or manual reset.
+ */
+export const circuitBreakerState = sqliteTable("circuit_breaker_state", {
+  issueId: text("issue_id").primaryKey(),
+  escalatedAt: crossTimestamp("escalated_at")
+    .notNull()
+    .$defaultFn(() => new Date()),
+  lastProbeAt: crossTimestamp("last_probe_at"),
+  probeAttempts: integer("probe_attempts").notNull().default(0),
+});
+
 export const triageResults = sqliteTable("triage_results", {
   issueId: text("issue_id").primaryKey(),
   v2Prediction: text("v2_prediction").notNull().default("{}"),

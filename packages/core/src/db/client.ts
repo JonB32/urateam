@@ -274,6 +274,16 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
     v2_prediction TEXT NOT NULL DEFAULT '{}',
     triaged_at ${ts} NOT NULL DEFAULT (${now})
   );
+
+  CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+    issue_id TEXT PRIMARY KEY,
+    escalated_at ${ts} NOT NULL DEFAULT (${now}),
+    last_probe_at ${ts},
+    probe_attempts INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_circuit_breaker_state_last_probe_at
+    ON circuit_breaker_state(last_probe_at);
 `;
 }
 
