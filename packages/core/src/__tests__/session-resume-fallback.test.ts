@@ -29,7 +29,7 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 
 vi.mock("../executor/auth-check.js", () => ({
   isClaudeAuthValid: vi.fn().mockResolvedValue(true),
-  resolveClaudeAuth: vi.fn().mockReturnValue({ method: "session" }),
+  resolveClaudeAuth: vi.fn().mockReturnValue({ method: "mounted-session" }),
 }));
 
 vi.mock("../executor/extract-handoff.js", () => ({

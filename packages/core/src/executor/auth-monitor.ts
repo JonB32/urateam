@@ -5,29 +5,31 @@
  *
  *  - ANTHROPIC_API_KEY only (no CLAUDE_CODE_OAUTH_TOKEN) → skip. Static key
  *    never expires on its own; probing would add noise with no benefit.
- *  - CLAUDE_CODE_OAUTH_TOKEN set → probe with `claude auth status`. OAuth
- *    tokens CAN expire or be revoked. On failure: Slack alert + audit event
+ *  - CLAUDE_CODE_OAUTH_TOKEN set → probe with `claude -p "ok"` (real API call).
+ *    OAuth tokens CAN expire or be revoked. On failure: Slack alert + audit event
  *    with authMethod "oauth-token" so operators know to run `claude setup-token`.
- *  - Neither env var (mounted session) → probe with `claude auth status`.
+ *  - Neither env var (mounted session) → probe with `claude -p "ok"` (real API call).
  *    Interactive sessions expire weekly. On failure: Slack alert + audit event
  *    with authMethod "mounted-session" so operators know to run `claude login`.
  *
  * The monitor is registered as a step inside the PM scheduler tick so it runs
  * on the same cadence as the PM agent's own health checks.
  */
-import { execFile } from "node:child_process";
 import { createLogger } from "../logger.js";
 import { postSlackMessage } from "../pm/slack-helpers.js";
 import { claudeAuthExpiredEvent } from "../audit/events.js";
 import { getAuthExpiredMessages } from "../audit/auth-error-messages.js";
 import { logAuditEventUnchecked } from "../audit/writer.js";
-import { resetAuthCheckCache } from "./auth-check.js";
+import { resetAuthCheckCache, probeClaudeAuth } from "./auth-check.js";
 import type { AnyDb } from "../db/client.js";
 
 const log = createLogger({ component: "AuthMonitor" });
 
 /** Default check interval: 6 hours */
 export const AUTH_MONITOR_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+/** Timeout for the AuthMonitor probe. Longer than the preflight timeout — the monitor runs off the critical path. */
+const PROBE_TIMEOUT_MONITOR_MS = 15_000;
 
 export interface AuthMonitorOptions {
   /** Slack bot token for posting alerts. Optional — skips Slack if absent. */
@@ -77,16 +79,15 @@ export async function runAuthMonitorCheck(
 
   log.info({ authMethod }, "AuthMonitor: checking Claude auth validity");
 
-  // Force a fresh subprocess call (bypass the 5-min cache in isClaudeAuthValid)
+  // Force a fresh probe (bypass the 5-min cache in isClaudeAuthValid)
   resetAuthCheckCache();
 
-  const valid = await new Promise<boolean>((resolve) => {
-    execFile("claude", ["auth", "status"], { timeout: 15_000 }, (err) => {
-      resolve(!err);
-    });
-  });
+  // Real API call — `claude auth status` only checks local credential presence,
+  // not whether the credential is accepted by the Anthropic API (BEC-244).
+  // Network errors / timeouts resolve { valid: true } (fail-open).
+  const result = await probeClaudeAuth(PROBE_TIMEOUT_MONITOR_MS);
 
-  if (valid) {
+  if (result.valid) {
     log.debug({ authMethod }, "AuthMonitor: auth is valid");
     return now;
   }

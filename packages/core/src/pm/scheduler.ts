@@ -74,6 +74,8 @@ export interface PmSchedulerDeps {
   pipelineConfigs?: Record<string, any>;
   repoConfigs?: Record<string, any>;
   actions?: Partial<PmSchedulerActions>;
+  /** Injectable auth monitor — defaults to the real createAuthMonitor. Used by tests to avoid slow real API calls. */
+  authMonitor?: AuthMonitor;
 }
 
 interface PmSchedulerActions {
@@ -106,7 +108,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
   // BEC-207: AuthMonitor — periodic Claude session health-check (every 6h).
   // Alerts to the PM agent's Slack channel when SLACK_ERROR_ALERTS=true.
   // No-ops when CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY is set.
-  const authMonitor: AuthMonitor = createAuthMonitor({
+  const authMonitor: AuthMonitor = deps.authMonitor ?? createAuthMonitor({
     slackBotToken: deps.slackBotToken || undefined,
     slackErrorChannel:
       process.env.SLACK_ERROR_ALERTS === "true"
