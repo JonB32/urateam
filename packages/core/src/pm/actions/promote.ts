@@ -16,6 +16,7 @@ import {
   batchCountConsecutiveFailures,
   getLastFailureError,
 } from "./db-queries.js";
+import { circuitBreakerState } from "../../db/schema.js";
 
 /**
  * Tier 5 — the pipeline label assigned to issues that have tripped the
@@ -305,6 +306,23 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
               log.warn(
                 { issueId: candidate.identifier, err },
                 "Tier 5 escalation: Slack alert failed",
+              );
+            }
+          }
+
+          // BEC-236 — record the Tier-5 escalation so the half-open probe can
+          // distinguish our auto-added needs-design from a human's. Idempotent on
+          // issue_id PK so re-escalations of the same issue don't double-insert.
+          if (input.db) {
+            try {
+              await (input.db as any)
+                .insert(circuitBreakerState)
+                .values({ issueId: candidate.identifier, escalatedAt: new Date() })
+                .onConflictDoNothing();
+            } catch (err) {
+              log.warn(
+                { err, issueId: candidate.identifier },
+                "failed to insert circuit_breaker_state row (probe recovery will skip this issue)",
               );
             }
           }

@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { promoteReadyIssues } from "../pm/actions/promote.js";
+import { createDb } from "../db/client.js";
+import { circuitBreakerState } from "../db/schema.js";
 
 function mockLinearClient(issues: any[]) {
   // Linear SDK returns labels as an async connection: `await issue.labels()` → { nodes }.
@@ -418,6 +420,101 @@ describe("promoteReadyIssues", () => {
       expect(results[0].issueId).toBe("BEC-161-A");
       expect(client.updateIssue).toHaveBeenCalledWith("i1", expect.objectContaining({ stateId: "state-todo" }));
       expect(getFailureCount).toHaveBeenCalledWith("BEC-161-A");
+    });
+
+    it("inserts a circuit_breaker_state row when Tier-5 escalates (BEC-236)", async () => {
+      // Use a real in-memory DB so we can assert the row was written.
+      const db = await createDb({ connectionString: ":memory:" });
+
+      const issues = [
+        {
+          id: "i-bec236",
+          identifier: "BEC-236-T",
+          title: "Doom-looping issue",
+          description: "",
+          priority: 2,
+          // No needs-design label — so Tier-5 escalation fires.
+          labels: { nodes: [] },
+          team: { id: "team-1" },
+          url: "https://linear.app/BEC-236-T",
+        },
+      ];
+
+      // mockLinearClient doesn't add issueLabels; add it manually so the
+      // needs-design label-lookup inside the escalation block can resolve.
+      const client = {
+        ...mockLinearClient(issues),
+        issueLabels: vi.fn().mockResolvedValue({ nodes: [] }),
+      };
+
+      const results = await promoteReadyIssues({
+        linearClient: client as any,
+        teamIds: ["team-1"],
+        slotsAvailable: 1,
+        checkConflict: vi.fn().mockResolvedValue({ overlapRisk: "none", likelyFiles: [], reasoning: "" }),
+        stateMap: defaultStateMap,
+        maxConsecutiveFailures: 3,
+        // Inject stub so we don't need real pipeline_runs rows.
+        getFailureCount: vi.fn().mockResolvedValue(3),
+        getLastError: vi.fn().mockResolvedValue("something broke"),
+        db: db as any,
+      });
+
+      // Issue is circuit-broken and has no needs-design label → escalation fires.
+      expect(results).toHaveLength(1);
+      expect(results[0]!.promoted).toBe(false);
+      expect(results[0]!.reason).toMatch(/escalated to needs-design/i);
+
+      // The Tier-5 escalation block must have inserted a circuit_breaker_state row.
+      const stateRows = await (db as any).select().from(circuitBreakerState);
+      expect(stateRows).toHaveLength(1);
+      expect(stateRows[0].issueId).toBe("BEC-236-T");
+      expect(stateRows[0].escalatedAt).toBeTruthy();
+    });
+
+    it("does not insert a second circuit_breaker_state row on re-escalation (idempotent)", async () => {
+      const db = await createDb({ connectionString: ":memory:" });
+
+      // Pre-insert a row as if a prior tick already escalated this issue.
+      await (db as any)
+        .insert(circuitBreakerState)
+        .values({ issueId: "BEC-236-U", escalatedAt: new Date() });
+
+      const issues = [
+        {
+          id: "i-bec236u",
+          identifier: "BEC-236-U",
+          title: "Already escalated issue",
+          description: "",
+          priority: 2,
+          // needs-design label is already on the issue (alreadyEscalated = true).
+          labels: { nodes: [{ id: "lbl-nd", name: "needs-design" }] },
+          team: { id: "team-1" },
+          url: "https://linear.app/BEC-236-U",
+        },
+      ];
+
+      const client = {
+        ...mockLinearClient(issues),
+        issueLabels: vi.fn().mockResolvedValue({ nodes: [] }),
+      };
+
+      await promoteReadyIssues({
+        linearClient: client as any,
+        teamIds: ["team-1"],
+        slotsAvailable: 1,
+        checkConflict: vi.fn().mockResolvedValue({ overlapRisk: "none", likelyFiles: [], reasoning: "" }),
+        stateMap: defaultStateMap,
+        maxConsecutiveFailures: 3,
+        getFailureCount: vi.fn().mockResolvedValue(3),
+        getLastError: vi.fn().mockResolvedValue(null),
+        db: db as any,
+      });
+
+      // Only the original row should exist — the already-escalated gate
+      // (alreadyEscalated=true) prevents a second insert.
+      const stateRows = await (db as any).select().from(circuitBreakerState);
+      expect(stateRows).toHaveLength(1);
     });
   });
 });
