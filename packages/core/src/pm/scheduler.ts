@@ -12,6 +12,9 @@ import { resolveApprovals, type ResolveApprovalsInput, type ResolveApprovalsResu
 import { recoverRetriableRuns, type RecoverResult } from "./actions/recover.js";
 import { recoverStuckInProgressIssues, type StuckIssueResult } from "./actions/recover-stuck.js";
 import { startTodoIssues, type StartTodoInput, type StartTodoResult } from "./actions/start-todo.js";
+import { getCircuitBreakerProbeConfig } from "./actions/circuit-breaker-config.js";
+import { selectProbeCandidates } from "./actions/select-probe-candidates.js";
+import { sweepRecoveredCircuitBreakers } from "./actions/sweep-recovered-circuit-breakers.js";
 import { getActiveFileMaps, predictConflict, type ActiveRun } from "./conflict.js";
 import { fetchCircuitBrokenIssues, ACTIVE_STATUSES } from "./actions/db-queries.js";
 import { PmSlackNotifier } from "./slack.js";
@@ -335,6 +338,40 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
         // Compute available slots once for both startTodo and promote
         const slotsAvailable = config.maxInFlight - (tick.budgetGuard.activeCount ?? 0);
 
+        // BEC-236 — half-open circuit-breaker probe. Picks at most `cap` issues
+        // per tick that the breaker would normally skip; promote + startTodo
+        // receive this Set as probeOverrideIds and bypass the skip for them.
+        const probeConfig = getCircuitBreakerProbeConfig();
+        const breakerThreshold = config.maxConsecutiveFailures > 0
+          ? config.maxConsecutiveFailures
+          : 3;
+        let probeOverrideIds: Set<string> = new Set();
+        if (db && !probeConfig.disabled) {
+          try {
+            probeOverrideIds = await selectProbeCandidates(db, {
+              cap: probeConfig.maxProbesPerTick,
+              cooldownMs: probeConfig.cooldownMs,
+              maxConsecutiveFailures: breakerThreshold,
+              now: Date.now(),
+            });
+          } catch (err) {
+            captureTickError(tick, "probe", err, "selectProbeCandidates failed");
+          }
+
+          // BEC-236 — sweep recovered issues. The runner can't drive recovery
+          // itself (no `linearClient` in its scope), so each tick scans for
+          // state rows whose consecutive-failure count has dropped (= a
+          // `completed` run landed). Recovery deletes the state row and
+          // strips the Tier-5-added `needs-design` label.
+          try {
+            await sweepRecoveredCircuitBreakers(db, await getLinearClient(), {
+              maxConsecutiveFailures: breakerThreshold,
+            });
+          } catch (err) {
+            captureTickError(tick, "sweepRecovered", err, "sweepRecoveredCircuitBreakers failed");
+          }
+        }
+
         // --- Start pipelines for orphaned Todo issues ---
         if (deps.runner?.start && deps.pipelineConfigs && deps.repoConfigs) {
           try {
@@ -356,6 +393,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                     // BEC-181: omit getFailureCount so startTodoIssues uses the batch
                     // batchCountConsecutiveFailures path (single DB round-trip for all
                     // candidates) instead of per-issue N+1 queries.
+                    probeOverrideIds,
                   });
               const started = todoResults.filter((r) => r.started);
               if (started.length > 0) {
@@ -467,6 +505,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                 // BEC-181: omit getFailureCount so promoteReadyIssues uses the batch
                 // batchCountConsecutiveFailures path (single DB round-trip for all
                 // candidates) instead of per-issue N+1 queries.
+                probeOverrideIds,
               });
             }
           } catch (err) {
