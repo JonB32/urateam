@@ -102,7 +102,7 @@ export function createDashboard(config: DashboardConfig): Hono {
     c.res.headers.set("X-Frame-Options", "DENY");
     c.res.headers.set(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self'",
+      "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com",
     );
     c.res.headers.set("X-XSS-Protection", "0");
     c.res.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
