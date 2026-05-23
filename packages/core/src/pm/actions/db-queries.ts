@@ -1,6 +1,13 @@
 import type { AnyDb } from "../../db/client.js";
 import type { CircuitBrokenIssue } from "../types.js";
-import { agentLogs, circuitBreakerState, pipelineRuns, stageRuns } from "../../db/schema.js";
+import {
+  agentLogs,
+  circuitBreakerState,
+  pipelineRunDecisions,
+  pipelineRuns,
+  reviewModelRuns,
+  stageRuns,
+} from "../../db/schema.js";
 import { and, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
 import { isPostgres } from "../../db/client.js";
 
@@ -294,7 +301,10 @@ export async function fetchCircuitBrokenIssues(
  *
  * Inside a single transaction:
  *   1. Identify all `status = 'failed'` pipeline_runs for the issue.
- *   2. Cascade-delete: agent_logs → stage_runs → pipeline_runs (failed only).
+ *   2. Cascade-delete in FK-respecting order:
+ *      review_model_runs + agent_logs (children of stage_runs)
+ *      → stage_runs + pipeline_run_decisions (children of pipeline_runs)
+ *      → pipeline_runs (failed only).
  *   3. Delete the circuit_breaker_state row (if present).
  *
  * Returns `{ hadStateRow, failedRunIds }` so the CLI layer can decide
@@ -337,9 +347,15 @@ export async function deleteFailedRunsForIssue(
         .where(inArray(stageRuns.pipelineRunId, failedRunIds))) as Array<{ id: string }>;
       const stageRunIds = stageRunRows.map((r) => r.id);
       if (stageRunIds.length > 0) {
+        // Children of stage_runs (review_model_runs + agent_logs) must go first.
+        await handle.delete(reviewModelRuns).where(inArray(reviewModelRuns.stageRunId, stageRunIds));
         await handle.delete(agentLogs).where(inArray(agentLogs.stageRunId, stageRunIds));
         await handle.delete(stageRuns).where(inArray(stageRuns.id, stageRunIds));
       }
+      // pipeline_run_decisions is a child of pipeline_runs (BEC-227 Phase 4).
+      await handle
+        .delete(pipelineRunDecisions)
+        .where(inArray(pipelineRunDecisions.pipelineRunId, failedRunIds));
       await handle.delete(pipelineRuns).where(inArray(pipelineRuns.id, failedRunIds));
     }
     await handle.delete(circuitBreakerState).where(eq(circuitBreakerState.issueId, issueId));

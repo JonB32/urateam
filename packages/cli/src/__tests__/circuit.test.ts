@@ -1,5 +1,14 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { createDb, pipelineRuns, stageRuns, agentLogs, circuitBreakerState, type AnyDb } from "@urateam/core";
+import {
+  agentLogs,
+  circuitBreakerState,
+  createDb,
+  pipelineRunDecisions,
+  pipelineRuns,
+  reviewModelRuns,
+  stageRuns,
+  type AnyDb,
+} from "@urateam/core";
 import { runCircuitList, runCircuitReset, runCircuitResetAll } from "../commands/circuit.js";
 
 describe("ura circuit list", () => {
@@ -82,7 +91,11 @@ describe("ura circuit reset <issueId>", () => {
   });
 
   it("deletes the failed pipeline_runs cascade + state row, strips needs-design label", async () => {
-    // 3 failed runs, each with 1 stage_run, each with 1 agent_log
+    // 3 failed runs, each with 1 stage_run, each with 1 agent_log, 1
+    // review_model_run (child of stage_run), and 1 pipeline_run_decision
+    // (child of pipeline_run). Real dogfood data has all of these — the
+    // initial implementation missed the latter two and tripped a SQLite
+    // FOREIGN KEY constraint on `ura circuit reset` in production.
     for (let i = 0; i < 3; i++) {
       const runId = `BEC-1-r${i}`;
       const stageRunId = `BEC-1-r${i}-stage`;
@@ -109,6 +122,21 @@ describe("ura circuit reset <issueId>", () => {
         content: "test log",
         timestamp: new Date(1_000_000_000 + i * 1000),
       });
+      await db.insert(reviewModelRuns).values({
+        id: `${stageRunId}-rmr`,
+        stageRunId,
+        providerId: "openrouter",
+        modelId: "test",
+        status: "completed",
+      });
+      await db.insert(pipelineRunDecisions).values({
+        id: `${runId}-dec`,
+        pipelineRunId: runId,
+        iteration: 0,
+        stage: "implement",
+        payload: "{}",
+        createdAt: new Date(1_000_000_000 + i * 1000),
+      });
     }
     await db.insert(circuitBreakerState).values({
       issueId: "BEC-1",
@@ -131,6 +159,8 @@ describe("ura circuit reset <issueId>", () => {
     expect((await db.select().from(pipelineRuns)).length).toBe(0);
     expect((await db.select().from(stageRuns)).length).toBe(0);
     expect((await db.select().from(agentLogs)).length).toBe(0);
+    expect((await db.select().from(reviewModelRuns)).length).toBe(0);
+    expect((await db.select().from(pipelineRunDecisions)).length).toBe(0);
     expect((await db.select().from(circuitBreakerState)).length).toBe(0);
     expect(linearClient.updateIssue).toHaveBeenCalledOnce();
     const [, payload] = linearClient.updateIssue.mock.calls[0];
