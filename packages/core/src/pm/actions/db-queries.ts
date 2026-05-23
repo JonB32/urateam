@@ -1,7 +1,8 @@
 import type { AnyDb } from "../../db/client.js";
 import type { CircuitBrokenIssue } from "../types.js";
-import { pipelineRuns } from "../../db/schema.js";
-import { and, desc, eq, gte, inArray, or } from "drizzle-orm";
+import { agentLogs, circuitBreakerState, pipelineRuns, stageRuns } from "../../db/schema.js";
+import { and, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
+import { isPostgres } from "../../db/client.js";
 
 /** Statuses considered "active" (pipeline currently running). */
 export const ACTIVE_STATUSES = ["queued", "running"] as const;
@@ -286,4 +287,83 @@ export async function fetchCircuitBrokenIssues(
   results.sort((a, b) => b.failedAt.getTime() - a.failedAt.getTime());
 
   return results;
+}
+
+/**
+ * BEC-236 — `ura circuit reset` DB implementation.
+ *
+ * Inside a single transaction:
+ *   1. Identify all `status = 'failed'` pipeline_runs for the issue.
+ *   2. Cascade-delete: agent_logs → stage_runs → pipeline_runs (failed only).
+ *   3. Delete the circuit_breaker_state row (if present).
+ *
+ * Returns `{ hadStateRow, failedRunIds }` so the CLI layer can decide
+ * whether to strip the Linear `needs-design` label (only when the state
+ * row was present — avoids touching human-added labels).
+ *
+ * `completed` runs are NEVER deleted — only `status = 'failed'` rows.
+ */
+export async function deleteFailedRunsForIssue(
+  db: AnyDb,
+  issueId: string,
+): Promise<{ hadStateRow: boolean; failedRunCount: number }> {
+  // Snapshot state-row presence BEFORE the transaction deletes it.
+  const stateRows = (await db
+    .select({ issueId: circuitBreakerState.issueId })
+    .from(circuitBreakerState)
+    .where(eq(circuitBreakerState.issueId, issueId))) as Array<{ issueId: string }>;
+  const hadStateRow = stateRows.length > 0;
+
+  // Identify failed pipeline_run IDs for this issue.
+  const failedRunRows = (await db
+    .select({ id: pipelineRuns.id })
+    .from(pipelineRuns)
+    .where(
+      and(eq(pipelineRuns.issueId, issueId), eq(pipelineRuns.status, "failed")),
+    )) as Array<{ id: string }>;
+  const failedRunIds = failedRunRows.map((r) => r.id);
+
+  // Cascade-delete inside a transaction.
+  // Note: better-sqlite3 (SQLite driver) does not support async transaction
+  // callbacks. Use the same BEGIN IMMEDIATE / COMMIT / ROLLBACK pattern as
+  // setUserRole in rbac/user-role-store.ts. Postgres uses the native drizzle
+  // async transaction API.
+  const txBody = async (handle: any) => {
+    if (failedRunIds.length > 0) {
+      // Pull stage_run IDs first so we can delete agent_logs by stage_run_id.
+      const stageRunRows = (await handle
+        .select({ id: stageRuns.id })
+        .from(stageRuns)
+        .where(inArray(stageRuns.pipelineRunId, failedRunIds))) as Array<{ id: string }>;
+      const stageRunIds = stageRunRows.map((r) => r.id);
+      if (stageRunIds.length > 0) {
+        await handle.delete(agentLogs).where(inArray(agentLogs.stageRunId, stageRunIds));
+        await handle.delete(stageRuns).where(inArray(stageRuns.id, stageRunIds));
+      }
+      await handle.delete(pipelineRuns).where(inArray(pipelineRuns.id, failedRunIds));
+    }
+    await handle.delete(circuitBreakerState).where(eq(circuitBreakerState.issueId, issueId));
+  };
+
+  if (isPostgres(db as any)) {
+    await (db as any).transaction(async (tx: any) => {
+      await txBody(tx);
+    });
+  } else {
+    // SQLite path — manual transaction (BEGIN IMMEDIATE → COMMIT/ROLLBACK).
+    await (db as any).run(sql`BEGIN IMMEDIATE`);
+    try {
+      await txBody(db);
+      await (db as any).run(sql`COMMIT`);
+    } catch (err) {
+      try {
+        await (db as any).run(sql`ROLLBACK`);
+      } catch {
+        // ignore rollback errors
+      }
+      throw err;
+    }
+  }
+
+  return { hadStateRow, failedRunCount: failedRunIds.length };
 }

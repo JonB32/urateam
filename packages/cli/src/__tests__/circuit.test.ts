@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { createDb, pipelineRuns, circuitBreakerState, type AnyDb } from "@urateam/core";
-import { runCircuitList } from "../commands/circuit.js";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { createDb, pipelineRuns, stageRuns, agentLogs, circuitBreakerState, type AnyDb } from "@urateam/core";
+import { runCircuitList, runCircuitReset } from "../commands/circuit.js";
 
 describe("ura circuit list", () => {
   let db: AnyDb;
@@ -58,5 +58,138 @@ describe("ura circuit list", () => {
     await runCircuitList({ db, log, maxConsecutiveFailures: 3 });
     const out = logs.join("\n");
     expect(out).toContain("BEC-2");
+  });
+});
+
+function fakeLinearClient(currentLabels: Array<{ id: string; name: string }>) {
+  return {
+    issue: vi.fn().mockResolvedValue({
+      id: "issue-uuid",
+      labels: vi.fn().mockResolvedValue({ nodes: currentLabels }),
+    }),
+    updateIssue: vi.fn().mockResolvedValue({}),
+  };
+}
+
+describe("ura circuit reset <issueId>", () => {
+  let db: AnyDb;
+  let logs: string[];
+  let log: (msg: string) => void;
+  beforeEach(async () => {
+    db = await createDb({ connectionString: ":memory:" });
+    logs = [];
+    log = (m: string) => logs.push(m);
+  });
+
+  it("deletes the failed pipeline_runs cascade + state row, strips needs-design label", async () => {
+    // 3 failed runs, each with 1 stage_run, each with 1 agent_log
+    for (let i = 0; i < 3; i++) {
+      const runId = `BEC-1-r${i}`;
+      const stageRunId = `BEC-1-r${i}-stage`;
+      await db.insert(pipelineRuns).values({
+        id: runId,
+        issueId: "BEC-1",
+        issueTitle: "test",
+        pipelineKey: "auto-implement",
+        repoUrl: "https://example.com/r.git",
+        status: "failed",
+        startedAt: new Date(1_000_000_000 + i * 1000),
+      });
+      await db.insert(stageRuns).values({
+        id: stageRunId,
+        pipelineRunId: runId,
+        stage: "implement",
+        status: "failed",
+        startedAt: new Date(1_000_000_000 + i * 1000),
+      });
+      await db.insert(agentLogs).values({
+        id: `${stageRunId}-log`,
+        stageRunId,
+        type: "system",
+        content: "test log",
+        timestamp: new Date(1_000_000_000 + i * 1000),
+      });
+    }
+    await db.insert(circuitBreakerState).values({
+      issueId: "BEC-1",
+      escalatedAt: new Date(),
+      probeAttempts: 0,
+    });
+    const linearClient = fakeLinearClient([
+      { id: "lbl-bug", name: "bug" },
+      { id: "lbl-nd", name: "needs-design" },
+    ]);
+
+    const result = await runCircuitReset({
+      db,
+      log,
+      issueId: "BEC-1",
+      linearClient: linearClient as any,
+    });
+    expect(result.failedRunsDeleted).toBe(3);
+
+    expect((await db.select().from(pipelineRuns)).length).toBe(0);
+    expect((await db.select().from(stageRuns)).length).toBe(0);
+    expect((await db.select().from(agentLogs)).length).toBe(0);
+    expect((await db.select().from(circuitBreakerState)).length).toBe(0);
+    expect(linearClient.updateIssue).toHaveBeenCalledOnce();
+    const [, payload] = linearClient.updateIssue.mock.calls[0];
+    expect(payload.labelIds).toEqual(["lbl-bug"]); // only bug survives
+  });
+
+  it("preserves `completed` runs — only deletes failed", async () => {
+    await db.insert(pipelineRuns).values({
+      id: "BEC-1-ok",
+      issueId: "BEC-1",
+      issueTitle: "test",
+      pipelineKey: "auto-implement",
+      repoUrl: "https://example.com/r.git",
+      status: "completed",
+      startedAt: new Date(),
+    });
+    await db.insert(pipelineRuns).values({
+      id: "BEC-1-bad",
+      issueId: "BEC-1",
+      issueTitle: "test",
+      pipelineKey: "auto-implement",
+      repoUrl: "https://example.com/r.git",
+      status: "failed",
+      startedAt: new Date(),
+    });
+    const linearClient = fakeLinearClient([]);
+
+    const result = await runCircuitReset({
+      db,
+      log,
+      issueId: "BEC-1",
+      linearClient: linearClient as any,
+    });
+    expect(result.failedRunsDeleted).toBe(1);
+    const remaining = await db.select().from(pipelineRuns);
+    expect(remaining).toHaveLength(1);
+    expect((remaining[0] as any).id).toBe("BEC-1-ok");
+  });
+
+  it("no state row → does NOT touch Linear (preserves human-added needs-design)", async () => {
+    await db.insert(pipelineRuns).values({
+      id: "BEC-1-bad",
+      issueId: "BEC-1",
+      issueTitle: "test",
+      pipelineKey: "auto-implement",
+      repoUrl: "https://example.com/r.git",
+      status: "failed",
+      startedAt: new Date(),
+    });
+    // NO circuit_breaker_state row
+    const linearClient = fakeLinearClient([{ id: "lbl-nd", name: "needs-design" }]);
+
+    const result = await runCircuitReset({
+      db,
+      log,
+      issueId: "BEC-1",
+      linearClient: linearClient as any,
+    });
+    expect(result.failedRunsDeleted).toBe(1);
+    expect(linearClient.updateIssue).not.toHaveBeenCalled();
   });
 });
