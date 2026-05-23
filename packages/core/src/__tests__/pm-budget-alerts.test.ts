@@ -27,6 +27,11 @@ const TEST_URL = process.env.TEST_POSTGRES_URL;
 
 // ---- Shared fixture builders ------------------------------------------------
 
+// Single source of truth for tier ordering — used by both scopeAt() and
+// evaluationWith() so adding a new tier only requires one edit here.
+const TIER_RANK = { ok: 0, "warn-50": 1, "warn-80": 2, "blocked-100": 3 } as const;
+type BudgetTier = keyof typeof TIER_RANK;
+
 function makeSqliteDb() {
   _setSchemaDriver("sqlite");
   const sqlite = new Database(":memory:");
@@ -35,6 +40,11 @@ function makeSqliteDb() {
 }
 
 function scopeAt(kind: "global" | "team" | "repo", id: string, percent: number) {
+  const tier: BudgetTier =
+    percent >= 100 ? "blocked-100" :
+    percent >= 80  ? "warn-80" :
+    percent >= 50  ? "warn-50" :
+    "ok";
   return {
     scope:
       kind === "global"
@@ -46,22 +56,14 @@ function scopeAt(kind: "global" | "team" | "repo", id: string, percent: number) 
     limit: 1_000_000,
     used: Math.floor(1_000_000 * (percent / 100)),
     percent,
-    tier:
-      percent >= 100
-        ? ("blocked-100" as const)
-        : percent >= 80
-          ? ("warn-80" as const)
-          : percent >= 50
-            ? ("warn-50" as const)
-            : ("ok" as const),
+    tier,
   };
 }
 
 function evaluationWith(scopes: ReturnType<typeof scopeAt>[]): BudgetEvaluation {
-  const tierRank = { ok: 0, "warn-50": 1, "warn-80": 2, "blocked-100": 3 } as const;
-  let worst: keyof typeof tierRank = "ok";
+  let worst: BudgetTier = "ok";
   for (const s of scopes) {
-    if (tierRank[s.tier] > tierRank[worst]) worst = s.tier;
+    if (TIER_RANK[s.tier] > TIER_RANK[worst]) worst = s.tier;
   }
   return {
     scopes,
