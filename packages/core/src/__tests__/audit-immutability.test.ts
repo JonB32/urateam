@@ -77,6 +77,14 @@ describe("audit_events immutability", () => {
       // for the rationale on bypassing the audit-log feature gate.
       "packages/core/src/executor/auth-monitor.ts",
       "packages/core/src/__tests__/auth-monitor.test.ts",
+      // BEC-236: circuit-breaker probe / recovery / manual reset are base-tier
+      // operational signals — operators need to see them regardless of whether
+      // the Enterprise audit-log dashboard is licensed. Same rationale as
+      // auth-monitor: the events drive a critical recovery loop that must be
+      // observable in OSS/Pro tiers.
+      "packages/core/src/pm/actions/select-probe-candidates.ts",
+      "packages/core/src/pm/actions/recover-circuit-breaker.ts",
+      "packages/cli/src/commands/circuit.ts",
       "packages/core/src/audit/events.ts",
       "packages/core/src/repo/agent-branch-sweep-runner.ts",
       "packages/core/src/qa/github.ts",

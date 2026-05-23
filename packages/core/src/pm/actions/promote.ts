@@ -16,6 +16,7 @@ import {
   batchCountConsecutiveFailures,
   getLastFailureError,
 } from "./db-queries.js";
+import { circuitBreakerState } from "../../db/schema.js";
 
 /**
  * Tier 5 — the pipeline label assigned to issues that have tripped the
@@ -54,6 +55,13 @@ export interface PromoteInput {
    * Leave undefined to disable the breaker (default behavior).
    */
   maxConsecutiveFailures?: number;
+  /**
+   * BEC-236 — issue IDs the half-open probe selected this tick. Issues in
+   * this Set bypass the consecutive-failures circuit-breaker skip, allowing
+   * exactly one probe run per cooldown window. When undefined, breaker
+   * behavior is unchanged from BEC-161/181.
+   */
+  probeOverrideIds?: Set<string>;
   /**
    * BEC-161/BEC-181: returns the number of consecutive failed runs for an
    * issue. Tests inject a stub here (avoids real DB rows). Production omits
@@ -179,7 +187,10 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
       const failureCount = input.getFailureCount
         ? await input.getFailureCount(candidate.identifier)
         : (prefetchedFailureCounts!.get(candidate.identifier) ?? 0);
-      if (failureCount >= input.maxConsecutiveFailures) {
+      if (
+        failureCount >= input.maxConsecutiveFailures &&
+        !input.probeOverrideIds?.has(candidate.identifier)
+      ) {
         log.warn(
           { issueId: candidate.identifier, failureCount, threshold: input.maxConsecutiveFailures },
           "skipped promote: circuit-breaker engaged (too many consecutive failures)",
@@ -295,6 +306,23 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
               log.warn(
                 { issueId: candidate.identifier, err },
                 "Tier 5 escalation: Slack alert failed",
+              );
+            }
+          }
+
+          // BEC-236 — record the Tier-5 escalation so the half-open probe can
+          // distinguish our auto-added needs-design from a human's. Idempotent on
+          // issue_id PK so re-escalations of the same issue don't double-insert.
+          if (input.db) {
+            try {
+              await (input.db as any)
+                .insert(circuitBreakerState)
+                .values({ issueId: candidate.identifier, escalatedAt: new Date() })
+                .onConflictDoNothing();
+            } catch (err) {
+              log.warn(
+                { err, issueId: candidate.identifier },
+                "failed to insert circuit_breaker_state row (probe recovery will skip this issue)",
               );
             }
           }

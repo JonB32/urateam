@@ -776,6 +776,71 @@ export function pmEscalatedToNeedsDesignEvent(args: {
   });
 }
 
+/** BEC-236 — PM tick selected this issue for a half-open circuit-breaker
+ * probe. The breaker is currently engaged (≥ maxConsecutiveFailures), but
+ * the cooldown window has elapsed and the per-tick probe cap allows it
+ * through. */
+export function pmCircuitBreakerProbeEvent(args: {
+  issueId: string;
+  consecutiveFailures: number;
+  /**
+   * Minutes since this issue's previous probe. `-1` when there is no
+   * previous probe (= this is the first probe for the issue). NOT the age
+   * since the last failure — that would require a separate per-issue
+   * query and wasn't worth the N+1.
+   */
+  lastProbeAgeMin: number;
+  probeAttempts: number;
+}): AuditEvent {
+  return base({
+    eventType: "pm.circuit_breaker_probe",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    issueId: args.issueId,
+    payload: {
+      consecutiveFailures: args.consecutiveFailures,
+      lastProbeAgeMin: args.lastProbeAgeMin,
+      probeAttempts: args.probeAttempts,
+    },
+  });
+}
+
+/** BEC-236 — A probe run reached terminal `completed` status, so the
+ * circuit_breaker_state row was deleted and the Tier-5-added `needs-design`
+ * label was removed. */
+export function pmCircuitBreakerRecoveredEvent(args: {
+  issueId: string;
+  probeAttempts: number;
+}): AuditEvent {
+  return base({
+    eventType: "pm.circuit_breaker_recovered",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    issueId: args.issueId,
+    payload: {
+      probeAttempts: args.probeAttempts,
+    },
+  });
+}
+
+/** BEC-236 — `ura circuit reset` cleared the breaker for an issue. */
+export function pmCircuitBreakerResetManualEvent(args: {
+  issueId: string;
+  scope: "single" | "bulk";
+  failedRunsDeleted: number;
+}): AuditEvent {
+  return base({
+    eventType: "pm.circuit_breaker_reset_manual",
+    actor: "ura-cli",
+    actorType: "cli",
+    issueId: args.issueId,
+    payload: {
+      scope: args.scope,
+      failedRunsDeleted: args.failedRunsDeleted,
+    },
+  });
+}
+
 /**
  * `ura start --tunnel <mode>` brought a public tunnel up. Emitted once per
  * successful start (including restarts after a tunnel failure). Payload
