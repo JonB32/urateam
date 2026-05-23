@@ -153,6 +153,25 @@ describe("layout", () => {
     });
   });
 
+  describe("Content-Security-Policy meta tag", () => {
+    it("should include CSP meta tag with unsafe-inline for style-src", () => {
+      const html = layout("Test", "");
+      expect(html).toContain('http-equiv="Content-Security-Policy"');
+      expect(html).toContain("style-src 'self' 'unsafe-inline' https://fonts.googleapis.com");
+    });
+
+    it("should include font-src directive allowing fonts.gstatic.com", () => {
+      const html = layout("Test", "");
+      expect(html).toContain("font-src 'self' https://fonts.gstatic.com");
+    });
+
+    it("should retain script-src restriction to self and unpkg.com", () => {
+      const html = layout("Test", "");
+      expect(html).toContain("script-src 'self' https://unpkg.com");
+      expect(html).not.toContain("script-src 'unsafe-inline'");
+    });
+  });
+
   describe("CSS and asset loading", () => {
     it("should use relative path for CSS when basePath is empty", () => {
       delete process.env.DASHBOARD_BASE_PATH;

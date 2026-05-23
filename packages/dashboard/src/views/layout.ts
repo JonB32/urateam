@@ -64,7 +64,7 @@ export function layout(
     ? `<button type="button" class="link signout-btn" hx-post="${bp}/auth/logout" hx-headers='{"HX-Request":"true"}' hx-push-url="true" hx-swap="none">Sign out (${escapeHtml(ctx.userEmail)})</button>`
     : "";
   const cspContent =
-    "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self'";
+    "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com";
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
