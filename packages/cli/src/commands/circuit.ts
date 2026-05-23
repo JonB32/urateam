@@ -142,6 +142,65 @@ export async function runCircuitReset(deps: CircuitResetDeps): Promise<CircuitRe
   return { issueId, failedRunsDeleted: failedRunCount };
 }
 
+export interface CircuitResetAllDeps {
+  db: AnyDb;
+  log: (msg: string) => void;
+  linearClient: any;
+  maxConsecutiveFailures: number;
+}
+
+export interface CircuitResetAllResult {
+  cleared: string[];
+  failed: Array<{ issueId: string; error: string }>;
+}
+
+/**
+ * BEC-236 — `ura circuit reset --all`. Discovers currently-broken
+ * issues via `batchCountConsecutiveFailures` (NOT via state-row
+ * membership, because the table is bootstrapped from new Tier-5
+ * escalations and may be empty on a first deploy even though the
+ * frozen backlog is real). Each issue gets its own per-issue
+ * transaction via `runCircuitReset`, so a partial failure mid-bulk
+ * leaves the rest in a consistent state.
+ */
+export async function runCircuitResetAll(deps: CircuitResetAllDeps): Promise<CircuitResetAllResult> {
+  const { db, log, linearClient, maxConsecutiveFailures } = deps;
+
+  const allIssueRows = (await db
+    .selectDistinct({ issueId: pipelineRuns.issueId })
+    .from(pipelineRuns)) as Array<{ issueId: string }>;
+  const allIssueIds = allIssueRows.map((r) => r.issueId);
+  if (allIssueIds.length === 0) {
+    log("No circuit-broken issues.");
+    return { cleared: [], failed: [] };
+  }
+
+  const counts = await batchCountConsecutiveFailures(db, allIssueIds);
+  const broken = allIssueIds.filter((id) => (counts.get(id) ?? 0) >= maxConsecutiveFailures);
+  if (broken.length === 0) {
+    log("No circuit-broken issues.");
+    return { cleared: [], failed: [] };
+  }
+
+  log(`Resetting ${broken.length} circuit-broken issue(s)…`);
+
+  const cleared: string[] = [];
+  const failed: Array<{ issueId: string; error: string }> = [];
+  for (const id of broken.sort()) {
+    try {
+      await runCircuitReset({ db, log, issueId: id, linearClient, scope: "bulk" });
+      cleared.push(id);
+    } catch (err) {
+      failed.push({
+        issueId: id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  log(`circuit reset --all: cleared ${cleared.length}, failed ${failed.length}`);
+  return { cleared, failed };
+}
+
 /**
  * BEC-236 — `ura circuit` parent command. Subcommands: list, reset (added in
  * later tasks).
@@ -165,16 +224,50 @@ circuitCommand
 circuitCommand
   .command("reset")
   .description("Clear the breaker for an issue or all currently-broken issues.")
-  .argument("[issueId]", "Issue ID (e.g. BEC-1). Omit when using --all (added in Task 12).")
-  .option("--all", "Reset every currently-broken issue (Task 12 — not yet implemented).")
-  .option("--yes", "Skip the bulk confirmation prompt (Task 12).")
+  .argument("[issueId]", "Issue ID (e.g. BEC-1). Omit when using --all.")
+  .option("--all", "Reset every currently-broken issue.")
+  .option("--yes", "Skip the bulk confirmation prompt.")
   .action(async (issueId: string | undefined, opts: { all?: boolean; yes?: boolean }) => {
     if (opts.all) {
-      console.error("ura circuit reset --all: not yet implemented (Task 12)");
-      process.exit(1);
+      if (issueId) {
+        console.error("ura circuit reset: pass either <issueId> OR --all, not both");
+        process.exit(1);
+      }
+      // Confirmation prompt unless --yes
+      if (!opts.yes) {
+        const readline = await import("node:readline/promises");
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        try {
+          const answer = (
+            await rl.question(
+              "This will delete failed pipeline_runs for every currently-broken issue. Continue? [y/N] ",
+            )
+          )
+            .trim()
+            .toLowerCase();
+          if (answer !== "y" && answer !== "yes") {
+            console.log("Aborted.");
+            process.exit(0);
+          }
+        } finally {
+          rl.close();
+        }
+      }
+      const dbUrl = process.env.DATABASE_URL ?? "./urateam.db";
+      const db = await createDb({ connectionString: dbUrl });
+      const linearApiKey = process.env.LINEAR_API_KEY;
+      if (!linearApiKey) {
+        console.error("ura circuit reset: LINEAR_API_KEY env var required");
+        process.exit(1);
+      }
+      const linearClient = new LinearClient({ apiKey: linearApiKey });
+      const max = Number.parseInt(process.env.PM_MAX_CONSECUTIVE_FAILURES ?? "3", 10);
+      const threshold = Number.isFinite(max) && max > 0 ? max : 3;
+      await runCircuitResetAll({ db, log: console.log, linearClient, maxConsecutiveFailures: threshold });
+      return;
     }
     if (!issueId) {
-      console.error("ura circuit reset: pass an issue ID (or use --all once implemented)");
+      console.error("ura circuit reset: pass an issue ID (or use --all)");
       process.exit(1);
     }
     const dbUrl = process.env.DATABASE_URL ?? "./urateam.db";

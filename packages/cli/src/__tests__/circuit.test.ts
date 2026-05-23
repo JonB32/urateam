@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createDb, pipelineRuns, stageRuns, agentLogs, circuitBreakerState, type AnyDb } from "@urateam/core";
-import { runCircuitList, runCircuitReset } from "../commands/circuit.js";
+import { runCircuitList, runCircuitReset, runCircuitResetAll } from "../commands/circuit.js";
 
 describe("ura circuit list", () => {
   let db: AnyDb;
@@ -191,5 +191,132 @@ describe("ura circuit reset <issueId>", () => {
     });
     expect(result.failedRunsDeleted).toBe(1);
     expect(linearClient.updateIssue).not.toHaveBeenCalled();
+  });
+});
+
+describe("ura circuit reset --all", () => {
+  let db: AnyDb;
+  let logs: string[];
+  let log: (msg: string) => void;
+  beforeEach(async () => {
+    db = await createDb({ connectionString: ":memory:" });
+    logs = [];
+    log = (m: string) => logs.push(m);
+  });
+
+  it("resets every currently-broken issue (works without pre-existing state rows)", async () => {
+    // Seed two broken issues; only one has a state row (mimics first-deploy bootstrap).
+    for (const id of ["BEC-1", "BEC-2"]) {
+      for (let i = 0; i < 3; i++) {
+        await db.insert(pipelineRuns).values({
+          id: `${id}-r${i}`,
+          issueId: id,
+          issueTitle: "test",
+          pipelineKey: "auto-implement",
+          repoUrl: "https://example.com/r.git",
+          status: "failed",
+          startedAt: new Date(1_000_000_000 + i * 1000),
+        });
+      }
+    }
+    await db.insert(circuitBreakerState).values({
+      issueId: "BEC-1",
+      escalatedAt: new Date(),
+      probeAttempts: 0,
+    });
+    const linearClient = {
+      issue: vi.fn().mockResolvedValue({
+        id: "uuid",
+        labels: vi.fn().mockResolvedValue({ nodes: [] }),
+      }),
+      updateIssue: vi.fn().mockResolvedValue({}),
+    };
+
+    const result = await runCircuitResetAll({
+      db,
+      log,
+      linearClient: linearClient as any,
+      maxConsecutiveFailures: 3,
+    });
+
+    expect(result.cleared.sort()).toEqual(["BEC-1", "BEC-2"]);
+    expect(result.failed).toEqual([]);
+    expect((await db.select().from(pipelineRuns)).length).toBe(0);
+    expect((await db.select().from(circuitBreakerState)).length).toBe(0);
+  });
+
+  it("skips issues whose failure count is below threshold", async () => {
+    // BEC-1 has 2 failures (below threshold 3) — should NOT be cleared
+    for (let i = 0; i < 2; i++) {
+      await db.insert(pipelineRuns).values({
+        id: `BEC-1-r${i}`,
+        issueId: "BEC-1",
+        issueTitle: "test",
+        pipelineKey: "auto-implement",
+        repoUrl: "https://example.com/r.git",
+        status: "failed",
+        startedAt: new Date(1_000_000_000 + i * 1000),
+      });
+    }
+    const linearClient = {
+      issue: vi.fn().mockResolvedValue({ id: "uuid", labels: vi.fn().mockResolvedValue({ nodes: [] }) }),
+      updateIssue: vi.fn().mockResolvedValue({}),
+    };
+
+    const result = await runCircuitResetAll({
+      db,
+      log,
+      linearClient: linearClient as any,
+      maxConsecutiveFailures: 3,
+    });
+    expect(result.cleared).toEqual([]);
+    expect((await db.select().from(pipelineRuns)).length).toBe(2); // preserved
+  });
+
+  it("partial-failure mid-bulk leaves the rest consistent", async () => {
+    for (const id of ["BEC-1", "BEC-2", "BEC-3"]) {
+      for (let i = 0; i < 3; i++) {
+        await db.insert(pipelineRuns).values({
+          id: `${id}-r${i}`,
+          issueId: id,
+          issueTitle: "test",
+          pipelineKey: "auto-implement",
+          repoUrl: "https://example.com/r.git",
+          status: "failed",
+          startedAt: new Date(1_000_000_000 + i * 1000),
+        });
+      }
+      await db.insert(circuitBreakerState).values({
+        issueId: id,
+        escalatedAt: new Date(),
+        probeAttempts: 0,
+      });
+    }
+    // BEC-2's updateIssue throws — but BEC-1 and BEC-3 should still complete.
+    let callCount = 0;
+    const linearClient = {
+      issue: vi.fn().mockImplementation(async (id: string) => ({
+        id: `${id}-uuid`,
+        labels: vi.fn().mockResolvedValue({ nodes: [{ id: "lbl-nd", name: "needs-design" }] }),
+      })),
+      updateIssue: vi.fn().mockImplementation(async (uuid: string) => {
+        callCount++;
+        if (uuid === "BEC-2-uuid") throw new Error("Linear API blip");
+        return {};
+      }),
+    };
+
+    const result = await runCircuitResetAll({
+      db,
+      log,
+      linearClient: linearClient as any,
+      maxConsecutiveFailures: 3,
+    });
+    // All three issues had their DB cleanup succeed (the per-issue tx is
+    // independent of the Linear call — runCircuitReset wraps Linear in
+    // try/catch).
+    expect(result.cleared.sort()).toEqual(["BEC-1", "BEC-2", "BEC-3"]);
+    expect((await db.select().from(pipelineRuns)).length).toBe(0);
+    expect((await db.select().from(circuitBreakerState)).length).toBe(0);
   });
 });
