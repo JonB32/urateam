@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { layout, escapeHtml, getBasePath } from "../views/layout.js";
+import { DASHBOARD_CSP } from "../csp.js";
 
 describe("layout", () => {
   const originalEnv = process.env.DASHBOARD_BASE_PATH;
@@ -154,21 +155,15 @@ describe("layout", () => {
   });
 
   describe("Content-Security-Policy meta tag", () => {
-    it("should include CSP meta tag with unsafe-inline for style-src", () => {
+    it("should embed the full DASHBOARD_CSP constant in the meta tag", () => {
       const html = layout("Test", "");
       expect(html).toContain('http-equiv="Content-Security-Policy"');
-      expect(html).toContain("style-src 'self' 'unsafe-inline' https://fonts.googleapis.com");
-    });
-
-    it("should include font-src directive allowing fonts.gstatic.com", () => {
-      const html = layout("Test", "");
-      expect(html).toContain("font-src 'self' https://fonts.gstatic.com");
+      expect(html).toContain(DASHBOARD_CSP);
     });
 
     it("should retain script-src restriction to self and unpkg.com", () => {
-      const html = layout("Test", "");
-      expect(html).toContain("script-src 'self' https://unpkg.com");
-      expect(html).not.toContain("script-src 'unsafe-inline'");
+      expect(DASHBOARD_CSP).toContain("script-src 'self' https://unpkg.com");
+      expect(DASHBOARD_CSP).not.toContain("script-src 'unsafe-inline'");
     });
   });
 

@@ -1,3 +1,5 @@
+import { DASHBOARD_CSP } from "../csp.js";
+
 // Base path for all dashboard links and asset references.
 // Set DASHBOARD_BASE_PATH=/ateam (no trailing slash) when the dashboard is
 // served under a path prefix (e.g. via a Caddy strip_prefix proxy).
@@ -63,8 +65,7 @@ export function layout(
   const signOut = ctx?.userEmail
     ? `<button type="button" class="link signout-btn" hx-post="${bp}/auth/logout" hx-headers='{"HX-Request":"true"}' hx-push-url="true" hx-swap="none">Sign out (${escapeHtml(ctx.userEmail)})</button>`
     : "";
-  const cspContent =
-    "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com";
+  const cspContent = DASHBOARD_CSP;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
