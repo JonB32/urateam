@@ -390,5 +390,34 @@ describe("promoteReadyIssues", () => {
       // breaker not invoked → getFailureCount must not be called
       expect(getFailureCount).not.toHaveBeenCalled();
     });
+
+    it("bypasses the breaker skip for issues in probeOverrideIds (BEC-236)", async () => {
+      const issues = [
+        { id: "i1", identifier: "BEC-161-A", title: "Doom-looping", description: "", priority: 2,
+          labels: { nodes: [] }, team: { id: "team-1" }, url: "https://linear.app/BEC-161-A" },
+      ];
+      const client = mockLinearClient(issues);
+      const conflictChecker = vi.fn().mockResolvedValue({ overlapRisk: "none", likelyFiles: [], reasoning: "" });
+      const getFailureCount = vi.fn().mockResolvedValue(3);
+
+      const results = await promoteReadyIssues({
+        linearClient: client as any,
+        teamIds: ["team-1"],
+        slotsAvailable: 1,
+        checkConflict: conflictChecker,
+        stateMap: defaultStateMap,
+        maxConsecutiveFailures: 3,
+        getFailureCount,
+        probeOverrideIds: new Set(["BEC-161-A"]),
+      });
+
+      // The issue is circuit-broken (3 >= 3) but in probeOverrideIds, so it
+      // should be promoted rather than skipped.
+      expect(results).toHaveLength(1);
+      expect(results[0].promoted).toBe(true);
+      expect(results[0].issueId).toBe("BEC-161-A");
+      expect(client.updateIssue).toHaveBeenCalledWith("i1", expect.objectContaining({ stateId: "state-todo" }));
+      expect(getFailureCount).toHaveBeenCalledWith("BEC-161-A");
+    });
   });
 });

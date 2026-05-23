@@ -55,6 +55,13 @@ export interface PromoteInput {
    */
   maxConsecutiveFailures?: number;
   /**
+   * BEC-236 — issue IDs the half-open probe selected this tick. Issues in
+   * this Set bypass the consecutive-failures circuit-breaker skip, allowing
+   * exactly one probe run per cooldown window. When undefined, breaker
+   * behavior is unchanged from BEC-161/181.
+   */
+  probeOverrideIds?: Set<string>;
+  /**
    * BEC-161/BEC-181: returns the number of consecutive failed runs for an
    * issue. Tests inject a stub here (avoids real DB rows). Production omits
    * this so `batchCountConsecutiveFailures` is used instead (single DB
@@ -179,7 +186,10 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
       const failureCount = input.getFailureCount
         ? await input.getFailureCount(candidate.identifier)
         : (prefetchedFailureCounts!.get(candidate.identifier) ?? 0);
-      if (failureCount >= input.maxConsecutiveFailures) {
+      if (
+        failureCount >= input.maxConsecutiveFailures &&
+        !input.probeOverrideIds?.has(candidate.identifier)
+      ) {
         log.warn(
           { issueId: candidate.identifier, failureCount, threshold: input.maxConsecutiveFailures },
           "skipped promote: circuit-breaker engaged (too many consecutive failures)",
