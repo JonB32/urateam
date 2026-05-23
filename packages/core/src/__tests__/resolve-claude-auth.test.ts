@@ -15,14 +15,15 @@ const mockExecFile = vi.mocked(execFile);
 
 function simulateCliSuccess() {
   mockExecFile.mockImplementation((_cmd, _args, _opts, cb: any) => {
-    cb(null);
+    cb(null, "ok", "");
     return {} as any;
   });
 }
 
+/** Simulate a 401 auth error from the real-API probe (BEC-244). */
 function simulateCliFailure() {
   mockExecFile.mockImplementation((_cmd, _args, _opts, cb: any) => {
-    cb(new Error("auth failed"));
+    cb(new Error("Command failed"), "", "Error: Invalid authentication credentials (401)");
     return {} as any;
   });
 }
@@ -134,9 +135,10 @@ describe("isClaudeAuthValid env-var short-circuit", () => {
     const result = await isClaudeAuthValid();
     expect(result).toBe(true);
     expect(mockExecFile).toHaveBeenCalledTimes(1);
+    // Must use the real-API probe, NOT claude auth status (BEC-244)
     expect(mockExecFile).toHaveBeenCalledWith(
       "claude",
-      ["auth", "status"],
+      ["-p", "ok"],
       { timeout: 10_000 },
       expect.any(Function),
     );
