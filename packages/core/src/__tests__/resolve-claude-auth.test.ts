@@ -68,14 +68,14 @@ describe("resolveClaudeAuth", () => {
     expect(result.method).toBe("oauth-token");
   });
 
-  it("returns session method when neither env var is set", () => {
+  it("returns mounted-session method when neither env var is set", () => {
     delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
     delete process.env.ANTHROPIC_API_KEY;
     const result = resolveClaudeAuth();
-    expect(result.method).toBe("session");
+    expect(result.method).toBe("mounted-session");
   });
 
-  it("precedence order: CLAUDE_CODE_OAUTH_TOKEN > ANTHROPIC_API_KEY > session", () => {
+  it("precedence order: CLAUDE_CODE_OAUTH_TOKEN > ANTHROPIC_API_KEY > mounted-session", () => {
     // All set — oauth token wins
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-x";
     process.env.ANTHROPIC_API_KEY = "sk-ant-api03-y";
@@ -85,9 +85,9 @@ describe("resolveClaudeAuth", () => {
     delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
     expect(resolveClaudeAuth().method).toBe("api-key");
 
-    // Neither — session
+    // Neither — mounted-session
     delete process.env.ANTHROPIC_API_KEY;
-    expect(resolveClaudeAuth().method).toBe("session");
+    expect(resolveClaudeAuth().method).toBe("mounted-session");
   });
 });
 

@@ -22,7 +22,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // lets each test control the probe outcome cleanly.
 vi.mock("../executor/auth-check.js", () => ({
   resetAuthCheckCache: vi.fn(),
-  resolveClaudeAuth: vi.fn(() => ({ method: "session" })),
+  resolveClaudeAuth: vi.fn(() => ({ method: "mounted-session" })),
   isClaudeAuthValid: vi.fn().mockResolvedValue(true),
   probeClaudeAuth: vi.fn(),
 }));

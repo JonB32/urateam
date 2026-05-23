@@ -8,6 +8,16 @@ let lastCheckResult = false;
 let inflightCheck: Promise<boolean> | null = null;
 const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
+/** Minimal headless prompt used to exercise the credential against the Anthropic API (BEC-244). */
+const PROBE_PROMPT = "ok";
+
+/**
+ * Timeout for the pre-flight probe in isClaudeAuthValid().
+ * Kept shorter than the monitor's timeout so stage execution doesn't stall at
+ * boot — a fast fail is preferable to a long hang before the first stage.
+ */
+const PROBE_TIMEOUT_PREFLIGHT_MS = 10_000;
+
 // ---------------------------------------------------------------------------
 // resolveClaudeAuth — auth-method resolution (BEC-207)
 // ---------------------------------------------------------------------------
@@ -25,15 +35,15 @@ const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 export interface ClaudeAuthCredentials {
   /**
    * Which auth path was selected:
-   *  - "oauth-token" — CLAUDE_CODE_OAUTH_TOKEN env var is present (long-lived
+   *  - "oauth-token"      — CLAUDE_CODE_OAUTH_TOKEN env var is present (long-lived
    *    programmatic token produced by `claude setup-token`, bills against
    *    Pro/Max subscription, no weekly expiry)
-   *  - "api-key"     — ANTHROPIC_API_KEY env var is present (pay-per-token,
+   *  - "api-key"          — ANTHROPIC_API_KEY env var is present (pay-per-token,
    *    no expiry)
-   *  - "session"     — neither env var is set; falls back to the locally
+   *  - "mounted-session"  — neither env var is set; falls back to the locally
    *    mounted `claude login` session (~/.config/claude/), which expires ~weekly
    */
-  method: "oauth-token" | "api-key" | "session";
+  method: "oauth-token" | "api-key" | "mounted-session";
 }
 
 /**
@@ -53,7 +63,7 @@ export function resolveClaudeAuth(): ClaudeAuthCredentials {
   if (process.env.ANTHROPIC_API_KEY) {
     return { method: "api-key" };
   }
-  return { method: "session" };
+  return { method: "mounted-session" };
 }
 
 // ---------------------------------------------------------------------------
@@ -86,7 +96,7 @@ const AUTH_ERROR_PATTERNS = [
  */
 export async function probeClaudeAuth(timeoutMs: number): Promise<ProbeResult> {
   return new Promise<ProbeResult>((resolve) => {
-    execFile("claude", ["-p", "ok"], { timeout: timeoutMs }, (err, _stdout, stderr) => {
+    execFile("claude", ["-p", PROBE_PROMPT], { timeout: timeoutMs }, (err, _stdout, stderr) => {
       if (!err) {
         resolve({ valid: true });
         return;
@@ -139,7 +149,7 @@ export async function isClaudeAuthValid(): Promise<boolean> {
 
   inflightCheck = (async () => {
     try {
-      const result = await probeClaudeAuth(10_000);
+      const result = await probeClaudeAuth(PROBE_TIMEOUT_PREFLIGHT_MS);
       lastCheckResult = result.valid;
       if (result.valid) {
         log.debug("Claude auth check passed");

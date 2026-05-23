@@ -28,6 +28,9 @@ const log = createLogger({ component: "AuthMonitor" });
 /** Default check interval: 6 hours */
 export const AUTH_MONITOR_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
+/** Timeout for the AuthMonitor probe. Longer than the preflight timeout — the monitor runs off the critical path. */
+const PROBE_TIMEOUT_MONITOR_MS = 15_000;
+
 export interface AuthMonitorOptions {
   /** Slack bot token for posting alerts. Optional — skips Slack if absent. */
   slackBotToken?: string;
@@ -82,7 +85,7 @@ export async function runAuthMonitorCheck(
   // Real API call — `claude auth status` only checks local credential presence,
   // not whether the credential is accepted by the Anthropic API (BEC-244).
   // Network errors / timeouts resolve { valid: true } (fail-open).
-  const result = await probeClaudeAuth(15_000);
+  const result = await probeClaudeAuth(PROBE_TIMEOUT_MONITOR_MS);
 
   if (result.valid) {
     log.debug({ authMethod }, "AuthMonitor: auth is valid");

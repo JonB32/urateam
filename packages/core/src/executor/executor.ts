@@ -223,7 +223,7 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
 
   try {
     // Resolve auth method before any SDK call (BEC-207). Logs which path is
-    // active (oauth-token / api-key / session) alongside the run context.
+    // active (oauth-token / api-key / mounted-session) alongside the run context.
     const claudeAuth = resolveClaudeAuth();
     log.info({ authMethod: claudeAuth.method }, "Claude auth method resolved");
 
