@@ -196,6 +196,7 @@ budget check → **recover retriable runs** → recover stuck In Progress → **
 - Drizzle ORM with SQLite (dev) / Postgres (prod). Auto-detect driver from `DATABASE_URL` prefix.
 - **Unified schema with `crossTimestamp` (BEC-89)**: single `db/schema.ts`. `_setSchemaDriver()` called by `createDb()` switches serialization between epoch ints (SQLite) and ISO strings (Postgres). Postgres timestamp columns are TIMESTAMPTZ (since PR #153).
 - Drizzle `gte()` / `lt()` / `eq()` work natively on `crossTimestamp` for both drivers. No raw SQL workarounds needed.
+- **`onConflictDoNothing().returning()` driver parity (BEC-130)**: both SQLite and Postgres return an **empty array** when the insert is suppressed by a UNIQUE conflict. The result is NOT the existing row. `budget-alerts.ts` uses `result.length > 0` to mean "newly inserted (fire alert)" — this is correct on both drivers. Verified by `pm-budget-alerts.test.ts` (parameterised SQLite + Postgres suite).
 - **Migrations**: `MIGRATION_COLUMNS` array in `client.ts` generates driver-appropriate `ALTER TABLE`. `getCreateTablesDDL(driver)` generates CREATE TABLE. File-based migrations in `db/migrations/{sqlite,postgres}/` auto-run from `createDb()`.
 - Batch `agent_logs` inserts (flush every 20).
 - Webhook dedup uses `webhookDedup` table (survives restarts); falls back to in-memory when no DB.
