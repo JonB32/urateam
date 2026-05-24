@@ -1,10 +1,10 @@
 /**
- * Reproduction test for BEC-251:
- * "Claude Code process exited with code 1" failures swallow all diagnostic detail.
+ * BEC-251 — executor error-capture enrichment.
  *
- * This test confirms the bug exists: when the Agent SDK throws a process-exit
- * error, the executor only stores error.message in agent_logs.content —
- * discarding exitCode, stderr, session type, auth method, and duration.
+ * Verifies that when the Agent SDK throws a process-exit error, executor.ts
+ * writes a structured-JSON payload to agent_logs.content containing:
+ *   exitCode, stderr, authMethod, sessionType, durationMs
+ * and a compact one-liner to stage_runs.errorMessage / StageResult.errorMessage.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -84,11 +84,13 @@ async function seedPipelineRun(db: Db, runId: string): Promise<void> {
   });
 }
 
-/** Create an error shaped like the SDK's getProcessExitError, with extra fields. */
+/**
+ * Make an error shaped like the SDK's getProcessExitError output, with
+ * exitCode and stderr set as extra properties so the executor can read them
+ * (the real SDK embeds exitCode in the message; mocks expose it directly).
+ */
 function makeProcessExitError(exitCode: number, stderr: string): Error {
   const err = new Error(`Claude Code process exited with code ${exitCode}`);
-  // The issue says these fields should be capturable; simulate what an enriched
-  // SDK error or a future SDK version might expose (and what we want to capture).
   (err as any).exitCode = exitCode;
   (err as any).stderr = stderr;
   return err;
@@ -96,7 +98,7 @@ function makeProcessExitError(exitCode: number, stderr: string): Error {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-describe("BEC-251 — executor error capture (reproduce)", () => {
+describe("BEC-251 — executor error enrichment", () => {
   let db: Db;
 
   beforeEach(async () => {
@@ -104,19 +106,111 @@ describe("BEC-251 — executor error capture (reproduce)", () => {
     vi.clearAllMocks();
   });
 
-  it("CONFIRMS BUG: agent_logs.content only contains the plain message — exitCode and stderr are discarded", async () => {
+  it("writes structured JSON with exitCode and stderr to agent_logs.content", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
-    // Simulate the SDK throwing a process-exit error with diagnostic fields
-    const sdkError = makeProcessExitError(1, "auth: 401 Unauthorized");
+    const sdkError = makeProcessExitError(1, "auth: 401");
     (query as any).mockImplementation(() => {
       throw sdkError;
     });
 
-    const runId = "run-bec251-repro";
+    const runId = "run-bec251-json";
     await seedPipelineRun(db, runId);
 
     const result = await executeStage({
+      runId,
+      issueId: testIssue.id,
+      stage: "implement",
+      sanitizedIssue: testIssue,
+      repoConfig: testRepoConfig,
+      workdir: "/tmp/bec251-workdir",
+      db,
+      agentSessionId: null,
+    });
+
+    expect(result.status).toBe("failed");
+
+    const logs = await (db as any)
+      .select()
+      .from(agentLogs)
+      .where(eq(agentLogs.type, "error"));
+
+    expect(logs).toHaveLength(1);
+    const content = logs[0].content;
+
+    // Content must be valid JSON
+    let parsed: Record<string, unknown>;
+    expect(() => {
+      parsed = JSON.parse(content);
+    }).not.toThrow();
+
+    // exitCode must be captured
+    expect(parsed!.exitCode).toBe(1);
+
+    // stderr must appear
+    expect(parsed!.stderr).toBe("auth: 401");
+
+    // authMethod must be captured
+    expect(parsed!.authMethod).toBe("api-key");
+
+    // sessionType must be present (no session in this test)
+    expect(parsed!.sessionType).toBe("none");
+
+    // durationMs must be a non-negative number
+    expect(typeof parsed!.durationMs).toBe("number");
+    expect(parsed!.durationMs as number).toBeGreaterThanOrEqual(0);
+
+    // message must be the original error message
+    expect(parsed!.message).toContain("Claude Code process exited with code 1");
+
+    // Payload must stay within 2 KB
+    expect(content.length).toBeLessThanOrEqual(2048);
+  });
+
+  it("writes an enriched one-liner to StageResult.errorMessage (→ pipeline_runs.error_message)", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+
+    (query as any).mockImplementation(() => {
+      throw makeProcessExitError(1, "auth: 401");
+    });
+
+    const runId = "run-bec251-oneliner";
+    await seedPipelineRun(db, runId);
+
+    const result = await executeStage({
+      runId,
+      issueId: testIssue.id,
+      stage: "implement",
+      sanitizedIssue: testIssue,
+      repoConfig: testRepoConfig,
+      workdir: "/tmp/bec251-workdir",
+      db,
+      agentSessionId: null,
+    });
+
+    expect(result.status).toBe("failed");
+
+    // errorMessage must contain inline context fields
+    expect(result.errorMessage).toContain("Claude Code process exited with code 1");
+    expect(result.errorMessage).toContain("exitCode=1");
+    expect(result.errorMessage).toContain("auth=api-key");
+    expect(result.errorMessage).toContain("session=none");
+    expect(result.errorMessage).toMatch(/duration=\d+ms/);
+  });
+
+  it("captures sessionType=resumed when agentSessionId is set and transcript exists", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const { transcriptExists } = await import("../executor/session-store.js");
+    (transcriptExists as any).mockReturnValue(true); // JSONL on disk → resume path
+
+    (query as any).mockImplementation(() => {
+      throw makeProcessExitError(1, "");
+    });
+
+    const runId = "run-bec251-resumed";
+    await seedPipelineRun(db, runId);
+
+    await executeStage({
       runId,
       issueId: testIssue.id,
       stage: "implement",
@@ -127,59 +221,28 @@ describe("BEC-251 — executor error capture (reproduce)", () => {
       agentSessionId: "session-uuid-1",
     });
 
-    // Stage should fail
-    expect(result.status).toBe("failed");
-    expect(result.errorMessage).toBe("Claude Code process exited with code 1");
-
-    // Fetch the error log entry
     const logs = await (db as any)
       .select()
       .from(agentLogs)
       .where(eq(agentLogs.type, "error"));
 
-    expect(logs).toHaveLength(1);
-    const content = logs[0].content;
-
-    // ── BUG CONFIRMATION ──────────────────────────────────────────────────────
-    // The content is just the plain error message string.
-    // exitCode, stderr, session info, auth method, and duration are NOT present.
-
-    // Currently stored: plain message only
-    expect(content).toBe("Claude Code process exited with code 1");
-
-    // BUG: exitCode is NOT captured as a structured field
-    expect(content).not.toContain('"exitCode"');
-    expect(content).not.toContain('"exitCode":1');
-
-    // BUG: stderr is NOT captured
-    expect(content).not.toContain('"stderr"');
-    expect(content).not.toContain("auth: 401");
-
-    // BUG: session type (fresh vs resumed) is NOT captured
-    expect(content).not.toContain('"sessionType"');
-    expect(content).not.toContain('"fresh"');
-    expect(content).not.toContain('"resumed"');
-
-    // BUG: auth method is NOT captured
-    expect(content).not.toContain('"authMethod"');
-    expect(content).not.toContain('"api-key"');
-
-    // BUG: duration is NOT captured
-    expect(content).not.toContain('"durationMs"');
+    const parsed = JSON.parse(logs[0].content);
+    expect(parsed.sessionType).toBe("resumed");
   });
 
-  it("CONFIRMS BUG: error_message on StageResult is plain string with no structured context", async () => {
+  it("captures sessionType=fresh when agentSessionId is set but transcript does not exist yet", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const { transcriptExists } = await import("../executor/session-store.js");
+    (transcriptExists as any).mockReturnValue(false); // no JSONL → create path
 
-    const sdkError = makeProcessExitError(1, "auth: 401 Unauthorized");
     (query as any).mockImplementation(() => {
-      throw sdkError;
+      throw makeProcessExitError(1, "");
     });
 
-    const runId = "run-bec251-stageresult";
+    const runId = "run-bec251-fresh";
     await seedPipelineRun(db, runId);
 
-    const result = await executeStage({
+    await executeStage({
       runId,
       issueId: testIssue.id,
       stage: "implement",
@@ -187,34 +250,31 @@ describe("BEC-251 — executor error capture (reproduce)", () => {
       repoConfig: testRepoConfig,
       workdir: "/tmp/bec251-workdir",
       db,
-      agentSessionId: null, // flag-off path (no session)
+      agentSessionId: "session-uuid-2",
     });
 
-    expect(result.status).toBe("failed");
+    const logs = await (db as any)
+      .select()
+      .from(agentLogs)
+      .where(eq(agentLogs.type, "error"));
 
-    // The errorMessage propagated to the runner is just the plain SDK message.
-    // An operator reading pipeline_runs.error_message sees only:
-    //   "Claude Code process exited with code 1"
-    // — with no indication of auth method, session state, or stderr.
-    expect(result.errorMessage).toBe("Claude Code process exited with code 1");
-    expect(result.errorMessage).not.toContain("exitCode");
-    expect(result.errorMessage).not.toContain("stderr");
-    expect(result.errorMessage).not.toContain("authMethod");
+    const parsed = JSON.parse(logs[0].content);
+    expect(parsed.sessionType).toBe("fresh");
   });
 
-  it("CONFIRMS BUG: resumed-session context is invisible when SDK throws — operator cannot distinguish fresh vs resume failure", async () => {
+  it("parses exitCode from message string when error has no exitCode property", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
-    const sdkError = makeProcessExitError(1, "");
+    // Plain error with no exitCode property — matches real SDK behaviour
+    const plainErr = new Error("Claude Code process exited with code 127");
     (query as any).mockImplementation(() => {
-      throw sdkError;
+      throw plainErr;
     });
 
-    const runId = "run-bec251-session";
+    const runId = "run-bec251-parse";
     await seedPipelineRun(db, runId);
 
-    // Run with a session ID (resumed path)
-    const resultResumed = await executeStage({
+    await executeStage({
       runId,
       issueId: testIssue.id,
       stage: "implement",
@@ -222,27 +282,46 @@ describe("BEC-251 — executor error capture (reproduce)", () => {
       repoConfig: testRepoConfig,
       workdir: "/tmp/bec251-workdir",
       db,
-      agentSessionId: "session-uuid-resume",
+      agentSessionId: null,
     });
 
-    // Then run without (fresh path) — clear logs between
-    const runId2 = "run-bec251-fresh";
-    await seedPipelineRun(db, runId2);
+    const logs = await (db as any)
+      .select()
+      .from(agentLogs)
+      .where(eq(agentLogs.type, "error"));
 
-    const resultFresh = await executeStage({
-      runId: runId2,
+    const parsed = JSON.parse(logs[0].content);
+    expect(parsed.exitCode).toBe(127);
+  });
+
+  it("omits stderr key when stderr is empty", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+
+    (query as any).mockImplementation(() => {
+      throw makeProcessExitError(1, ""); // empty stderr
+    });
+
+    const runId = "run-bec251-nostderr";
+    await seedPipelineRun(db, runId);
+
+    await executeStage({
+      runId,
       issueId: testIssue.id,
       stage: "implement",
       sanitizedIssue: testIssue,
       repoConfig: testRepoConfig,
       workdir: "/tmp/bec251-workdir",
       db,
-      agentSessionId: null, // no session
+      agentSessionId: null,
     });
 
-    // BUG: Both produce identical errorMessage — operator cannot tell which
-    // session mode was active when the failure occurred.
-    expect(resultResumed.errorMessage).toBe(resultFresh.errorMessage);
-    expect(resultResumed.errorMessage).toBe("Claude Code process exited with code 1");
+    const logs = await (db as any)
+      .select()
+      .from(agentLogs)
+      .where(eq(agentLogs.type, "error"));
+
+    const parsed = JSON.parse(logs[0].content);
+    // stderr key should be absent when there is nothing to report
+    expect("stderr" in parsed).toBe(false);
   });
 });
