@@ -5,7 +5,7 @@ import { resolvePipeline } from "../../pipeline/router.js";
 import { createLogger } from "../../logger.js";
 import type { AnyDb } from "../../db/client.js";
 import { logAuditEventUnchecked, pmPromotedEvent, pmSkippedCircuitBreakerEvent } from "../../audit/index.js";
-import { batchCountConsecutiveFailures } from "./db-queries.js";
+import { buildFailureCountGetter } from "./db-queries.js";
 import type { LinearClient } from "@linear/sdk";
 
 const log = createLogger({ component: "PmAgent:promote" });
@@ -89,13 +89,12 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
 
   // BEC-181: pre-fetch failure counts for all candidates in a single DB
   // round-trip to avoid an N+1 query pattern in the per-candidate loop.
-  // Uses getFailureCount (test-injectable stub) when provided; otherwise
-  // falls back to batchCountConsecutiveFailures for a single DB round-trip.
-  let prefetchedFailureCounts: Map<string, number> | null = null;
-  if (input.maxConsecutiveFailures !== undefined && !input.getFailureCount && input.db) {
-    const candidateIds = candidates.map((c: any) => c.identifier as string);
-    prefetchedFailureCounts = await batchCountConsecutiveFailures(input.db, candidateIds);
-  }
+  const getFailureCount = await buildFailureCountGetter(
+    input.db,
+    candidates.map((c: any) => c.identifier as string),
+    input.maxConsecutiveFailures,
+    input.getFailureCount,
+  );
 
   let promotedCount = 0;
 
@@ -128,9 +127,7 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
     }
 
     if (input.maxConsecutiveFailures !== undefined) {
-      const failureCount = input.getFailureCount
-        ? await input.getFailureCount(candidate.identifier)
-        : (prefetchedFailureCounts!.get(candidate.identifier) ?? 0);
+      const failureCount = await getFailureCount(candidate.identifier);
       if (failureCount >= input.maxConsecutiveFailures) {
         log.warn(
           { issueId: candidate.identifier, failureCount, threshold: input.maxConsecutiveFailures },

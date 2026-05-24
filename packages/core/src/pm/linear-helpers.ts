@@ -34,12 +34,12 @@ export async function resolveWorkflowStates(
     filter: { team: { id: { in: teamIds } } },
     first: 100,
   });
+  const nodes = allStates.nodes ?? [];
+  const teams = await Promise.all(nodes.map((s: any) => s.team));
   const stateMap = new Map<string, string>();
-  for (const state of allStates.nodes ?? []) {
-    // state.team is a lazy relation in the Linear SDK — must await to resolve
-    const team = await state.team;
-    const teamId = team?.id;
-    if (teamId) stateMap.set(`${teamId}:${state.name}`, state.id);
+  for (let i = 0; i < nodes.length; i++) {
+    const teamId = teams[i]?.id;
+    if (teamId) stateMap.set(`${teamId}:${nodes[i].name}`, nodes[i].id);
   }
   return stateMap;
 }

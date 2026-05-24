@@ -1,9 +1,7 @@
 import type { PmSlackNotifier } from "../slack.js";
 import type { AnyDb } from "../../db/client.js";
-import { batchFetchPendingApprovals } from "./approval-helpers.js";
-import { pmApprovals } from "../../db/schema.js";
+import { batchFetchPendingApprovals, insertApprovalRequest } from "./approval-helpers.js";
 import { createLogger } from "../../logger.js";
-import { nanoid } from "nanoid";
 import type { LinearClient } from "@linear/sdk";
 
 const log = createLogger({ component: "PmAgent:deprioritize" });
@@ -51,20 +49,8 @@ export async function deprioritizeStaleIssues(input: DeprioritizeInput): Promise
       const reason = `In Backlog for ${ageDays} days, priority ${issue.priority}, no activity`;
       const issueUrl = issue.url ?? `https://linear.app/issue/${issue.identifier}`;
 
-      const ts = await slackNotifier.postApprovalRequest(issue.identifier, "deprioritize", reason, issueUrl);
-      if (!ts) {
-        log.debug({ issueId: issue.identifier }, "Slack post failed, skipping");
-        continue;
-      }
-
-      await db.insert(pmApprovals).values({
-        id: nanoid(),
-        issueId: issue.identifier,
-        action: "deprioritize",
-        reason,
-        slackMessageTs: ts,
-        status: "pending",
-      });
+      const ts = await insertApprovalRequest(db, slackNotifier, issue.identifier, "deprioritize", reason, issueUrl);
+      if (!ts) continue;
 
       requested.push(issue.identifier);
       log.info({ issueId: issue.identifier, ageDays }, "deprioritize approval requested");

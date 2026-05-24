@@ -1,5 +1,5 @@
 import type { AnyDb } from "../../db/client.js";
-import { getActiveAndRecentIssueIds, batchCountConsecutiveFailures } from "./db-queries.js";
+import { getActiveAndRecentIssueIds, buildFailureCountGetter } from "./db-queries.js";
 import { resolvePipeline } from "../../pipeline/router.js";
 import { mapIssueToSchema } from "../../executor/prompt/schema-mapper.js";
 import type { PipelineConfig, RepoConfig } from "../../types.js";
@@ -121,27 +121,19 @@ export async function startTodoIssues(
   const toProcess = filteredOrphaned.slice(0, maxPerTick);
   const results: StartTodoResult[] = [];
 
-  // BEC-181: pre-fetch failure counts for all candidates in one DB round-trip
-  // to avoid an N+1 query pattern (one query per candidate in the loop below).
-  // Uses getFailureCount when provided (test-injectable stub); otherwise falls
-  // back to batchCountConsecutiveFailures for a single DB round-trip.
-  let prefetchedFailureCounts: Map<string, number> | null = null;
-  if (input.maxConsecutiveFailures !== undefined && !input.getFailureCount) {
-    const candidateIds = toProcess.map((i: any) => i.identifier as string);
-    prefetchedFailureCounts = await batchCountConsecutiveFailures(db, candidateIds);
-  }
+  // BEC-181: pre-fetch failure counts for all candidates in one DB round-trip.
+  const getFailureCount = await buildFailureCountGetter(
+    db,
+    toProcess.map((i: any) => i.identifier as string),
+    input.maxConsecutiveFailures,
+    input.getFailureCount,
+  );
 
   for (const issue of toProcess) {
     // BEC-161: circuit breaker — fire FIRST, before any Linear SDK round-trips
-    // (issue.team / issue.project / issue.labels each cost an API call). For a
-    // ticket that's been doom-looping, this saves three SDK calls per tick per
-    // candidate. issue.identifier is already on the result of the initial
-    // Todo-issues query, so no extra round-trip is needed for the count.
-    // getFailureCount presence is validated eagerly above, before this loop.
+    // (issue.team / issue.project / issue.labels each cost an API call).
     if (input.maxConsecutiveFailures !== undefined) {
-      const failureCount = input.getFailureCount
-        ? await input.getFailureCount(issue.identifier)
-        : (prefetchedFailureCounts!.get(issue.identifier) ?? 0);
+      const failureCount = await getFailureCount(issue.identifier);
       if (failureCount >= input.maxConsecutiveFailures) {
         log.warn(
           { identifier: issue.identifier, failureCount, threshold: input.maxConsecutiveFailures },

@@ -161,3 +161,30 @@ export async function batchCountConsecutiveFailures(
   }
   return result;
 }
+
+/**
+ * BEC-181: returns an async function that yields the consecutive-failure count
+ * for a given issueId.  When `maxConsecutiveFailures` is undefined the circuit
+ * breaker is disabled and the returned function always returns 0 (no DB hit).
+ * When `getFailureCount` is supplied (test stub) it is returned as-is.
+ * Otherwise all `candidateIds` are pre-fetched in a single DB round-trip via
+ * `batchCountConsecutiveFailures` and the returned function reads from that map.
+ *
+ * Shared by `promote.ts` and `start-todo.ts` to eliminate the duplicate
+ * prefetch + lookup pattern.
+ */
+export async function buildFailureCountGetter(
+  db: AnyDb | undefined,
+  candidateIds: string[],
+  maxConsecutiveFailures: number | undefined,
+  getFailureCount: ((issueId: string) => Promise<number>) | undefined,
+): Promise<(issueId: string) => Promise<number>> {
+  if (maxConsecutiveFailures === undefined) {
+    return async () => 0;
+  }
+  if (getFailureCount) {
+    return getFailureCount;
+  }
+  const prefetched = await batchCountConsecutiveFailures(db!, candidateIds);
+  return async (issueId: string) => prefetched.get(issueId) ?? 0;
+}
