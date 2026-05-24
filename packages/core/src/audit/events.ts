@@ -588,17 +588,6 @@ export function qaGapIssueFiledEvent(args: {
   });
 }
 
-export function claudeAuthExpiredEvent(args: {
-  checkedAt: Date;
-}): AuditEvent {
-  return base({
-    eventType: "claude.auth_expired",
-    actor: "system",
-    actorType: "system",
-    payload: { checkedAt: args.checkedAt.toISOString() },
-  });
-}
-
 export function reviewFanoutFallbackUsedEvent(args: {
   runId: string;
   prNumber: number;
