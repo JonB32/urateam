@@ -1,13 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { getActiveFileMaps, predictConflict } from "../pm/conflict.js";
 
-// Capture the warn spy so test (c) can assert on it without parsing log output.
+// Capture log spies so tests can assert on them without parsing log output.
 // vi.hoisted ensures the mock factory runs before the module imports above.
-const { mockLogWarn } = vi.hoisted(() => ({ mockLogWarn: vi.fn() }));
+const { mockLogWarn, mockLogDebug } = vi.hoisted(() => ({
+  mockLogWarn: vi.fn(),
+  mockLogDebug: vi.fn(),
+}));
 
 vi.mock("../logger.js", () => ({
   createLogger: vi.fn(() => ({
-    debug: vi.fn(),
+    debug: mockLogDebug,
     info: vi.fn(),
     warn: mockLogWarn,
     error: vi.fn(),
@@ -15,7 +18,7 @@ vi.mock("../logger.js", () => ({
 }));
 
 describe("getActiveFileMaps", () => {
-  beforeEach(() => { mockLogWarn.mockClear(); });
+  beforeEach(() => { mockLogWarn.mockClear(); mockLogDebug.mockClear(); });
 
   it("builds file map from git diff output for pushed branch", async () => {
     const execGit = vi.fn()
@@ -95,6 +98,7 @@ describe("getActiveFileMaps", () => {
       defaultBranch: "main",
       repoDir: "/tmp/repo",
       execGit,
+      pathExists: () => true,
     });
 
     const files = fileMaps.get("BEC-238")!;
@@ -184,6 +188,43 @@ describe("getActiveFileMaps", () => {
     });
 
     expect(fileMaps.get("BEC-240")).toEqual(new Set());
+  });
+
+  // BEC-247 — worktree path set but directory doesn't exist on disk
+  it("(BEC-247) non-existent worktreePath → empty set, no warn, execGit never called for that path", async () => {
+    const nonExistentPath = `/tmp/this-does-not-exist-${Date.now()}`;
+    const execGit = vi.fn(async (args: string[], _cwd: string) => {
+      if (args[0] === "fetch") return "";
+      if (args[0] === "rev-parse") throw new Error("unknown revision"); // not on origin
+      // execGit must never be called against the non-existent path
+      throw new Error("should not have been called");
+    });
+
+    const fileMaps = await getActiveFileMaps({
+      activeRuns: [
+        { issueId: "BEC-247", branch: "agent/BEC-247-repro", worktreePath: nonExistentPath },
+      ],
+      defaultBranch: "main",
+      repoDir: "/tmp/repo",
+      execGit,
+    });
+
+    // Fail-open: returns empty set
+    expect(fileMaps.get("BEC-247")).toEqual(new Set());
+
+    // execGit must NOT have been called against the non-existent worktree path
+    const worktreeCalls = execGit.mock.calls.filter(([_args, cwd]) => cwd === nonExistentPath);
+    expect(worktreeCalls).toHaveLength(0);
+
+    // No warn-level log — missing worktree is expected/normal, not an error
+    expect(mockLogWarn).not.toHaveBeenCalled();
+
+    // A debug-level message should explain why the worktree was skipped
+    const debugCalls = mockLogDebug.mock.calls.filter(([obj]) =>
+      typeof obj === "object" && obj !== null && "worktreePath" in obj && obj.worktreePath === nonExistentPath,
+    );
+    expect(debugCalls.length).toBeGreaterThan(0);
+    expect(debugCalls[0][1]).toContain("worktree not yet created");
   });
 
   // BEC-239 — no worktreePath on ActiveRun → empty set (graceful missing-path case)
