@@ -661,6 +661,14 @@ export const AuditEventTypeSchema = z.enum([
    *  artifact was found). The `legacy` path is logged too so operators
    *  can audit fallback rates. */
   "pipeline.surgical_review_fix",
+  /** BEC-252 — a pipeline run interrupted by a server restart was successfully
+   *  marked `retriable` and then recovered by `recoverRetriableRuns`. Both
+   *  the worktree and the agent session JSONL transcript were present on disk
+   *  at restart-detection time, enabling graceful resume. Payload: `runId`,
+   *  `issueId`, `stage` (last running stage at restart), `worktreeExisted`
+   *  (always true), `transcriptExisted` (always true), `restartGapMs`
+   *  (milliseconds from interrupt to recovery). */
+  "pipeline.restart_interrupt_recovered",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 

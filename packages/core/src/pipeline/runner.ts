@@ -116,6 +116,7 @@ import { eq, and, or, sql, gte, lt, inArray } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { randomUUID } from "node:crypto";
 import { isAgentSessionResumeEnabled, isAlwaysFreshStage } from "../executor/session-policy.js";
+import { transcriptExists, defaultProjectsRoot } from "../executor/session-store.js";
 import { createLogger, runWithLogContext } from "../logger.js";
 import { isTransientError, MAX_TRANSIENT_RETRIES } from "./error-classifier.js";
 import { evaluatePolicyGates } from "../policy/evaluate.js";
@@ -1042,6 +1043,29 @@ export class PipelineRunner {
         },
         "tech stack detected",
       );
+
+      // BEC-252 — persist an initial resume context right after worktree setup
+      // (fresh start only). currentStageIndex = -1 so resume() restarts from
+      // stage 0 on recovery; BEC-227 JSONL session resume provides agent
+      // continuity across the restart boundary. This ensures recoverStuckRuns
+      // can hand the run back to runner.resume() even when the server restarts
+      // before any transient-failure or await-approval path stores a payload.
+      if (!resumeOptions) {
+        await db
+          .update(pipelineRuns)
+          .set({
+            currentStageIndex: -1,
+            resumePayload: buildResumePayload(
+              null,
+              config,
+              repoConfig,
+              sanitizedIssue,
+              worktreePath,
+              -1,
+            ),
+          })
+          .where(eq(pipelineRuns.id, runId));
+      }
 
       // Determine which stages to execute:
       // - Fresh start: all configured stages in order.
@@ -3488,9 +3512,16 @@ export class PipelineRunner {
    * currently tracked in the in-memory activeRuns map (i.e. they belong to a
    * previous process). For each such run the method:
    *   1. Checks whether the worktree still exists on disk.
-   *   2. Marks the run as 'failed' with a descriptive error message.
-   *   3. Removes the corresponding active_work coordination row.
-   *   4. Emits a structured warning log entry.
+   *   2. Checks whether the agent-session JSONL transcript is on disk (BEC-227).
+   *   3. Looks up the most-recent stage_runs row to detect non-idempotent stages.
+   *   4a. If worktree + transcript exist AND last stage is NOT non-idempotent:
+   *       marks the run `retriable` (BEC-252) so `recoverRetriableRuns` auto-resumes it.
+   *   4b. Otherwise: marks the run `failed` with a descriptive error message.
+   *   5. Removes the corresponding active_work coordination row.
+   *   6. Emits a structured warning log entry.
+   *
+   * Non-idempotent stages (push, await-approval) are excluded from auto-resume
+   * because re-running them risks double-pushes or approval-loop side effects.
    *
    * After processing all stuck runs the method runs `git worktree prune` on
    * every repository clone directory to remove stale worktree administrative
@@ -3501,6 +3532,12 @@ export class PipelineRunner {
    */
   async recoverStuckRuns(): Promise<void> {
     const db = this.db as AnyDb;
+
+    // Stages that mutate external state in a non-idempotent way.
+    // Restarting mid-stage risks double-pushes, duplicate PRs, or approval loops.
+    const NON_IDEMPOTENT_STAGES = new Set(["push", "await-approval"]);
+
+    const projectsRoot = defaultProjectsRoot();
 
     // Collect runIds that are actively managed by this process.
     const activeRunIds = new Set(this.activeRuns.values());
@@ -3542,28 +3579,87 @@ export class PipelineRunner {
             // Worktree directory is gone — expected after a container restart.
           }
 
-          const errorMsg = worktreeExists
-            ? `Pipeline interrupted by server restart; worktree present at ${expectedWorktreePath}`
-            : `Pipeline interrupted by server restart; worktree not found at ${expectedWorktreePath}`;
+          // Check whether the agent session JSONL transcript survived the restart.
+          const sessionId = (run as any).agentSessionId as string | null;
+          const transcriptOnDisk = sessionId != null && transcriptExists({
+            projectsRoot,
+            cwd: expectedWorktreePath,
+            sessionId,
+          });
 
-          log.warn(
-            {
-              runId: run.id,
-              issueId: run.issueId,
-              priorStatus: run.status,
-              worktreeExists,
-            },
-            "recovering stuck pipeline run from previous restart",
-          );
+          // Look up the most-recent stage_runs row to detect non-idempotent stages.
+          const lastStageRows = await db
+            .select({ stage: stageRuns.stage })
+            .from(stageRuns)
+            .where(eq(stageRuns.pipelineRunId, run.id))
+            .orderBy(sql`${stageRuns.startedAt} DESC`)
+            .limit(1);
+          const lastStage = lastStageRows[0]?.stage ?? null;
+          const isNonIdempotent = lastStage !== null && NON_IDEMPOTENT_STAGES.has(lastStage);
 
-          await Promise.all([
-            db
+          const now = new Date();
+
+          if (worktreeExists && transcriptOnDisk && !isNonIdempotent) {
+            // BEC-252 — run is resumable: worktree + transcript are intact and
+            // the last stage is safe to re-enter. Mark retriable so
+            // recoverRetriableRuns() auto-resumes it on the next PM tick.
+            // Do NOT cancel stage_runs here — preserve stage state for resume.
+            const retriableMsg = `Pipeline interrupted by server restart; worktree present at ${expectedWorktreePath}`;
+            log.warn(
+              {
+                runId: run.id,
+                issueId: run.issueId,
+                priorStatus: run.status,
+                worktreeExists,
+                transcriptOnDisk,
+                lastStage,
+              },
+              "restart-interrupted run is retriable — marking for auto-resume",
+            );
+            await db
               .update(pipelineRuns)
-              .set({ status: "failed", errorMessage: errorMsg })
-              .where(eq(pipelineRuns.id, run.id)),
-            this.cancelRunningStageRuns(db, run.id),
-            removeActiveWork(db, run.id),
-          ]);
+              .set({
+                status: "retriable",
+                completedAt: now,
+                errorMessage: retriableMsg,
+              })
+              .where(eq(pipelineRuns.id, run.id));
+            await removeActiveWork(db, run.id);
+          } else {
+            // Worktree gone, transcript missing, or non-idempotent stage —
+            // cannot safely auto-resume; mark permanently failed AND cancel
+            // any still-running child stage_runs (BEC-250).
+            const errorMsg = isNonIdempotent
+              ? `interrupted mid-${lastStage} — not safe to auto-resume; manual ura retry required`
+              : worktreeExists
+                ? `Pipeline interrupted by server restart; worktree present at ${expectedWorktreePath}`
+                : `Pipeline interrupted by server restart; worktree not found at ${expectedWorktreePath}`;
+
+            log.warn(
+              {
+                runId: run.id,
+                issueId: run.issueId,
+                priorStatus: run.status,
+                worktreeExists,
+                transcriptOnDisk,
+                lastStage,
+                isNonIdempotent,
+              },
+              "recovering stuck pipeline run from previous restart",
+            );
+            await Promise.all([
+              db
+                .update(pipelineRuns)
+                .set({
+                  status: "failed",
+                  completedAt: now,
+                  errorMessage: errorMsg,
+                })
+                .where(eq(pipelineRuns.id, run.id)),
+              this.cancelRunningStageRuns(db, run.id),
+              removeActiveWork(db, run.id),
+            ]);
+          }
         }),
     );
 
