@@ -127,11 +127,17 @@ Precedence: `CLAUDE_CODE_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` → local session.
 - `message.content` — tool-using sessions (executor stages)
 - `message.message` — no-tool sessions (PM Agent Haiku calls with `allowedTools: []`)
 
-**Pre-stream stall protection (BEC-183)** — two layers:
+**Pre-stream stall protection (BEC-183 / BEC-249)** — two layers, both covering the triage stage:
 1. `firstMessageTimeoutMs` (default 5 min) in `consumeAgentStream` throws `StagePreStreamStalledError` if no message arrives. Covers SDK hangs (auth-retry loop, MCP init failure, never-resolving iterator).
-2. `WALL_CLOCK_STAGE_TIMEOUT_MS` in `executor.ts` — per-stage hard cap via `Promise.race` (implement: 60 min; others: 30 min).
+2. `WALL_CLOCK_STAGE_TIMEOUT_MS` in `executor.ts` — per-stage hard cap via `Promise.race` (implement: 60 min; others: 30 min). Timer is started **before** `resolveSessionOpts` is called (BEC-249 fix), so a hung Docker volume (`urateam-dogfood-agent-sessions`) can no longer stall the stage indefinitely.
 
 Both paths land in `stage_runs.status = 'failed'`. `StageStalledError` is for mid-stream silence (≥1 message, then no output for `progressTimeoutMs`, default 30 min). Exported from `executor/index.ts`.
+
+**Manual kill recipe for stuck runs**: if a run is stuck before the auto-recovery window fires —
+1. `ura stop <runId>` (cancel mode) — aborts via `AbortController` wired into `consumeAgentStream`. Use from dashboard or CLI.
+2. If unresponsive (pre-stream hang, signal never reaches the iterator): `ura halt` stops the container; restart will re-queue retriable runs.
+3. PM Agent auto-recovers stuck In Progress runs after `PM_AGENT_STUCK_RUN_AGE_MIN` minutes (default 120) via `recoverStuckInProgressIssues`.
+4. To clear a circuit-broken issue immediately: `ura circuit reset <issueId>` (cascade-deletes failed runs, resets breaker state, strips the Tier-5-added `needs-design` label).
 
 ### Linear SDK Lazy Relations
 

@@ -221,6 +221,22 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
   let cacheCreationInputTokens = 0;
   let cacheReadInputTokens = 0;
 
+  // BEC-249: wall-clock timer started BEFORE any pre-flight await so it
+  // covers resolveSessionOpts (which calls countLines via createReadStream
+  // and can hang on an unresponsive Docker volume). Declared outside try so
+  // the finally block can always cancel it regardless of which exit path runs.
+  const stageTimeoutMs = WALL_CLOCK_STAGE_TIMEOUT_MS[stage] ?? DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS;
+  let stageTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  const stageTimeoutPromise = new Promise<never>((_, reject) => {
+    stageTimeoutTimer = setTimeout(() => {
+      reject(new StagePreStreamStalledError(stageTimeoutMs));
+    }, stageTimeoutMs);
+  });
+  // Suppress Node.js PromiseRejectionHandledWarning: rejection is always consumed
+  // by the Promise.race calls below; no-op handler marks it "handled" for the
+  // unhandledRejection machinery without affecting race or error semantics.
+  stageTimeoutPromise.catch(() => {});
+
   try {
     // Resolve auth method before any SDK call (BEC-207). Logs which path is
     // active (oauth-token / api-key / mounted-session) alongside the run context.
@@ -259,17 +275,22 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
     // BEC-231 — session-resolver derives the shape from on-disk state, not
     // from `isFirstResumableStage` (which flipped before the SDK wrote
     // anything; first-stage failures left the session lost forever).
+    // BEC-249 — raced against stageTimeoutPromise so a hung countLines call
+    // (unresponsive Docker volume) is cut by the wall-clock guard.
     const resolvedModel = context.stageModels?.[stage] ?? effectiveProfile.model;
     const agentSessionId = context.agentSessionId ?? null;
-    const sessionOpts = await resolveSessionOpts({
-      stage,
-      model: resolvedModel,
-      agentSessionId,
-      workdir,
-      runId,
-      issueId,
-      db,
-    });
+    const sessionOpts = await Promise.race([
+      resolveSessionOpts({
+        stage,
+        model: resolvedModel,
+        agentSessionId,
+        workdir,
+        runId,
+        issueId,
+        db,
+      }),
+      stageTimeoutPromise,
+    ]);
 
     const messages = query({
       prompt,
@@ -322,14 +343,8 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
     // BEC-183: wall-clock stage timeout — second defensive layer independent
     // of the in-stream watchdog. Fires as StagePreStreamStalledError so the
     // catch block below sets status=failed with a clear message.
-    const stageTimeoutMs = WALL_CLOCK_STAGE_TIMEOUT_MS[stage] ?? DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS;
-    let stageTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
-    const stageTimeoutPromise = new Promise<never>((_, reject) => {
-      stageTimeoutTimer = setTimeout(() => {
-        reject(new StagePreStreamStalledError(stageTimeoutMs));
-      }, stageTimeoutMs);
-    });
-
+    // BEC-249: stageTimeoutPromise is created before the try block; same
+    // instance reused here so the wall-clock covers pre-flight + stream.
     const result = await Promise.race([
       consumeAgentStream(messagesWithCapture, {
         onProgress: (stats) => {
@@ -358,11 +373,6 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       // collect it once this run's references are dropped.
       capturedMessagesIterator?.return?.()?.catch(() => {});
       throw err;
-    }).finally(() => {
-      // Always clear the wall-clock timer whether the stream succeeds, stalls,
-      // or throws any other error — prevents the timer from dangling after the
-      // stage exits the happy path.
-      if (stageTimeoutTimer) clearTimeout(stageTimeoutTimer);
     });
 
     // Flush remaining log entries
@@ -467,5 +477,9 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       errorMessage,
       stageRunId,
     };
+  } finally {
+    // Always cancel the wall-clock timer regardless of exit path (BEC-249).
+    // Clearing an already-fired timer is a no-op, so this is always safe.
+    if (stageTimeoutTimer) clearTimeout(stageTimeoutTimer);
   }
 }

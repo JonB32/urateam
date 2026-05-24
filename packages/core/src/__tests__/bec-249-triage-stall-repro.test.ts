@@ -1,39 +1,37 @@
 /**
- * BEC-249 Reproduction: stall guards don't fire for the triage stage.
+ * BEC-249 Fix verification: stall guards now fire for the triage stage.
  *
- * ## Root cause (confirmed by this file)
+ * ## Root cause (confirmed during reproduce phase)
  *
- * In `executor.ts`, the sequence inside the `try` block is:
+ * In `executor.ts` (pre-fix), the sequence was:
  *
- *   line 264:  const sessionOpts = await resolveSessionOpts({...});  // can hang
+ *   line 264:  const sessionOpts = await resolveSessionOpts({...});  // could hang
  *   line 327:  const stageTimeoutPromise = new Promise<never>(...    // wall-clock timer
  *   line 333:  await Promise.race([consumeAgentStream(...), stageTimeoutPromise]);
  *
- * `resolveSessionOpts` (session-resolver.ts) calls `countLines()` — a
- * `createReadStream`-backed line counter — when a session transcript file
- * exists.  `createReadStream` hangs indefinitely on an unresponsive Docker
- * volume (e.g. `urateam-dogfood-agent-sessions` under I/O pressure during
- * the BEC-236 container restart soak).
+ * `resolveSessionOpts` calls `countLines()` — a `createReadStream`-backed
+ * line counter — which hangs indefinitely on an unresponsive Docker volume.
  *
- * Because `stageTimeoutPromise` is NOT registered until `resolveSessionOpts`
- * returns, neither the 5-min `firstMessageTimeoutMs` guard nor the 30-min
- * `WALL_CLOCK_STAGE_TIMEOUT_MS` guard ever fires.  The stage stays in
- * `status='running'` indefinitely.
+ * ## Fix
  *
- * ## Evidence
+ * `stageTimeoutPromise` is now created BEFORE any pre-flight `await`:
  *
- * Section 1 ("gap confirmed"): mocks `resolveSessionOpts` to never resolve,
- * advances fake time 35 min past the wall-clock threshold, verifies the
- * `stagePromise` is still pending and `stage_runs.status` is still "running".
+ *   line ~230: stageTimeoutPromise = new Promise<never>(...  // wall-clock timer (EARLY)
+ *   line ~278: await Promise.race([resolveSessionOpts(...), stageTimeoutPromise])
+ *   line ~344: await Promise.race([consumeAgentStream(...), stageTimeoutPromise])
+ *
+ * Both pre-flight and stream phases are now covered by the wall-clock guard.
+ *
+ * ## Test sections
+ *
+ * Section 1 ("gap fixed"): mocks `resolveSessionOpts` to never resolve,
+ * advances fake time 35 min, verifies the stage resolves as 'failed'.
  *
  * Section 2 ("static ordering proof"): reads executor.ts source and asserts
- * the `resolveSessionOpts` await appears BEFORE the `stageTimeoutPromise`
- * assignment — the structural cause of the gap.  This test is independent of
- * fake-timer mechanics and will detect any regression.
+ * `stageTimeoutPromise` appears BEFORE the `resolveSessionOpts` call.
  *
- * Section 3 ("AC gap — missing test"): documents that no test currently
- * invokes `executeStage` for the triage stage and asserts a timeout fires
- * (the AC asks for exactly this test to be added as part of the fix).
+ * Section 3 ("AC delivered"): confirms the executeStage+triage AC test
+ * was added to bec-183-pre-stream-stall.test.ts.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -113,7 +111,7 @@ async function seedPipelineRun(db: Db, runId: string): Promise<void> {
 // Section 1: Functional proof — pre-flight hang bypasses wall-clock guard
 // ---------------------------------------------------------------------------
 
-describe("BEC-249 gap confirmed: pre-flight hang leaves stage stuck indefinitely", () => {
+describe("BEC-249 gap fixed: wall-clock guard fires even when pre-flight hangs", () => {
   let db: Db;
 
   beforeEach(async () => {
@@ -127,7 +125,7 @@ describe("BEC-249 gap confirmed: pre-flight hang leaves stage stuck indefinitely
   });
 
   it(
-    "stage_runs.status stays 'running' after advancing 35 min past WALL_CLOCK_STAGE_TIMEOUT_MS when pre-flight hangs",
+    "stage resolves as 'failed' after WALL_CLOCK_STAGE_TIMEOUT_MS fires when pre-flight hangs",
     async () => {
       // Simulate unresponsive Docker volume: resolveSessionOpts never returns.
       const { resolveSessionOpts } = await import("../executor/session-resolver.js");
@@ -135,16 +133,12 @@ describe("BEC-249 gap confirmed: pre-flight hang leaves stage stuck indefinitely
         () => new Promise<never>(() => {}),
       );
 
-      const { query } = await import("@anthropic-ai/claude-agent-sdk");
-      (query as ReturnType<typeof vi.fn>).mockImplementation(
-        () => (async function* () { await new Promise<never>(() => {}); })(),
-      );
+      await seedPipelineRun(db, "run-bec249-fixed");
 
-      await seedPipelineRun(db, "run-bec249-gap");
-
-      // Start the stage — it will reach `await resolveSessionOpts()` and park.
+      // Start the stage — it reaches Promise.race([resolveSessionOpts(...), stageTimeoutPromise]).
+      // With the fix, stageTimeoutPromise is created BEFORE this race, so it fires.
       const stagePromise = executeStage({
-        runId: "run-bec249-gap",
+        runId: "run-bec249-fixed",
         issueId: testIssue.id,
         stage: "triage",
         sanitizedIssue: testIssue,
@@ -154,32 +148,26 @@ describe("BEC-249 gap confirmed: pre-flight hang leaves stage stuck indefinitely
         agentSessionId: null,
       });
 
-      // Advance fake time well past WALL_CLOCK_STAGE_TIMEOUT_MS (30 min).
-      // If the stageTimeoutPromise were set up BEFORE resolveSessionOpts,
-      // it would have fired and stagePromise would resolve.
+      // Advance fake time past DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS (30 min).
+      // stageTimeoutPromise fires, the race rejects, the stage fails cleanly.
       await vi.advanceTimersByTimeAsync(35 * 60_000);
 
-      // stagePromise is still pending — wall-clock timer was never registered.
-      let settled = false;
-      void stagePromise.then(() => { settled = true; }).catch(() => { settled = true; });
-      // One microtask flush to catch any already-resolved promise.
-      await Promise.resolve();
+      // stagePromise should now be settled (wall-clock guard fired and was handled).
+      const result = await stagePromise;
+      expect(result.status).toBe("failed");
+      expect(result.errorMessage).toMatch(/pre-stream stall/i);
 
-      expect(settled).toBe(false); // BUG: stage hangs indefinitely
-
-      // DB still shows the running status — no failure was recorded.
+      // DB shows failed status with the error captured.
       const rows = await (db as any)
         .select()
         .from(stageRuns)
-        .where(eq(stageRuns.pipelineRunId, "run-bec249-gap"));
+        .where(eq(stageRuns.pipelineRunId, "run-bec249-fixed"));
 
-      // stage_runs row exists with status='running' (should be 'failed' if
-      // the wall-clock guard had fired as intended).
       expect(rows.length).toBe(1);
-      expect(rows[0].status).toBe("running");
-      expect(rows[0].errorMessage).toBeNull();
+      expect(rows[0].status).toBe("failed");
+      expect(rows[0].errorMessage).toMatch(/pre-stream stall/i);
     },
-    5_000,
+    10_000,
   );
 });
 
@@ -187,8 +175,8 @@ describe("BEC-249 gap confirmed: pre-flight hang leaves stage stuck indefinitely
 // Section 2: Static ordering proof — the structural gap in executor.ts
 // ---------------------------------------------------------------------------
 
-describe("BEC-249 structural gap: resolveSessionOpts awaited BEFORE stageTimeoutPromise is created", () => {
-  it("executor.ts awaits resolveSessionOpts on a lower line than stageTimeoutPromise setup", () => {
+describe("BEC-249 structural fix: stageTimeoutPromise created BEFORE resolveSessionOpts is called", () => {
+  it("executor.ts creates stageTimeoutPromise on a lower line than the resolveSessionOpts call", () => {
     const __filename = fileURLToPath(import.meta.url);
     const __dirname = dirname(__filename);
     const executorSrc = readFileSync(
@@ -197,9 +185,9 @@ describe("BEC-249 structural gap: resolveSessionOpts awaited BEFORE stageTimeout
     );
     const lines = executorSrc.split("\n");
 
-    // Find the first line that awaits resolveSessionOpts
+    // Find the first line that calls resolveSessionOpts (now inside Promise.race)
     const resolveSessionOptsLine = lines.findIndex((l) =>
-      l.includes("await resolveSessionOpts("),
+      l.includes("resolveSessionOpts({"),
     );
 
     // Find the first line that creates stageTimeoutPromise
@@ -210,9 +198,9 @@ describe("BEC-249 structural gap: resolveSessionOpts awaited BEFORE stageTimeout
     expect(resolveSessionOptsLine).toBeGreaterThan(-1);
     expect(stageTimeoutPromiseLine).toBeGreaterThan(-1);
 
-    // THE GAP: resolveSessionOpts is awaited BEFORE the wall-clock timer
-    // is registered.  If it hangs, neither stall guard fires.
-    expect(resolveSessionOptsLine).toBeLessThan(stageTimeoutPromiseLine);
+    // THE FIX: wall-clock timer is registered BEFORE resolveSessionOpts is called.
+    // If resolveSessionOpts hangs, the timer fires and the stage fails cleanly.
+    expect(stageTimeoutPromiseLine).toBeLessThan(resolveSessionOptsLine);
   });
 
   it("session-resolver.ts calls countLines via createReadStream with no timeout — can hang on unresponsive volume", () => {
@@ -256,11 +244,11 @@ describe("BEC-249 structural gap: resolveSessionOpts awaited BEFORE stageTimeout
 });
 
 // ---------------------------------------------------------------------------
-// Section 3: Missing test gap — the AC test does not yet exist
+// Section 3: AC test confirmed added — regression guard
 // ---------------------------------------------------------------------------
 
-describe("BEC-249 AC gap: no functional test exists for triage stage stall via executeStage", () => {
-  it("the existing BEC-183 stall tests only cover consumeAgentStream directly + static analysis, not executeStage triage path", () => {
+describe("BEC-249 AC delivered: functional executeStage triage stall test exists in BEC-183 file", () => {
+  it("bec-183-pre-stream-stall.test.ts now imports executeStage and tests stage:'triage'", () => {
     const __filename = fileURLToPath(import.meta.url);
     const __dirname = dirname(__filename);
     const bec183Src = readFileSync(
@@ -268,20 +256,15 @@ describe("BEC-249 AC gap: no functional test exists for triage stage stall via e
       "utf8",
     );
 
-    // Confirm: the existing BEC-183 test file imports consumeAgentStream directly
+    // The BEC-183 file still covers consumeAgentStream and firstMessageTimeoutMs
     expect(bec183Src).toContain("consumeAgentStream");
     expect(bec183Src).toContain("firstMessageTimeoutMs");
 
-    // Confirm: the existing file does NOT import or call executeStage
-    expect(bec183Src).not.toContain("import { executeStage }");
-    expect(bec183Src).not.toContain("executeStage(");
+    // The AC test has been added: executeStage is now imported and called
+    expect(bec183Src).toContain("import { executeStage }");
+    expect(bec183Src).toContain("executeStage(");
 
-    // Confirm: the existing file does NOT test stage:'triage' specifically
-    expect(bec183Src).not.toContain("stage: \"triage\"");
-    expect(bec183Src).not.toContain("stage:'triage'");
-
-    // The AC requires adding: executeStage({ stage:'triage', ... }) +
-    // neverYields SDK mock + assert StagePreStreamStalledError within
-    // firstMessageTimeoutMs.  That test does not yet exist.
+    // The AC test specifically targets the triage stage
+    expect(bec183Src).toContain("stage: \"triage\"");
   });
 });
