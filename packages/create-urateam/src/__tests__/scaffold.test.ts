@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { scaffold } from "../index.js";
+import { scaffold } from "../scaffold.js";
 
 describe("scaffold — sidecar pattern", () => {
   let tempDir: string;
@@ -349,7 +349,7 @@ describe("decodeLicense", () => {
   // We import lazily inside each test to keep the existing top-of-file
   // import structure clean.
   it("decodes a Pro JWT and reads tier + features", async () => {
-    const { decodeLicense } = await import("../index.js");
+    const { decodeLicense } = await import("../scaffold.js");
     // Hand-rolled unsigned JWT (header.payload.signature — signature ignored by decoder)
     const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" })).toString("base64url");
     const payload = Buffer.from(
@@ -370,7 +370,7 @@ describe("decodeLicense", () => {
   });
 
   it("returns null on malformed JWT", async () => {
-    const { decodeLicense } = await import("../index.js");
+    const { decodeLicense } = await import("../scaffold.js");
     expect(decodeLicense("not.a.jwt")).toBeNull();
     expect(decodeLicense("")).toBeNull();
     expect(decodeLicense(undefined)).toBeNull();
@@ -378,7 +378,7 @@ describe("decodeLicense", () => {
   });
 
   it("falls back to oss tier for unknown tier values", async () => {
-    const { decodeLicense } = await import("../index.js");
+    const { decodeLicense } = await import("../scaffold.js");
     const payload = Buffer.from(JSON.stringify({ tier: "rogue" })).toString("base64url");
     expect(decodeLicense(`x.${payload}.y`)?.tier).toBe("oss");
   });
@@ -388,7 +388,7 @@ describe("decodeLicense", () => {
     // gets a JWT with no `features` field. Runtime grants all Pro features
     // implicitly via tier — scaffolder must match that or it'll skip
     // tier-gated prompts (e.g. PM agent setup) for such licenses.
-    const { decodeLicense } = await import("../index.js");
+    const { decodeLicense } = await import("../scaffold.js");
     const payload = Buffer.from(
       JSON.stringify({ tier: "pro", sub: "cust", exp: 2_000_000_000 }),
     ).toString("base64url");
@@ -400,7 +400,7 @@ describe("decodeLicense", () => {
   });
 
   it("expands Enterprise tier to all Enterprise features when JWT has no explicit features", async () => {
-    const { decodeLicense } = await import("../index.js");
+    const { decodeLicense } = await import("../scaffold.js");
     const payload = Buffer.from(JSON.stringify({ tier: "enterprise" })).toString("base64url");
     const info = decodeLicense(`x.${payload}.y`);
     expect(info?.features).toEqual(
@@ -411,7 +411,7 @@ describe("decodeLicense", () => {
   it("honors an explicit features array even when shorter than the tier default", async () => {
     // Operators can issue restricted licenses (e.g. Pro tier minus deep-review).
     // The explicit list wins.
-    const { decodeLicense } = await import("../index.js");
+    const { decodeLicense } = await import("../scaffold.js");
     const payload = Buffer.from(
       JSON.stringify({ tier: "pro", features: ["multi-repo"] }),
     ).toString("base64url");
@@ -778,7 +778,7 @@ describe("scaffold — production options", () => {
   });
 
   it("normalizeBasePath strips trailing slashes and ensures leading slash", async () => {
-    const { normalizeBasePath } = await import("../index.js");
+    const { normalizeBasePath } = await import("../scaffold.js");
     expect(normalizeBasePath("/ateam")).toBe("/ateam");
     expect(normalizeBasePath("/ateam/")).toBe("/ateam");
     expect(normalizeBasePath("/ateam///")).toBe("/ateam");

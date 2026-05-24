@@ -2,7 +2,23 @@
 
 Autonomous software delivery framework. Connect Linear + GitHub, agents implement, test, review, and ship code — automatically.
 
-## Quick Start
+## Self-Hosted Quickstart
+
+```bash
+npx @urateam/cli bootstrap
+```
+
+Or if you have `ura` installed:
+
+```bash
+ura bootstrap
+```
+
+This runs interactive pre-flight checks, creates a GitHub App, registers a Linear webhook, and generates a `docker-compose.dogfood.yml` ready to `docker compose up`.
+
+**Prerequisites:** Docker, curl, openssl, jq, a GitHub account, a Linear workspace.
+
+## Development Quickstart
 
 ```bash
 npx create-urateam my-project

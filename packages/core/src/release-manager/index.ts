@@ -5,4 +5,6 @@ export * from "./versioning.js";
 export * from "./github.js";
 export * from "./state.js";
 export * from "./slack-handler.js";
+export * from "./release-helpers.js";
+export * from "./release-tick.js";
 export * from "./scheduler.js";

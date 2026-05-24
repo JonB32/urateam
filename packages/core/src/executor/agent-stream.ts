@@ -66,6 +66,19 @@ export class StagePreStreamStalledError extends Error {
 }
 
 /**
+ * Thrown when a stage's agent stream is interrupted via the abort signal
+ * (operator-initiated cancel). Distinct from the timeout errors because the
+ * runner uses the error class to decide how to mark the run (`aborted`, not
+ * `failed`).
+ */
+export class StageCancelledError extends Error {
+  constructor() {
+    super("stage cancelled by operator");
+    this.name = "StageCancelledError";
+  }
+}
+
+/**
  * Consume an Agent SDK message stream, accumulating token usage and
  * extracting the last assistant text content.
  *
@@ -100,8 +113,20 @@ export async function consumeAgentStream(
      * message). Set shorter than progressTimeoutMs to catch hangs early.
      */
     firstMessageTimeoutMs?: number;
+    /**
+     * AbortSignal for operator-initiated cancel. When the signal fires, the
+     * iterator's `.return()` is invoked and the function throws
+     * `StageCancelledError`. Pre-aborted signals fire on entry so the function
+     * exits before consuming any messages.
+     */
+    abortSignal?: AbortSignal;
   },
 ): Promise<ConsumeResult> {
+  // Honour a pre-aborted signal immediately so callers can short-circuit
+  // without paying for an iterator setup.
+  if (options?.abortSignal?.aborted) {
+    throw new StageCancelledError();
+  }
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheCreationInputTokens = 0;
@@ -122,7 +147,9 @@ export async function consumeAgentStream(
 
   const iterator = (messages as AsyncIterable<unknown>)[Symbol.asyncIterator]();
   const STALLED = { __stalled: true } as const;
+  const ABORTED = { __aborted: true } as const;
   type StallSentinel = typeof STALLED;
+  type AbortSentinel = typeof ABORTED;
   while (true) {
     const stallRemaining = stallTimeoutMs - (Date.now() - lastTokenAdvanceAt);
     // First-message timeout: only active until the first real message arrives.
@@ -145,8 +172,33 @@ export async function consumeAgentStream(
       stallTimer = setTimeout(() => resolve(STALLED), remainingUntilTimeout);
     });
 
-    const raced = await Promise.race([next, stallPromise]);
+    // Race the abort signal in alongside next + stallPromise. We re-create the
+    // listener each iteration so it cleans up automatically (removeEventListener
+    // below) and an external abort fires within one iteration tick.
+    let abortListener: (() => void) | undefined;
+    const abortPromise = new Promise<AbortSentinel>((resolve) => {
+      if (!options?.abortSignal) return; // Promise never resolves — Promise.race ignores it
+      if (options.abortSignal.aborted) {
+        resolve(ABORTED);
+        return;
+      }
+      abortListener = () => resolve(ABORTED);
+      options.abortSignal.addEventListener("abort", abortListener, { once: true });
+    });
+
+    const raced = await Promise.race([next, stallPromise, abortPromise]);
     if (stallTimer) clearTimeout(stallTimer);
+    if (abortListener && options?.abortSignal) {
+      options.abortSignal.removeEventListener("abort", abortListener);
+    }
+
+    if (raced === ABORTED) {
+      // Operator-initiated cancel. Same .return() best-effort cleanup as the
+      // stall path; the agent generator may be parked on a never-resolving
+      // await, in which case GC handles eventual release.
+      iterator.return?.()?.catch((err) => log.debug({ err }, "iterator cleanup failed on abort"));
+      throw new StageCancelledError();
+    }
 
     if (raced === STALLED) {
       // Defensive race-loss check: if the iterator settled in the same tick
@@ -265,18 +317,55 @@ function parseJsonWithRegex(text: string, regex: RegExp, groupIndex: number = 0)
 }
 
 /**
- * Extract and parse a bare JSON object from text (finds first `{...}` match).
- * Returns null if no object is found or if parsing fails.
+ * Extract and parse a bare JSON object from text. Returns null if no object
+ * is found or if parsing fails.
  *
- * Uses non-greedy matching so that if the text contains multiple top-level
- * JSON-like blocks separated by non-JSON content (e.g. log lines), the first
- * parseable object is returned rather than a greedy span that crosses all of
- * them and fails to parse. Trade-off: non-greedy does not correctly handle
- * deeply nested objects — for those, prefer `parseJsonBlock` (fenced block).
- * In practice, PM-agent Haiku responses are flat JSON, so non-greedy is safe.
+ * Strategy:
+ * 1. Try `JSON.parse(text.trim())` first — covers clean JSON-only responses
+ *    (the prefill-anchored v2 triage prompt elicits this shape).
+ * 2. Fall back to bracket-counted extraction: find the first `{`, then walk
+ *    forward tracking nesting depth (string-aware, escape-aware) until the
+ *    matching closing `}`. Handles nested objects/arrays correctly — the
+ *    previous non-greedy regex (`\{[\s\S]*?\}`) truncated at the first inner
+ *    `}` and silently failed to parse v2 Haiku responses with `riskAssessment`
+ *    / `examples` / `testStrategy` objects.
  */
 export function parseJsonObject(text: string): any | null {
-  return parseJsonWithRegex(text, /\{[\s\S]*?\}/, 0) as any | null;
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{")) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      // fall through to extraction
+    }
+  }
+  const start = text.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(start, i + 1));
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
 }
 
 /**

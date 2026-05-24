@@ -49,18 +49,32 @@ export class OpenRouterFanoutProvider implements ReviewProvider {
       }
       const err = res.reason as Error;
       log.warn({ modelId, err: err.message }, "fanout model failed");
-      return {
+      return this.createFailedModelRun(
         modelId,
-        providerId: "openrouter" as const,
-        status: "failed" as const,
-        findings: [],
-        inputTokens: 0,
-        outputTokens: 0,
-        durationMs: 0,
-        errorMessage: err.message,
-        truncatedFiles: prompt.truncatedFiles > 0 ? prompt.truncatedFiles : undefined,
-      };
+        0,
+        err.message,
+        prompt.truncatedFiles > 0 ? prompt.truncatedFiles : undefined,
+      );
     });
+  }
+
+  private createFailedModelRun(
+    modelId: string,
+    durationMs: number,
+    errorMessage: string,
+    truncatedFiles?: number,
+  ): ReviewModelRun {
+    return {
+      modelId,
+      providerId: "openrouter" as const,
+      status: "failed" as const,
+      findings: [],
+      inputTokens: 0,
+      outputTokens: 0,
+      durationMs,
+      errorMessage,
+      truncatedFiles,
+    };
   }
 
   private async runOne(
@@ -101,16 +115,7 @@ export class OpenRouterFanoutProvider implements ReviewProvider {
           : err instanceof Error
             ? err.message
             : String(err);
-      return {
-        modelId,
-        providerId: "openrouter" as const,
-        status: "failed" as const,
-        findings: [],
-        inputTokens: 0,
-        outputTokens: 0,
-        durationMs: Date.now() - startedAt,
-        errorMessage: msg,
-      };
+      return this.createFailedModelRun(modelId, Date.now() - startedAt, msg);
     } finally {
       clearTimeout(timer);
     }

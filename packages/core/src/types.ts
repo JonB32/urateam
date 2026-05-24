@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ReleaseManagerConfigSchema } from "./release-manager/types.js";
 
 // --- Stage Types ---
-export const StageTypeSchema = z.enum([
+const StageTypeSchema = z.enum([
   "triage", "await-approval", "reproduce", "implement", "test", "review",
 ]);
 export type StageType = z.infer<typeof StageTypeSchema>;
@@ -12,10 +12,10 @@ export const AGENT_STAGES: StageType[] = [
 ];
 
 // --- Pipeline Config ---
-export const RetryStrategySchema = z.enum(["fix-and-retry", "escalate", "fail-fast"]);
+const RetryStrategySchema = z.enum(["fix-and-retry", "escalate", "fail-fast"]);
 export type RetryStrategy = z.infer<typeof RetryStrategySchema>;
 
-export const RetryConfigSchema = z.object({
+const RetryConfigSchema = z.object({
   maxAttempts: z.number().int().min(0),
   strategy: RetryStrategySchema,
 });
@@ -45,10 +45,30 @@ export const PipelineConfigSchema = z.object({
   reviewFixIterations: z.number().int().min(0).max(5).optional(),
   /** Deep review passes using 3 parallel sub-agents (reuse, quality, efficiency).
    *  Runs after the review-fix loop resolves blocking findings. Default: 0 (disabled).
-   *  Set to 1 to opt in for critical pipelines (adds ~45-100K tokens per pass). */
+   *  Set to 1 to opt in for critical pipelines (adds ~45-100K tokens per pass).
+   *  Tier 3 auto-bumps this to at least 1 when `autoDeepReviewThresholds` fire. */
   deepReviewPasses: z.number().int().min(0).max(5).optional(),
   /** Hard cap on deep review passes. Prevents infinite loops. Default: 3. */
   maxDeepReviewPasses: z.number().int().min(1).max(10).optional(),
+  /** Tier 3 — heuristic thresholds for auto-bumping `deepReviewPasses` to ≥1
+   *  when the agent's diff is "non-trivial". Any one tripping is enough.
+   *  Defaults: { newFiles: 5, totalLines: 200, newPublicExports: 2 }. Set
+   *  individual values to a huge number to effectively disable that trigger,
+   *  or use the `URATEAM_DISABLE_AUTO_DEEP_REVIEW=true` env var to disable
+   *  the whole heuristic per-run. Requires `OPENROUTER_API_KEY` +
+   *  `REVIEW_MODELS` configured for the deep-review fanout to actually run.  */
+  autoDeepReviewThresholds: z
+    .object({
+      changedFiles: z.number().int().min(0),
+      totalLines: z.number().int().min(0),
+      newPublicExports: z.number().int().min(0),
+    })
+    .optional(),
+  /** Tier 3 — when true (default), blocking findings from the deep-review
+   *  loop are added to `unresolvedBlockingFindings`, forcing draft PRs.
+   *  Set to false to keep deep-review findings advisory-only (the existing
+   *  behavior pre-Tier 3).  */
+  deepReviewFindingsAreBlocking: z.boolean().optional(),
   /** Auto-merge PRs when changes are trivial. Default: false (opt-in). */
   autoMerge: z.boolean().optional(),
   /** Max diff lines for auto-merge eligibility. Default: 200. */
@@ -123,16 +143,16 @@ export const DEFAULT_TRIGGER_MAP: TriggerMap = {
 // --- Repo Config ---
 // Each setup command is [command, ...args] to avoid shell parsing.
 // Example: ["pnpm", "install", "--frozen-lockfile"]
-export const SetupCommandSchema = z.array(z.string()).min(1);
+const SetupCommandSchema = z.array(z.string()).min(1);
 export type SetupCommand = z.infer<typeof SetupCommandSchema>;
 
-export const McpServerEntrySchema = z.object({
+const McpServerEntrySchema = z.object({
   command: z.string(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
 });
 
-export const PluginEntrySchema = z.object({
+const PluginEntrySchema = z.object({
   type: z.literal("local"),
   path: z.string(),
 });
@@ -151,7 +171,7 @@ export const PluginConfigSchema = z.object({
 });
 export type PluginConfig = z.infer<typeof PluginConfigSchema>;
 
-export const DevcontainerConfigSchema = z.object({
+const DevcontainerConfigSchema = z.object({
   /** Enable devcontainer usage. Default: "auto" (use if .devcontainer exists) */
   mode: z.enum(["auto", "always", "never"]).optional(),
   /** Override path to devcontainer config */
@@ -161,7 +181,7 @@ export const DevcontainerConfigSchema = z.object({
 });
 export type DevcontainerConfig = z.infer<typeof DevcontainerConfigSchema>;
 
-export const GitHubFeedbackConfigSchema = z.object({
+const GitHubFeedbackConfigSchema = z.object({
   /**
    * GitHub logins allowed to trigger feedback runs.
    * If empty/omitted, any reviewer can trigger.
@@ -201,8 +221,8 @@ export const RepoConfigSchema = z.object({
   devcontainer: DevcontainerConfigSchema.optional(),
   /** Per-team trigger map. Overrides the global triggerMap for this team's repo. Falls back to DEFAULT_TRIGGER_MAP. */
   triggerMap: TriggerMapSchema.optional(),
-  /** Hosting provider. Defaults to "github". Set to "gitlab" for GitLab repos. */
-  provider: z.enum(["github", "gitlab"]).optional(),
+  /** Hosting provider. Defaults to "github". Set to "gitlab" for GitLab repos or "bitbucket" for Bitbucket. */
+  provider: z.enum(["github", "gitlab", "bitbucket"]).optional(),
   /** Configuration for GitHub PR review comment → pipeline re-entry (feedback runs). */
   githubFeedback: GitHubFeedbackConfigSchema.optional(),
   /** BEC-135: Release Manager agent (Pro feature). */
@@ -223,7 +243,7 @@ export const RepoConfigSchema = z.object({
 export type RepoConfig = z.infer<typeof RepoConfigSchema>;
 
 // --- Handoff Artifact ---
-export const TestResultSchema = z.object({
+const TestResultSchema = z.object({
   passed: z.number().int().min(0),
   failed: z.number().int().min(0),
   firstFailure: z.object({
@@ -274,6 +294,31 @@ export const HandoffArtifactSchema = z.object({
 });
 export type HandoffArtifact = z.infer<typeof HandoffArtifactSchema>;
 
+/**
+ * BEC-227 Phase 4 / Track D. The implement agent emits this as a
+ * `<decisions>{ JSON }</decisions>` XML block at the end of its turn.
+ * Used by the review-fix loop's surgical prompt and by future Track F
+ * cross-run inheritance. Every field is optional — malformed or missing
+ * blocks degrade silently to an empty artifact.
+ */
+export const DecisionArtifactSchema = z.object({
+  decisions: z.array(
+    z.object({
+      choice: z.string(),
+      reason: z.string(),
+      alternativesConsidered: z.array(z.string()).default([]),
+    }),
+  ).default([]),
+  leftUnhandled: z.array(
+    z.object({
+      case: z.string(),
+      reason: z.string(),
+    }),
+  ).default([]),
+  keyFiles: z.array(z.string()).default([]),
+});
+export type DecisionArtifact = z.infer<typeof DecisionArtifactSchema>;
+
 // --- Review Feedback Context ---
 export const ReviewCommentSchema = z.object({
   author: z.string(),
@@ -305,7 +350,7 @@ export type ReviewFeedbackContext = z.infer<typeof ReviewFeedbackContextSchema>;
 // "resolve conflicts and continue rebase" prompt instead of the standard
 // "implement issue from scratch" path that confuses the agent into burning
 // all 50 turns without making progress.
-export const MergeConflictContextSchema = z.object({
+const MergeConflictContextSchema = z.object({
   /** The base branch name being rebased onto (e.g. "main"). */
   defaultBranch: z.string(),
 });
@@ -325,24 +370,50 @@ export interface TokenBudget {
 }
 
 // --- Run Status ---
-export type PipelineRunStatus = "queued" | "running" | "completed" | "failed" | "aborted" | "paused";
-export type StageRunStatus = "running" | "completed" | "failed" | "skipped";
-export type AgentLogType = "tool_call" | "tool_result" | "message" | "error";
+export type PipelineRunStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "aborted"
+  | "paused"
+  /** Operator-initiated stop (cancel/graceful via dashboard, Slack, or CLI).
+   *  Distinct from "aborted" (system-initiated, e.g. token budget). */
+  | "cancelled";
+export type StageRunStatus = "running" | "completed" | "failed" | "skipped" | "cancelled";
+export type AgentLogType = "tool_call" | "tool_result" | "message" | "error" | "cancelled";
 
 // --- Sanitized Issue ---
-export interface SanitizedIssue {
-  id: string;
-  slug: string;
-  title: string;
-  description: string;
-  acceptanceCriteria: string[];
-  labels: string[];
-  priority: number;
-}
+export const SanitizedIssueSchema = z.object({
+  id: z.string(),
+  slug: z.string(),
+  title: z.string(),
+  description: z.string(),
+  acceptanceCriteria: z.array(z.string()),
+  labels: z.array(z.string()),
+  priority: z.number(),
+});
+export type SanitizedIssue = z.infer<typeof SanitizedIssueSchema>;
+
+// --- Resume Payload ---
+// Snapshot of all context needed to restart a paused or retriable pipeline run.
+// Stored as JSON in pipeline_runs.resume_payload; validated with safeParse on
+// resume so schema mismatches from older DB rows fail gracefully (run → failed).
+// Note: currentStageIndex may be -1 for transient-failure retries (stage 0 failed;
+// slice(-1+1) = slice(0) re-runs the full stage list from the start).
+export const ResumePayloadSchema = z.object({
+  worktreePath: z.string(),
+  currentStageIndex: z.number().int(),
+  handoff: HandoffArtifactSchema.nullable(),
+  pipelineConfig: PipelineConfigSchema,
+  repoConfig: RepoConfigSchema,
+  sanitizedIssue: SanitizedIssueSchema,
+});
+export type ResumePayload = z.infer<typeof ResumePayloadSchema>;
 
 // --- Stage Result ---
 export interface StageResult {
-  status: "completed" | "failed";
+  status: "completed" | "failed" | "cancelled";
   handoffArtifact?: HandoffArtifact;
   /** True when the agent produced a valid structured handoff JSON block.
    *  NOTE: not persisted to DB yet — runtime-only. Add a column if needed for dashboards/queries. */
@@ -436,6 +507,14 @@ export interface Notifier {
   onTokenBudgetAlert?(run: PipelineRun, usedTokens: number, maxTokens: number): Promise<void>;
   /** Called by sendDailyTokenSummary() with aggregated usage for a given date. */
   onDailyTokenSummary?(summary: DailyTokenSummary): Promise<void>;
+  /**
+   * BEC-186: called when a GitHub pull_request.closed webhook arrives with
+   * merged=true — either from a human merge via the GitHub UI or from
+   * GitHub's "auto-merge when ready" feature — after the pipeline has already
+   * completed. Transitions the Linear issue to Done and posts a "PR merged"
+   * comment.
+   */
+  onPRMerged?(run: PipelineRun): Promise<void>;
 }
 
 // --- Sandbox Config ---
@@ -450,14 +529,28 @@ export interface SandboxConfig {
 export const AuditEventTypeSchema = z.enum([
   "run.started", "run.completed", "run.failed",
   "run.auto_merged", "run.auto_merge_skipped",
+  /** Operator-initiated stop of a single run (mode: "cancel" | "graceful"). */
+  "run.cancelled",
+  /** Operator-initiated container-wide halt (pause PM + cancel all in-flight). */
+  "system.halted",
   "pm.approval_requested", "pm.approval_resolved",
   "pm.issue_promoted", "pm.issue_deprioritized", "pm.issue_cancelled",
   "pm.triage_classified",
+  /** Tier 6e — emitted after each successful push. Compares triage v2's
+   *  `affectedFiles` prediction against the actual diff to track prediction
+   *  quality over time. When `hasV2Prediction` is false the triage stage
+   *  ran v1 (no prediction) and only `actual` / `runId` / `issueId` are
+   *  meaningful. */
+  "pm.triage_quality_score",
   "pm.agent_branch_swept",
   "pm.skipped_circuit_breaker",
   "pm.recovered_long_running",
   "budget.alert_fired", "budget.run_refused",
   "license.validation_failed", "config.loaded",
+  /** Claude CLI session credentials have expired (BEC-207). Operational
+   *  signal: new pipeline runs will fail immediately until `claude login`
+   *  is re-run or CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY is configured. */
+  "claude.auth_expired",
   "dashboard.manual_action",
   "dashboard.login", "dashboard.logout", "dashboard.login_denied",
   "policy.path_blocked", "policy.cost_exceeded",
@@ -467,12 +560,105 @@ export const AuditEventTypeSchema = z.enum([
   "slack.post_failed",
   "qa.run_triggered", "qa.run_completed", "qa.gap_issue_filed",
   "review.fanout_fallback_used", "review.model_low_output_ratio",
+  /** Tier 1a — the scratch-file denylist gate fired on this run, forcing a
+   *  draft PR. Payload includes the matched paths. */
+  "pipeline.scratch_files_blocked",
+  /** Tier 1b — `pnpm typecheck` (or the configured equivalent) reported
+   *  errors on the agent's diff before push. Payload includes errorCount and
+   *  up to 5 first messages. The runner forces draft and surfaces the output
+   *  in the PR body. */
+  "pipeline.typecheck_failed",
+  /** Tier 1c — the spec-vs-impl JSDoc gate found one or more docblock
+   *  references to `config.X` / `opts.X` / etc. that aren't defined anywhere
+   *  in the worktree. Payload lists matched (file, prefix, symbol) tuples
+   *  (capped at 20). */
+  "pipeline.spec_vs_impl_failed",
+  /** Tier 3 — auto-deep-review thresholds tripped on this run; the runner
+   *  bumped `deepReviewPasses` from its configured value to ≥1 so the
+   *  deep-review fanout runs. Payload includes the diff metrics and which
+   *  threshold tripped. */
+  "pipeline.auto_deep_review_bumped",
+  /** Tier 5 — an issue tripped the consecutive-failures circuit breaker
+   *  (≥ `maxConsecutiveFailures` failed runs in a row). The PM Agent
+   *  escalated by adding the `needs-design` label, posting a Linear
+   *  comment with the last failure's error message, and sending a Slack
+   *  alert. Payload includes failureCount and a truncated errorMessage. */
+  "pm.escalated_to_needs_design",
+  /** BEC-236 — PM tick selected this issue for a half-open circuit-breaker probe.
+   *  The breaker is currently engaged (≥ maxConsecutiveFailures), but the
+   *  cooldown window has elapsed and the per-tick probe cap allows it through.
+   *  Payload: issueId, consecutiveFailures, lastProbeAgeMin (minutes since the
+   *  previous probe; -1 for the first probe — NOT the age since the last
+   *  failure), probeAttempts. */
+  "pm.circuit_breaker_probe",
+  /** BEC-236 — A probe run reached terminal `completed` status, so the
+   *  circuit_breaker_state row was deleted and the Tier-5-added `needs-design`
+   *  label was removed. Payload: issueId, probeAttempts. */
+  "pm.circuit_breaker_recovered",
+  /** BEC-236 — `ura circuit reset` cleared the breaker for an issue. Payload:
+   *  issueId, scope ("single" | "bulk"), failedRunsDeleted (count of
+   *  pipeline_runs rows the reset deleted). */
+  "pm.circuit_breaker_reset_manual",
+  /** `ura service install` succeeded — a launchd plist (macOS) or systemd-user
+   *  unit (Linux) was written and the service was started. Operational signal
+   *  so operators can audit unattended provisioning. */
+  "service.installed",
+  /** `ura service uninstall` succeeded — the unit file was removed and the
+   *  service stopped. */
+  "service.uninstalled",
+  /** `ura self-auth-linear` completed: the operator authorized urateam in
+   *  Linear and the CLI persisted the access token to `~/.urateam/.env` as
+   *  `LINEAR_API_KEY`. Payload includes the Linear workspace ID (never the
+   *  token itself). */
+  "linear.oauth_completed",
+  /** `ura start --tunnel <mode>` brought a public tunnel up; the daemon
+   *  now has a reachable URL. Payload: provider, publicUrl, restartCount. */
+  "tunnel.started",
+  /** The tunnel child process exited — either gracefully (operator stopped
+   *  the daemon) or because the restart cap was hit. Payload: provider,
+   *  restartCount, exitCode, signal. */
+  "tunnel.stopped",
+  /** `ura start` reloaded `~/.urateam/config.json` without restart. Payload
+   *  carries added / removed / modifiedSafe / modifiedUnsafe arrays + diff
+   *  hash, so operators can audit which repos came/went without grepping
+   *  the daemon log. */
+  "config.reloaded",
+  /** BEC-227 — a fresh per-run Agent SDK session was created on the first
+   *  resumable stage. Payload: runId, issueId, sessionId (UUID generated
+   *  by the SDK on the first `query()` call). */
+  "pipeline.agent_session_created",
+  /** BEC-227 — a downstream stage resumed the per-run Agent SDK session via
+   *  `query({ resume: sessionId })`. Payload includes the stage name and
+   *  the prior message count read from the session JSONL transcript so
+   *  operators can see how much context was inherited. */
+  "pipeline.agent_session_resumed",
+  /** BEC-227 — a stage attempted to resume the per-run session but the
+   *  underlying JSONL transcript was missing, unreadable, or the SDK
+   *  rejected the resume. The runner fell back to a fresh session for
+   *  this stage. Payload `reason` carries the failure mode. */
+  "pipeline.agent_session_missing_fallback",
+  /** BEC-227 — at boot, the session-volume check found `~/.claude/projects`
+   *  on tmpfs, missing, or unwritable — meaning session JSONLs won't
+   *  survive container restarts. Payload carries the projectsDir path and
+   *  the failure reason so operators can fix their mount config. */
+  "system.session_volume_warning",
+  /** BEC-227 Phase 4 / Track B — the review-fix loop took the surgical path:
+   *  it resumed the per-run Agent SDK session and prompted the agent with
+   *  just the blocking review findings (plus the previously-persisted
+   *  decision artifact when available), instead of re-running the full
+   *  implement template. Payload: `runId`, `issueId`, `path` ("surgical" |
+   *  "legacy"), `findingsCount`, `decisionPayloadBytes` (0 when no
+   *  artifact was found). The `legacy` path is logged too so operators
+   *  can audit fallback rates. */
+  "pipeline.surgical_review_fix",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 
 export const AuditActorTypeSchema = z.enum([
   "system", "pm-agent", "webhook", "dashboard-user", "cli",
   "release-manager",
+  /** Slack-initiated action (slash command or DM/@mention). */
+  "slack",
 ]);
 export type AuditActorType = z.infer<typeof AuditActorTypeSchema>;
 

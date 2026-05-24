@@ -1,6 +1,6 @@
 {
   "name": "@urateam/cli",
-  "version": "0.1.33",
+  "version": "0.1.62",
   "license": "BUSL-1.1",
   "type": "module",
   "main": "dist/index.js",
@@ -29,7 +29,8 @@
     "@linear/sdk": "^29.0.0",
     "better-sqlite3": "^11.8.0",
     "commander": "^13.1.0",
-    "postgres": "^3.4.0"
+    "postgres": "^3.4.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",

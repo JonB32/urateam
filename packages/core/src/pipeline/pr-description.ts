@@ -1,6 +1,25 @@
 import type { HandoffArtifact } from "../types.js";
 
 /**
+ * Triage prediction-quality metric from the `pm.triage_quality_score` audit event.
+ * Derived from `computeAffectedFilesPredictionQuality` and stored in the audit log.
+ */
+export interface TriageQualityMetric {
+  /** True when the triage v2 path ran and produced `affectedFiles`. */
+  hasV2Prediction: boolean;
+  /** Count of unique paths triage predicted would be modified. */
+  predicted: number;
+  /** Count of unique paths actually changed in the diff. */
+  actual: number;
+  /** Count of paths in both sets. */
+  intersection: number;
+  /** Paths predicted but not touched (capped at 50). */
+  missed: string[];
+  /** Paths touched but not predicted (capped at 50). */
+  unexpected: string[];
+}
+
+/**
  * Options for generating a PR description.
  */
 export interface PRDescriptionOptions {
@@ -30,18 +49,26 @@ export interface PRDescriptionOptions {
   unresolvedBlockingFindings?: unknown[];
   /** Agent-authored commit messages (not auto-committed fallbacks) to include in a Commits section. */
   agentCommits?: string[];
+  /**
+   * Triage prediction-quality metric from the `pm.triage_quality_score` audit event.
+   * When provided and `hasV2Prediction` is true, a `## Triage Quality` section is appended
+   * between `## Test plan` and `## Commits`. Omitted when undefined or `hasV2Prediction` is false.
+   */
+  triageQuality?: TriageQualityMetric;
 }
 
 /**
  * Build the markdown body for an auto-generated pull request.
  *
  * Template order:
- *   ## Summary    — from handoff.summary (fallback: "No summary available.")
- *   ## Changes    — bulleted list of handoff.filesChanged (fallback: "No file changes recorded.")
- *   ## Test plan  — filtered list of test/spec files from filesChanged (fallback: "No test changes")
- *   ## Commits    — agent-authored commit messages (section omitted when empty)
- *   > Draft PR    — draft-status callout (section omitted when not a draft)
- *   Resolves <id> — Linear issue link
+ *   ## Summary         — from handoff.summary (fallback: "No summary available.")
+ *   ## Changes         — bulleted list of handoff.filesChanged (fallback: "No file changes recorded.")
+ *   ## Test plan       — filtered list of test/spec files from filesChanged (fallback: "No test changes")
+ *   ## Triage Quality  — predicted/actual/intersection counts + missed/unexpected paths
+ *                        (section omitted when triageQuality is absent or hasV2Prediction=false)
+ *   ## Commits         — agent-authored commit messages (section omitted when empty)
+ *   > Draft PR         — draft-status callout (section omitted when not a draft)
+ *   Resolves <id>      — Linear issue link
  *
  * Sections are separated by double newlines (markdown paragraph breaks).
  */
@@ -56,6 +83,7 @@ export function generatePRDescription(options: PRDescriptionOptions): string {
     ralphEvaluationError,
     unresolvedBlockingFindings = [],
     agentCommits = [],
+    triageQuality,
   } = options;
 
   const parts: string[] = [];
@@ -79,6 +107,23 @@ export function generatePRDescription(options: PRDescriptionOptions): string {
     parts.push(`## Test plan\n${testFiles.map((f) => `- \`${f}\``).join("\n")}`);
   } else {
     parts.push(`## Test plan\nNo test changes`);
+  }
+
+  // Triage Quality section — surfaced from pm.triage_quality_score audit event (BEC-220).
+  // Omitted when no event exists for the run or when triage v1 ran (no affectedFiles prediction).
+  if (triageQuality?.hasV2Prediction) {
+    const lines: string[] = [
+      `- Predicted: ${triageQuality.predicted} files`,
+      `- Actual: ${triageQuality.actual} files`,
+      `- Intersection: ${triageQuality.intersection} files`,
+    ];
+    if (triageQuality.missed.length > 0) {
+      lines.push(`- Missed: ${triageQuality.missed.map((f) => `\`${f}\``).join(", ")}`);
+    }
+    if (triageQuality.unexpected.length > 0) {
+      lines.push(`- Unexpected: ${triageQuality.unexpected.map((f) => `\`${f}\``).join(", ")}`);
+    }
+    parts.push(`## Triage Quality\n${lines.join("\n")}`);
   }
 
   // Commits section — include agent-authored commit messages (not auto-committed fallbacks)

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 import { Hono } from "hono";
 import { basicAuth } from "hono/basic-auth";
+import { HTTPException } from "hono/http-exception";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -23,6 +24,7 @@ import { createUsersRouter } from "./routes/users.js";
 import { createAuthRouter } from "./routes/auth.js";
 import { createSsoMiddleware } from "./middleware/sso.js";
 import { createCostRouter } from "./routes/cost.js";
+import { DASHBOARD_CSP } from "./csp.js";
 
 const logger = createLogger({ component: "dashboard" });
 
@@ -30,6 +32,19 @@ export interface DashboardConfig {
   db: Db;
   pipelineConfigs: Record<string, PipelineConfig>;
   repoConfigs: Record<string, RepoConfig>;
+  /**
+   * Optional reference to the pipeline runner. Wires the stop/halt buttons
+   * (and the audit-logged routes behind them) to the live in-process runner.
+   * When absent (e.g. read-only dashboard deployments), the buttons render
+   * only if the user has the right role but the POST handlers respond 500
+   * with "Runner not configured" — visible failure rather than silent no-op.
+   */
+  runner?: {
+    resume: (runOrIssueId: string) => Promise<void>;
+    start: (...args: any[]) => Promise<void>;
+    requestStop?: (runId: string, mode: "cancel" | "graceful") => { issueId: string | null; mode: "cancel" | "graceful" };
+    haltAll?: () => { cancelledRunIds: string[] };
+  };
   /** Optional costs config for the Cost & ROI dashboard (enterprise). */
   costs?: CostsConfig;
   auth?: { username: string; password: string };
@@ -51,8 +66,13 @@ export interface DashboardConfig {
   basePath?: string;
 }
 
-// Rate limiter constants
-const RATE_LIMIT_MAX = 10; // requests per window
+// Rate limiter constants.
+// The limiter counts FAILED-AUTH responses (HTTP 401) per IP — not total
+// requests. A legitimate operator clicking around the HTMX dashboard only
+// ever produces 200/3xx responses, so normal traversal never trips it. Only
+// repeated 401s (a brute-force attempt against basic-auth or the login flow)
+// accumulate toward the limit.
+const RATE_LIMIT_MAX = 10; // failed-auth (401) responses per window before 429
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
 
 export function createDashboard(config: DashboardConfig): Hono {
@@ -83,7 +103,7 @@ export function createDashboard(config: DashboardConfig): Hono {
     c.res.headers.set("X-Frame-Options", "DENY");
     c.res.headers.set(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self'",
+      DASHBOARD_CSP,
     );
     c.res.headers.set("X-XSS-Protection", "0");
     c.res.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
@@ -97,7 +117,17 @@ export function createDashboard(config: DashboardConfig): Hono {
     );
   });
 
-  // Rate limiting middleware — before auth to protect against brute-force
+  // Rate limiting middleware — brute-force protection.
+  //
+  // Counts only FAILED-AUTH (HTTP 401) responses per IP, not total requests.
+  // Normal dashboard traversal (page loads, static assets, HTMX partials —
+  // dozens of requests per click) returns 200/3xx and never increments the
+  // counter, so an operator is never rate-limited. A brute-force attempt
+  // (repeated bad basic-auth credentials, or repeated failed logins) produces
+  // a stream of 401s from one IP and trips the limit.
+  //
+  // basic-auth failures are thrown as HTTPException(401); RBAC failures are
+  // returned as a 401 response — both are detected below.
   app.use("*", async (c, next) => {
     const ip =
       c.req.header("x-forwarded-for") ||
@@ -106,16 +136,32 @@ export function createDashboard(config: DashboardConfig): Hono {
     const now = Date.now();
     const entry = rateLimitMap.get(ip);
 
-    if (entry && now - entry.windowStart < RATE_LIMIT_WINDOW_MS) {
-      entry.count++;
-      if (entry.count > RATE_LIMIT_MAX) {
-        return c.text("Too Many Requests", 429);
-      }
-    } else {
-      rateLimitMap.set(ip, { count: 1, windowStart: now });
+    // Block if this IP is already over the failed-auth threshold this window.
+    if (
+      entry &&
+      now - entry.windowStart < RATE_LIMIT_WINDOW_MS &&
+      entry.count > RATE_LIMIT_MAX
+    ) {
+      return c.text("Too Many Requests", 429);
     }
 
-    await next();
+    let authFailed = false;
+    try {
+      await next();
+      if (c.res.status === 401) authFailed = true;
+    } catch (err) {
+      if (err instanceof HTTPException && err.status === 401) authFailed = true;
+      throw err;
+    } finally {
+      if (authFailed) {
+        const e = rateLimitMap.get(ip);
+        if (e && now - e.windowStart < RATE_LIMIT_WINDOW_MS) {
+          e.count++;
+        } else {
+          rateLimitMap.set(ip, { count: 1, windowStart: now });
+        }
+      }
+    }
   });
 
   // CSRF / Origin validation for state-changing requests
@@ -137,9 +183,14 @@ export function createDashboard(config: DashboardConfig): Hono {
     // a logout.
     const path = c.req.path;
     const csrfExempt = csrfExemptPaths.has(path);
+    // /cli/* endpoints carry their own shared-secret auth (X-Ura-Cli-Token)
+    // and are not browser-reachable forms — CSRF doesn't apply. The token
+    // check inside the /cli/* router rejects unauthenticated requests.
+    const isCliPath = path.startsWith(`${csrfExemptBase}/cli/`);
     if (
       ["POST", "PUT", "DELETE", "PATCH"].includes(method) &&
-      !csrfExempt
+      !csrfExempt &&
+      !isCliPath
     ) {
       // Require HX-Request header on HTMX-driven state-changing endpoints
       if (!c.req.header("HX-Request")) {
@@ -205,13 +256,17 @@ export function createDashboard(config: DashboardConfig): Hono {
       createSsoMiddleware({ db: config.db, sso: config.sso!, basePath }),
     );
   } else if (config.auth?.username && config.auth?.password) {
-    app.use(
-      "*",
-      basicAuth({
-        username: config.auth.username,
-        password: config.auth.password,
-      }),
-    );
+    // Skip basic auth for /cli/* — those routes guard themselves with the
+    // X-Ura-Cli-Token shared secret. Without this skip, the CLI would have
+    // to know DASHBOARD_PASSWORD on top of URATEAM_CLI_TOKEN.
+    const cliPrefix = `${basePath}/cli/`;
+    app.use("*", async (c, next) => {
+      if (c.req.path.startsWith(cliPrefix)) return next();
+      return basicAuth({
+        username: config.auth!.username,
+        password: config.auth!.password,
+      })(c, next);
+    });
     // BEC-156: synthesize an admin user after basicAuth verifies credentials.
     // Without this, the RBAC middleware (`requirePermission`) on Enterprise
     // tier looks for c.user — which only the SSO middleware sets — and 401's
@@ -238,7 +293,12 @@ export function createDashboard(config: DashboardConfig): Hono {
       await next();
     });
   } else {
-    app.use("*", async (c) => {
+    const cliPrefix = `${basePath}/cli/`;
+    app.use("*", async (c, next) => {
+      // Even with no dashboard auth configured, /cli/* must still be reachable
+      // (its own token check enforces access). Without this carve-out the
+      // 503 here would shadow the CLI control plane.
+      if (c.req.path.startsWith(cliPrefix)) return next();
       return c.text(
         "Dashboard authentication is required but not configured. " +
           "Set DASHBOARD_USER and DASHBOARD_PASSWORD environment variables and restart.",
@@ -277,7 +337,11 @@ export function createDashboard(config: DashboardConfig): Hono {
   // Mount each sub-router at the basePath prefix. basePath also continues to
   // get passed INTO each router so layout() emits correct hrefs — the two
   // concerns (mount vs. link generation) are separate but share the value.
-  const runsRouter = createRunsRouter(config.db, basePath);
+  const runsRouter = createRunsRouter({
+    db: config.db,
+    runner: config.runner,
+    basePath,
+  });
   app.route(mountPrefix, runsRouter);
 
   const tokensRouter = createTokensRouter(config.db, basePath);

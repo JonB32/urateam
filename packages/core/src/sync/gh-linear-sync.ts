@@ -17,6 +17,7 @@
  *   Linear  = triage / work-tracking / autonomous-pipeline routing
  */
 import { createLogger } from "../logger.js";
+import { getLinearClient } from "../util/linear.js";
 
 const log = createLogger({ component: "gh-linear-sync" });
 
@@ -546,9 +547,8 @@ export async function createGitHubSyncClientFromToken(
 export async function createLinearSyncClientFromApiKey(
   apiKey: string,
 ): Promise<LinearSyncClient> {
-  const { LinearClient } = await import("@linear/sdk");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const client: any = new LinearClient({ apiKey });
+  const client: any = await getLinearClient(apiKey);
 
   return {
     async issues(args) {

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AuditEvent } from "../types.js";
+import { getAuthExpiredMessages } from "./auth-error-messages.js";
 
 function base(
   partial: Partial<AuditEvent> & Pick<AuditEvent, "eventType" | "actor" | "actorType">,
@@ -83,6 +84,52 @@ export function pmAgentBranchSweptEvent(args: {
     payload: {
       branch: args.branch,
       ageDays: args.ageDays,
+      reason: args.reason,
+    },
+  });
+}
+
+/**
+ * Operator-initiated single-run stop. `mode` records whether the stage was
+ * interrupted mid-stream ("cancel") or allowed to finish before skipping the
+ * rest of the pipeline ("graceful").
+ */
+export function runCancelledEvent(args: {
+  runId: string;
+  issueId: string;
+  actor: string;
+  actorType: "dashboard-user" | "cli" | "slack" | "system";
+  mode: "cancel" | "graceful";
+  reason?: string;
+}): AuditEvent {
+  return base({
+    eventType: "run.cancelled",
+    actor: args.actor,
+    actorType: args.actorType,
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: { mode: args.mode, reason: args.reason },
+  });
+}
+
+/**
+ * Operator-initiated container-wide halt. Records the count of in-flight runs
+ * that were cancelled at halt time (each individual cancel also emits its own
+ * `run.cancelled` event with the same actor).
+ */
+export function systemHaltedEvent(args: {
+  actor: string;
+  actorType: "dashboard-user" | "cli" | "slack" | "system";
+  cancelledRunIds: string[];
+  reason?: string;
+}): AuditEvent {
+  return base({
+    eventType: "system.halted",
+    actor: args.actor,
+    actorType: args.actorType,
+    payload: {
+      cancelledRunIds: args.cancelledRunIds,
+      cancelledCount: args.cancelledRunIds.length,
       reason: args.reason,
     },
   });
@@ -574,6 +621,542 @@ export function reviewModelLowOutputRatioEvent(args: {
       outputRatio: args.outputRatio,
       runs: args.runs,
       threshold: args.threshold,
+    },
+  });
+}
+
+/**
+ * BEC-207 / BEC-237: emitted by AuthMonitor when a Claude auth probe fails.
+ * Covers both the mounted-session path (`claude login`) and the OAuth-token
+ * path (`CLAUDE_CODE_OAUTH_TOKEN`). Operational signal — the operator must
+ * take action before new pipeline runs will succeed.
+ *
+ * `authMethod` distinguishes the two paths so the operator knows whether to
+ * run `claude setup-token` (OAuth token expired/revoked) or `claude login`
+ * (mounted session expired).
+ *
+ * NOTE: this event is written via `logAuditEventUnchecked` (the bypass call
+ * site list in CLAUDE.md), because session expiry is a base-tier operational
+ * concern that any operator needs to see regardless of `audit-log` licensing.
+ */
+export function claudeAuthExpiredEvent(args: {
+  detectedAt: Date;
+  authMethod: "oauth-token" | "mounted-session";
+}): AuditEvent {
+  const { hint } = getAuthExpiredMessages(args.authMethod);
+  return base({
+    eventType: "claude.auth_expired",
+    actor: "system",
+    actorType: "system",
+    payload: {
+      detectedAt: args.detectedAt.toISOString(),
+      authMethod: args.authMethod,
+      hint,
+    },
+  });
+}
+
+/**
+ * Tier 1a — emitted when the scratch-file denylist gate matches one or more
+ * agent-added files and forces the PR to draft. Payload includes the matched
+ * paths so operators can see the rate and categories. Capped at 50 paths to
+ * keep the audit row bounded.
+ */
+export function pipelineScratchFilesBlockedEvent(args: {
+  runId: string;
+  issueId: string;
+  files: string[];
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.scratch_files_blocked",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      files: args.files.slice(0, 50),
+      truncated: args.files.length > 50,
+      count: args.files.length,
+    },
+  });
+}
+
+/**
+ * Tier 1b — emitted when the typecheck gate detects type errors on the agent's
+ * diff before push. The runner forces draft + a `category: "typecheck"`
+ * blocking finding from this signal; the audit event surfaces the rate so
+ * operators can spot regressions in agent code-quality.
+ */
+export function pipelineTypecheckFailedEvent(args: {
+  runId: string;
+  issueId: string;
+  errorCount: number;
+  firstMessages: string[];
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.typecheck_failed",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      errorCount: args.errorCount,
+      firstMessages: args.firstMessages.slice(0, 5),
+    },
+  });
+}
+
+/**
+ * Tier 1c — emitted when the spec-vs-impl gate detects JSDoc references to
+ * `config.X` / `opts.X` / etc. that aren't defined anywhere in the worktree.
+ * The runner pushes one `category: "spec-vs-impl"` blocking finding per
+ * undefined symbol; the audit event captures the list (capped at 20 tuples)
+ * for rate-tracking.
+ */
+/**
+ * Tier 3 — emitted when the auto-deep-review heuristic bumps
+ * `deepReviewPasses` because the agent's diff exceeded one or more
+ * thresholds (changedFiles / totalLines / newPublicExports). Lets operators
+ * track the rate of auto-bumps and tune thresholds.
+ */
+export function pipelineAutoDeepReviewBumpedEvent(args: {
+  runId: string;
+  issueId: string;
+  metrics: {
+    changedFiles: number;
+    totalLines: number;
+    newPublicExports: number;
+  };
+  thresholds: {
+    changedFiles: number;
+    totalLines: number;
+    newPublicExports: number;
+  };
+  from: number;
+  to: number;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.auto_deep_review_bumped",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      metrics: args.metrics,
+      thresholds: args.thresholds,
+      from: args.from,
+      to: args.to,
+    },
+  });
+}
+
+/**
+ * Tier 5 — emitted when an issue trips the consecutive-failures circuit
+ * breaker (≥ maxConsecutiveFailures failed pipeline runs in a row) and the
+ * PM Agent escalates it to needs-design. Carries the truncated error
+ * message from the most-recent failed run so operators can see what kept
+ * failing without opening the run logs.
+ */
+export function pmEscalatedToNeedsDesignEvent(args: {
+  issueId: string;
+  failureCount: number;
+  errorMessage: string | null;
+}): AuditEvent {
+  return base({
+    eventType: "pm.escalated_to_needs_design",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    issueId: args.issueId,
+    payload: {
+      failureCount: args.failureCount,
+      errorMessage: args.errorMessage
+        ? args.errorMessage.slice(0, 500)
+        : null,
+    },
+  });
+}
+
+/** BEC-236 — PM tick selected this issue for a half-open circuit-breaker
+ * probe. The breaker is currently engaged (≥ maxConsecutiveFailures), but
+ * the cooldown window has elapsed and the per-tick probe cap allows it
+ * through. */
+export function pmCircuitBreakerProbeEvent(args: {
+  issueId: string;
+  consecutiveFailures: number;
+  /**
+   * Minutes since this issue's previous probe. `-1` when there is no
+   * previous probe (= this is the first probe for the issue). NOT the age
+   * since the last failure — that would require a separate per-issue
+   * query and wasn't worth the N+1.
+   */
+  lastProbeAgeMin: number;
+  probeAttempts: number;
+}): AuditEvent {
+  return base({
+    eventType: "pm.circuit_breaker_probe",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    issueId: args.issueId,
+    payload: {
+      consecutiveFailures: args.consecutiveFailures,
+      lastProbeAgeMin: args.lastProbeAgeMin,
+      probeAttempts: args.probeAttempts,
+    },
+  });
+}
+
+/** BEC-236 — A probe run reached terminal `completed` status, so the
+ * circuit_breaker_state row was deleted and the Tier-5-added `needs-design`
+ * label was removed. */
+export function pmCircuitBreakerRecoveredEvent(args: {
+  issueId: string;
+  probeAttempts: number;
+}): AuditEvent {
+  return base({
+    eventType: "pm.circuit_breaker_recovered",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    issueId: args.issueId,
+    payload: {
+      probeAttempts: args.probeAttempts,
+    },
+  });
+}
+
+/** BEC-236 — `ura circuit reset` cleared the breaker for an issue. */
+export function pmCircuitBreakerResetManualEvent(args: {
+  issueId: string;
+  scope: "single" | "bulk";
+  failedRunsDeleted: number;
+}): AuditEvent {
+  return base({
+    eventType: "pm.circuit_breaker_reset_manual",
+    actor: "ura-cli",
+    actorType: "cli",
+    issueId: args.issueId,
+    payload: {
+      scope: args.scope,
+      failedRunsDeleted: args.failedRunsDeleted,
+    },
+  });
+}
+
+/**
+ * `ura start --tunnel <mode>` brought a public tunnel up. Emitted once per
+ * successful start (including restarts after a tunnel failure). Payload
+ * carries the public URL so operators can see what their daemon is
+ * reachable as.
+ */
+export function tunnelStartedEvent(args: {
+  provider: "cloudflare-quick" | "cloudflare-token";
+  publicUrl: string;
+  restartCount: number;
+}): AuditEvent {
+  return base({
+    eventType: "tunnel.started",
+    actor: "system",
+    actorType: "system",
+    payload: {
+      provider: args.provider,
+      publicUrl: args.publicUrl,
+      restartCount: args.restartCount,
+    },
+  });
+}
+
+/**
+ * `ura start` reloaded the user-level config without a restart. Payload
+ * lists what changed so operators can spot unexpected mutations.
+ */
+export function configReloadedEvent(args: {
+  added: string[];
+  removed: string[];
+  modifiedSafe: string[];
+  modifiedUnsafe: string[];
+  sha256: string;
+}): AuditEvent {
+  return base({
+    eventType: "config.reloaded",
+    actor: "system",
+    actorType: "system",
+    payload: {
+      added: args.added,
+      removed: args.removed,
+      modifiedSafe: args.modifiedSafe,
+      modifiedUnsafe: args.modifiedUnsafe,
+      sha256: args.sha256,
+    },
+  });
+}
+
+/**
+ * Tunnel child process exited — either gracefully (operator stopped the
+ * daemon) or because the restart cap was hit. Payload carries the exit
+ * code / signal so operators can spot tunnel-flap loops in the audit log.
+ */
+export function tunnelStoppedEvent(args: {
+  provider: "cloudflare-quick" | "cloudflare-token";
+  restartCount: number;
+  exitCode: number | null;
+  signal: string | null;
+}): AuditEvent {
+  return base({
+    eventType: "tunnel.stopped",
+    actor: "system",
+    actorType: "system",
+    payload: {
+      provider: args.provider,
+      restartCount: args.restartCount,
+      exitCode: args.exitCode,
+      signal: args.signal,
+    },
+  });
+}
+
+/**
+ * `ura self-auth-linear` completed — the operator authorized urateam in
+ * Linear and the CLI persisted the access token to `~/.urateam/.env`.
+ *
+ * Payload deliberately omits the access token. workspaceId / workspaceName
+ * are operational metadata; they're not sensitive in the same way the
+ * token is.
+ */
+export function linearOauthCompletedEvent(args: {
+  workspaceId: string;
+  workspaceName?: string;
+  actor: string;
+}): AuditEvent {
+  return base({
+    eventType: "linear.oauth_completed",
+    actor: args.actor,
+    actorType: "cli",
+    payload: {
+      workspaceId: args.workspaceId,
+      ...(args.workspaceName ? { workspaceName: args.workspaceName } : {}),
+    },
+  });
+}
+
+/**
+ * `ura service install` succeeded — a platform service unit (launchd plist
+ * or systemd-user .service) was written and loaded. Emitted opportunistically
+ * from the CLI when the daemon DB already exists; never blocks the install.
+ */
+export function serviceInstalledEvent(args: {
+  platform: "darwin" | "linux";
+  unitPath: string;
+  actor: string;
+}): AuditEvent {
+  return base({
+    eventType: "service.installed",
+    actor: args.actor,
+    actorType: "cli",
+    payload: { platform: args.platform, unitPath: args.unitPath },
+  });
+}
+
+/**
+ * `ura service uninstall` succeeded — the unit file was removed and the
+ * service stopped. Counterpart to `serviceInstalledEvent`.
+ */
+export function serviceUninstalledEvent(args: {
+  platform: "darwin" | "linux";
+  unitPath: string;
+  actor: string;
+}): AuditEvent {
+  return base({
+    eventType: "service.uninstalled",
+    actor: args.actor,
+    actorType: "cli",
+    payload: { platform: args.platform, unitPath: args.unitPath },
+  });
+}
+
+export function pipelineSpecVsImplFailedEvent(args: {
+  runId: string;
+  issueId: string;
+  findings: Array<{
+    filePath: string;
+    promisedPrefix: string;
+    promisedSymbol: string;
+  }>;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.spec_vs_impl_failed",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      findings: args.findings.slice(0, 20),
+      truncated: args.findings.length > 20,
+      count: args.findings.length,
+    },
+  });
+}
+
+/**
+ * BEC-227 — a fresh per-run Agent SDK session was created on the first
+ * resumable stage. The `sessionId` is the UUID the SDK generates on the
+ * first `query()` call; downstream stages reuse it via `resume:`.
+ */
+export function agentSessionCreatedEvent(args: {
+  runId: string;
+  issueId: string;
+  sessionId: string;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.agent_session_created",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      runId: args.runId,
+      issueId: args.issueId,
+      sessionId: args.sessionId,
+    },
+  });
+}
+
+/**
+ * BEC-227 — a downstream stage resumed the per-run SDK session. Payload
+ * carries the stage name and the prior message count read from the
+ * session JSONL transcript so operators can see how much context was
+ * inherited from earlier stages.
+ */
+export function agentSessionResumedEvent(args: {
+  runId: string;
+  issueId: string;
+  sessionId: string;
+  stage: string;
+  priorMessageCount: number;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.agent_session_resumed",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      runId: args.runId,
+      issueId: args.issueId,
+      sessionId: args.sessionId,
+      stage: args.stage,
+      priorMessageCount: args.priorMessageCount,
+    },
+  });
+}
+
+/**
+ * BEC-227 Phase 4 / Track B. The review-fix loop's branch decision — was
+ * the surgical path taken (resume + findings + decisions prompt) or the
+ * legacy path (full implement-template re-run)? Always emitted, even on
+ * the legacy path, so operators can audit fallback rates.
+ */
+export function surgicalReviewFixEvent(args: {
+  runId: string;
+  issueId: string;
+  path: "surgical" | "legacy";
+  findingsCount: number;
+  decisionPayloadBytes: number;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.surgical_review_fix",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      runId: args.runId,
+      issueId: args.issueId,
+      path: args.path,
+      findingsCount: args.findingsCount,
+      decisionPayloadBytes: args.decisionPayloadBytes,
+    },
+  });
+}
+
+/**
+ * BEC-227 — a stage attempted to resume the per-run session but the
+ * underlying JSONL was missing, unreadable, or the SDK rejected the resume.
+ * The runner fell back to a fresh session for this stage. `reason` captures
+ * the failure mode so operators can spot tmpfs-loss / parse-error patterns.
+ */
+export function agentSessionMissingFallbackEvent(args: {
+  runId: string;
+  issueId: string;
+  sessionId: string;
+  reason: "jsonl-not-found" | "jsonl-parse-error" | "sdk-resume-error";
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.agent_session_missing_fallback",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      runId: args.runId,
+      issueId: args.issueId,
+      sessionId: args.sessionId,
+      reason: args.reason,
+    },
+  });
+}
+
+/**
+ * BEC-227 — emitted at boot when the session-volume check finds
+ * `~/.claude/projects` on tmpfs, missing, or unwritable. Session JSONLs
+ * won't survive container restarts in any of these cases, so the operator
+ * must remount before resume becomes reliable.
+ */
+export function systemSessionVolumeWarningEvent(args: {
+  projectsDir: string;
+  reason: "tmpfs" | "write-test-failed" | "not-found";
+}): AuditEvent {
+  return base({
+    eventType: "system.session_volume_warning",
+    actor: "system",
+    actorType: "system",
+    payload: {
+      projectsDir: args.projectsDir,
+      reason: args.reason,
+    },
+  });
+}
+
+/**
+ * Tier 6e — emitted after each successful push. Records how closely triage
+ * v2's `affectedFiles` prediction matched the actual changed files in the
+ * final diff. When `hasV2Prediction` is false the triage stage ran v1 and
+ * the prediction fields are zeroed out.
+ *
+ * Payload is bounded: `missed` and `unexpected` are capped at 50 paths each
+ * to keep the audit row within the ~2 KB target.
+ */
+export function pmTriageQualityScoreEvent(args: {
+  runId: string;
+  issueId: string;
+  hasV2Prediction: boolean;
+  predicted: number;
+  actual: number;
+  intersection: number;
+  missed: string[];
+  unexpected: string[];
+}): AuditEvent {
+  return base({
+    eventType: "pm.triage_quality_score",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      hasV2Prediction: args.hasV2Prediction,
+      predicted: args.predicted,
+      actual: args.actual,
+      intersection: args.intersection,
+      missed: args.missed.slice(0, 50),
+      unexpected: args.unexpected.slice(0, 50),
     },
   });
 }
