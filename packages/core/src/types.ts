@@ -651,6 +651,7 @@ export const AuditEventTypeSchema = z.enum([
    *  artifact was found). The `legacy` path is logged too so operators
    *  can audit fallback rates. */
   "pipeline.surgical_review_fix",
+  "claude.auth_expired",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 
