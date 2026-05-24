@@ -8,11 +8,12 @@ import type { BudgetEvaluation } from "../types.js";
 import { createLogger } from "../../logger.js";
 import { logAuditEventUnchecked, pmSkippedCircuitBreakerEvent } from "../../audit/index.js";
 import { selectRepoConfig } from "./select-repo-config.js";
+import type { LinearClient } from "@linear/sdk";
 
 const log = createLogger({ component: "PmAgent:startTodo" });
 
 export interface StartTodoInput {
-  linearClient: any;
+  linearClient: Pick<LinearClient, "issues">;
   db: AnyDb;
   teamIds: string[];
   runner: PipelineRunner;

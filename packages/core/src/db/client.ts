@@ -15,12 +15,29 @@ export type PgDb = ReturnType<typeof drizzlePg> & { __driver: "postgres" };
 export type Db = SqliteDb | PgDb;
 
 /**
- * Escape-hatch type used when passing the Db union to Drizzle query
- * builders that expect a single concrete driver type. Both SQLite and
- * Postgres schemas have identical column structures, so the generated
- * SQL is correct for either driver at runtime.
+ * Escape-hatch type used when passing the Db union to Drizzle query builders
+ * that expect a single concrete driver type.
+ *
+ * At runtime this is always one of:
+ *   BetterSQLite3Database<typeof fullSchema>            (SqliteDb)
+ *   ReturnType<typeof drizzlePg> & { __driver: "postgres" }  (PgDb)
+ *
+ * Drizzle's SQLite and Postgres drivers have incompatible `select`/`insert`
+ * method signatures at the TypeScript level, so a bare `SqliteDb | PgDb`
+ * union does not allow direct method calls. This structural alias exposes
+ * the query-builder methods with `any` return types so callers can use
+ * `(db as AnyDb).select(...)` without per-site driver-narrowing, while the
+ * index signature preserves dynamic property access (e.g. `[DB_DRIVER_TAG]`).
+ * Both SqliteDb and PgDb are structurally assignable to this type.
  */
-export type AnyDb = any;
+export type AnyDb = {
+  select: (...args: any[]) => any;
+  insert: (...args: any[]) => any;
+  update: (...args: any[]) => any;
+  delete: (...args: any[]) => any;
+  transaction: (...args: any[]) => any;
+  [K: string]: any;
+};
 
 /**
  * Describes a column added by a migration (for existing deployments).
@@ -322,7 +339,7 @@ export async function createDb(options: CreateDbOptions): Promise<Db> {
 }
 
 /** Check if a Db instance is backed by Postgres. */
-export function isPostgres(db: Db): boolean {
+export function isPostgres(db: AnyDb): boolean {
   return (db as any)[DB_DRIVER_TAG] === "postgres";
 }
 
@@ -332,7 +349,7 @@ export function isPostgres(db: Db): boolean {
  * - SQLite:   `date(col, 'unixepoch')` — column is INTEGER epoch seconds
  * - Postgres: `to_char(col, 'YYYY-MM-DD')` — column is TIMESTAMPTZ
  */
-export function sqlDateGroup(db: Db, col: any): SQL<string> {
+export function sqlDateGroup(db: AnyDb, col: any): SQL<string> {
   return isPostgres(db)
     ? sql<string>`to_char(${col}, 'YYYY-MM-DD')`
     : sql<string>`date(${col}, 'unixepoch')`;
@@ -345,7 +362,7 @@ export function sqlDateGroup(db: Db, col: any): SQL<string> {
  * - SQLite:   `col >= unixepoch('now', '-N days')` — column is INTEGER epoch seconds
  * - Postgres: `col >= now() - interval 'N days'` — column is TIMESTAMPTZ
  */
-export function sqlDaysAgoFilter(db: Db, col: any, days: number): SQL {
+export function sqlDaysAgoFilter(db: AnyDb, col: any, days: number): SQL {
   return isPostgres(db)
     ? sql`${col} >= now() - interval '${sql.raw(String(days))} days'`
     : sql`${col} >= unixepoch('now', '-${sql.raw(String(days))} days')`;

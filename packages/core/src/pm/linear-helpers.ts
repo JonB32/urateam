@@ -1,3 +1,5 @@
+import type { LinearClient } from "@linear/sdk";
+
 /**
  * Creates a lazy-initialized Linear client singleton.
  * The client is instantiated on the first call to `getClient()` and reused
@@ -10,14 +12,14 @@
  * @param apiKey Linear API key. When undefined/empty, `getClient()` returns null.
  */
 export function createLazyLinearClient(apiKey: string | undefined): {
-  getClient: () => Promise<any>;
+  getClient: () => Promise<LinearClient | null>;
 } {
-  let _client: any = null;
+  let _client: LinearClient | null = null;
   return {
     async getClient() {
       if (!_client && apiKey) {
-        const { LinearClient } = await import("@linear/sdk");
-        _client = new LinearClient({ apiKey });
+        const { LinearClient: LC } = await import("@linear/sdk");
+        _client = new LC({ apiKey });
       }
       return _client;
     },
@@ -25,7 +27,7 @@ export function createLazyLinearClient(apiKey: string | undefined): {
 }
 
 export async function resolveWorkflowStates(
-  linearClient: any,
+  linearClient: Pick<LinearClient, "workflowStates">,
   teamIds: string[],
 ): Promise<Map<string, string>> {
   const allStates = await linearClient.workflowStates({

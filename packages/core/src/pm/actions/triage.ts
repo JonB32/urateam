@@ -4,6 +4,7 @@ import { resolveWorkflowStates } from "../linear-helpers.js";
 import { createLogger } from "../../logger.js";
 import type { AnyDb } from "../../db/client.js";
 import { logAuditEventUnchecked, pmTriageClassifiedEvent } from "../../audit/index.js";
+import type { LinearClient, Issue } from "@linear/sdk";
 
 const log = createLogger({ component: "PmAgent:triage" });
 
@@ -11,7 +12,7 @@ const MAX_ISSUES_PER_TICK = 10;
 const DEFAULT_BATCH_SIZE = 3;
 
 export interface TriageInput {
-  linearClient: any; // LinearClient from @linear/sdk
+  linearClient: Pick<LinearClient, "issues" | "issueLabels" | "updateIssue" | "createComment" | "workflowStates">;
   teamIds: string[];
   callClaude: (prompt: string) => Promise<string>;
   sanitize: (text: string) => string;
@@ -65,7 +66,7 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
   const results = (await runInBatches(
     issues.slice(0, MAX_ISSUES_PER_TICK),
     batchSize,
-    async (issue: any) => {
+    async (issue: Issue) => {
       try {
         const sanitizedDesc = sanitize(issue.description ?? "");
         const prompt =

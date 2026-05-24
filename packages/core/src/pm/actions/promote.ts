@@ -6,11 +6,12 @@ import { createLogger } from "../../logger.js";
 import type { AnyDb } from "../../db/client.js";
 import { logAuditEventUnchecked, pmPromotedEvent, pmSkippedCircuitBreakerEvent } from "../../audit/index.js";
 import { batchCountConsecutiveFailures } from "./db-queries.js";
+import type { LinearClient } from "@linear/sdk";
 
 const log = createLogger({ component: "PmAgent:promote" });
 
 export interface PromoteInput {
-  linearClient: any;
+  linearClient: Pick<LinearClient, "issues" | "workflowStates" | "updateIssue" | "createComment">;
   teamIds: string[];
   slotsAvailable: number;
   checkConflict: (description: string) => Promise<ConflictCheckResult>;
@@ -70,7 +71,6 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
       state: { name: { eq: "Backlog" } },
     },
     first: 20,
-    orderBy: "createdAt",
   });
 
   // Sort by priority client-side (1=urgent first, then by creation date)

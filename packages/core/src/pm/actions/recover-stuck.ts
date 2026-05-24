@@ -5,11 +5,12 @@ import { getActiveAndRecentIssueIds } from "./db-queries.js";
 import { resolveWorkflowStates } from "../linear-helpers.js";
 import { createLogger } from "../../logger.js";
 import { logAuditEventUnchecked, pmRecoveredLongRunningEvent } from "../../audit/index.js";
+import type { LinearClient } from "@linear/sdk";
 
 const log = createLogger({ component: "PmAgent:recoverStuck" });
 
 export interface RecoverStuckInput {
-  linearClient: any;
+  linearClient: Pick<LinearClient, "issues" | "workflowStates" | "updateIssue" | "createComment">;
   db: AnyDb;
   teamIds: string[];
   /** Linear state name to move stuck issues into. */

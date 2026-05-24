@@ -4,11 +4,12 @@ import { batchFetchPendingApprovals } from "./approval-helpers.js";
 import { pmApprovals } from "../../db/schema.js";
 import { createLogger } from "../../logger.js";
 import { nanoid } from "nanoid";
+import type { LinearClient } from "@linear/sdk";
 
 const log = createLogger({ component: "PmAgent:deprioritize" });
 
 export interface DeprioritizeInput {
-  linearClient: any;
+  linearClient: Pick<LinearClient, "issues">;
   teamIds: string[];
   slackNotifier: PmSlackNotifier;
   db: AnyDb;

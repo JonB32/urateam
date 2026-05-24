@@ -27,6 +27,8 @@ import { createLogger } from "../logger.js";
 import { logAuditEventUnchecked, budgetRefusedEvent, pruneAuditLog } from "../audit/index.js";
 import { pruneExpiredSessions } from "../auth/index.js";
 import { recomputeCostRollups } from "../cost/index.js";
+import type { PipelineConfig, RepoConfig, SanitizedIssue } from "../types.js";
+import type { LinearIssue } from "../pipeline/runner.js";
 
 const log = createLogger({ component: "PmAgent:scheduler" });
 
@@ -39,10 +41,10 @@ export interface PmSchedulerDeps {
   defaultBranch?: string;
   runner?: {
     resume: (issueId: string) => Promise<void>;
-    start: (issue: any, pipelineKey: string, pipelineConfig: any, repoConfig: any, sanitizedIssue: any) => Promise<void>;
+    start: (issue: LinearIssue, pipelineKey: string, pipelineConfig: PipelineConfig, repoConfig: RepoConfig, sanitizedIssue: SanitizedIssue, linearTeamId?: string | null) => Promise<void>;
   };
-  pipelineConfigs?: Record<string, any>;
-  repoConfigs?: Record<string, any>;
+  pipelineConfigs?: Record<string, PipelineConfig>;
+  repoConfigs?: Record<string, RepoConfig>;
   actions?: Partial<PmSchedulerActions>;
 }
 
@@ -251,7 +253,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
         let stateMap = new Map<string, string>();
         if (!actions) {
           try {
-            stateMap = await resolveWorkflowStates(await getLinearClient(), config.teamIds);
+            stateMap = await resolveWorkflowStates((await getLinearClient())!, config.teamIds);
           } catch (err) {
             log.error({ err }, "resolveWorkflowStates failed");
             tick.errors.push(`resolveWorkflowStates: ${(err as Error).message}`);
@@ -272,7 +274,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
             const stuckResult = actions?.recoverStuckInProgressIssues
               ? await actions.recoverStuckInProgressIssues({} as any)
               : await recoverStuckInProgressIssues({
-                  linearClient: await getLinearClient(),
+                  linearClient: (await getLinearClient())!,
                   db,
                   teamIds: config.teamIds,
                   targetState: config.stuckIssueTargetState ?? "Backlog",
@@ -305,7 +307,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
               const todoResults = actions?.startTodoIssues
                 ? await actions.startTodoIssues({} as any)
                 : await startTodoIssues({
-                    linearClient: await getLinearClient(),
+                    linearClient: (await getLinearClient())!,
                     db: deps.db as AnyDb,
                     teamIds: config.teamIds,
                     runner: deps.runner as any,
@@ -336,7 +338,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           tick.triaged = actions
             ? await actions.triageNewIssues({} as any)
             : await triageNewIssues({
-                linearClient: await getLinearClient(),
+                linearClient: (await getLinearClient())!,
                 teamIds: config.teamIds,
                 callClaude: callClaudeFn,
                 sanitize,
@@ -353,7 +355,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           const approvalResult = actions
             ? await actions.resolveApprovals({} as any)
             : await resolveApprovals({
-                linearClient: await getLinearClient(),
+                linearClient: (await getLinearClient())!,
                 slackNotifier: getSlackNotifier(),
                 db,
                 teamIds: config.teamIds,
@@ -415,7 +417,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                     ({ overlapRisk: "none" as const, likelyFiles: [] as string[], reasoning: "conflict detection requires license" });
 
               tick.promoted = await promoteReadyIssues({
-                linearClient: await getLinearClient(),
+                linearClient: (await getLinearClient())!,
                 teamIds: config.teamIds,
                 slotsAvailable,
                 checkConflict,
@@ -438,7 +440,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
         }
 
         if (!isPmPaused() && isFeatureLicensed("approval-workflows")) {
-          const linearClient = await getLinearClient();
+          const linearClient = (await getLinearClient())!;
           const slackNotifier = getSlackNotifier();
 
           const [depResult, cancelResult] = await Promise.allSettled([

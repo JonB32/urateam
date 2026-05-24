@@ -427,7 +427,7 @@ export class PipelineRunner {
       startedAt: pausedRun.startedAt ?? new Date(),
       totalInputTokens: pausedRun.totalInputTokens ?? 0,
       totalOutputTokens: pausedRun.totalOutputTokens ?? 0,
-      retryCount: (pausedRun as any).retryCount ?? 0,
+      retryCount: pausedRun.retryCount ?? 0,
     };
 
     // Validate branch is present
