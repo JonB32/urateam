@@ -465,22 +465,9 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       error instanceof Error ? error.message : String(error);
     log.error({ err: error }, "stage failed");
 
-    // BEC-251: enrich the error context so operators have actionable detail.
-    // exitCode: prefer error.exitCode (mock-friendly / future SDK property),
-    //   fall back to parsing from the message string produced by getProcessExitError.
-    const exitCode: number | null =
-      typeof (error as any).exitCode === "number"
-        ? (error as any).exitCode
-        : (() => {
-            const m = errorMessage.match(/exited with code (\d+)/);
-            return m ? Number(m[1]) : null;
-          })();
-
-    // stderr: prefer the buffer accumulated via the options.stderr callback
-    //   (production path); fall back to error.stderr for test mocks that set it.
-    const stderrRaw: string =
-      capturedStderr || ((error as any).stderr as string | undefined) || "";
-    const stderrBounded = stderrRaw.slice(-500); // keep tail, bounded at 500 chars
+    const exitCodeMatch = errorMessage.match(/exited with code (\d+)/);
+    const exitCode: number | null = exitCodeMatch ? Number(exitCodeMatch[1]) : null;
+    const stderrBounded = capturedStderr.slice(-500);
 
     const durationMs = Date.now() - stageStartMs;
 

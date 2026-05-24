@@ -84,16 +84,8 @@ async function seedPipelineRun(db: Db, runId: string): Promise<void> {
   });
 }
 
-/**
- * Make an error shaped like the SDK's getProcessExitError output, with
- * exitCode and stderr set as extra properties so the executor can read them
- * (the real SDK embeds exitCode in the message; mocks expose it directly).
- */
-function makeProcessExitError(exitCode: number, stderr: string): Error {
-  const err = new Error(`Claude Code process exited with code ${exitCode}`);
-  (err as any).exitCode = exitCode;
-  (err as any).stderr = stderr;
-  return err;
+function makeProcessExitError(exitCode: number): Error {
+  return new Error(`Claude Code process exited with code ${exitCode}`);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -109,8 +101,11 @@ describe("BEC-251 — executor error enrichment", () => {
   it("writes structured JSON with exitCode and stderr to agent_logs.content", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
-    const sdkError = makeProcessExitError(1, "auth: 401");
-    (query as any).mockImplementation(() => {
+    const sdkError = makeProcessExitError(1);
+    // Simulate the production path: stderr arrives via the options.stderr callback
+    // before the process exits and query() throws.
+    (query as any).mockImplementation((opts: any) => {
+      opts?.options?.stderr?.("auth: 401");
       throw sdkError;
     });
 
@@ -171,7 +166,7 @@ describe("BEC-251 — executor error enrichment", () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
     (query as any).mockImplementation(() => {
-      throw makeProcessExitError(1, "auth: 401");
+      throw makeProcessExitError(1);
     });
 
     const runId = "run-bec251-oneliner";
@@ -204,7 +199,7 @@ describe("BEC-251 — executor error enrichment", () => {
     (transcriptExists as any).mockReturnValue(true); // JSONL on disk → resume path
 
     (query as any).mockImplementation(() => {
-      throw makeProcessExitError(1, "");
+      throw makeProcessExitError(1);
     });
 
     const runId = "run-bec251-resumed";
@@ -236,7 +231,7 @@ describe("BEC-251 — executor error enrichment", () => {
     (transcriptExists as any).mockReturnValue(false); // no JSONL → create path
 
     (query as any).mockImplementation(() => {
-      throw makeProcessExitError(1, "");
+      throw makeProcessExitError(1);
     });
 
     const runId = "run-bec251-fresh";
@@ -297,8 +292,9 @@ describe("BEC-251 — executor error enrichment", () => {
   it("omits stderr key when stderr is empty", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
+    // No opts.stderr callback invocation → capturedStderr stays empty
     (query as any).mockImplementation(() => {
-      throw makeProcessExitError(1, ""); // empty stderr
+      throw makeProcessExitError(1);
     });
 
     const runId = "run-bec251-nostderr";
