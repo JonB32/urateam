@@ -222,10 +222,18 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
   let cacheCreationInputTokens = 0;
   let cacheReadInputTokens = 0;
 
+  // BEC-251: diagnostic state captured for error enrichment in the catch block.
+  // Declared outside try so the catch block can read whatever was set before the throw.
+  const stageStartMs = Date.now();
+  let capturedStderr = "";
+  let claudeAuthMethod = "unknown";
+  let sessionType: "fresh" | "resumed" | "none" = "none";
+
   try {
     // Resolve auth method before any SDK call (BEC-207). Logs which path is
     // active (oauth-token / api-key / mounted-session) alongside the run context.
     const claudeAuth = resolveClaudeAuth();
+    claudeAuthMethod = claudeAuth.method;
     log.info({ authMethod: claudeAuth.method }, "Claude auth method resolved");
 
     // Pre-flight auth check — fail fast with a clear message rather than
@@ -272,6 +280,15 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       db,
     });
 
+    // BEC-251: determine session type for error enrichment.
+    if ("resume" in sessionOpts) {
+      sessionType = "resumed";
+    } else if ("sessionId" in sessionOpts) {
+      sessionType = "fresh";
+    } else {
+      sessionType = "none";
+    }
+
     const messages = query({
       prompt,
       options: {
@@ -291,6 +308,16 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
           type: "preset" as const,
           preset: "claude_code" as const,
           excludeDynamicSections: true,
+        },
+        // BEC-251: capture stderr from the Claude Code child process so it is
+        // available for error enrichment if the process exits non-zero. The SDK
+        // only pipes stderr when this callback is provided (otherwise it is
+        // "ignore"). We keep at most 2 KB — the tail is most relevant.
+        stderr: (chunk: string) => {
+          capturedStderr += chunk;
+          if (capturedStderr.length > 2000) {
+            capturedStderr = capturedStderr.slice(-2000);
+          }
         },
       },
     });
@@ -469,11 +496,41 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       error instanceof Error ? error.message : String(error);
     log.error({ err: error }, "stage failed");
 
+    const exitCodeMatch = errorMessage.match(/exited with code (\d+)/);
+    const exitCode: number | null = exitCodeMatch ? Number(exitCodeMatch[1]) : null;
+    const stderrBounded = capturedStderr.slice(-500);
+
+    const durationMs = Date.now() - stageStartMs;
+
+    const enrichedContext: Record<string, unknown> = {
+      message: errorMessage,
+      exitCode,
+      authMethod: claudeAuthMethod,
+      sessionType,
+      durationMs,
+    };
+    if (stderrBounded) {
+      enrichedContext.stderr = stderrBounded;
+    }
+
+    // agent_logs.content: structured JSON, bounded at 2 KB (no stack trace).
+    const enrichedJson = JSON.stringify(enrichedContext).slice(0, 2048);
+
+    // pipeline_runs.error_message (via stage_runs.errorMessage and StageResult):
+    // a compact one-liner with key fields inline so it reads at a glance.
+    const summaryParts = [
+      `exitCode=${exitCode ?? "?"}`,
+      `auth=${claudeAuthMethod}`,
+      `session=${sessionType}`,
+      `duration=${durationMs}ms`,
+    ];
+    const enrichedMessage = `${errorMessage} [${summaryParts.join(", ")}]`;
+
     await db.insert(agentLogs).values({
       id: nanoid(),
       stageRunId: stageRunId,
       type: "error",
-      content: errorMessage.slice(0, 2048),
+      content: enrichedJson,
     });
 
     await db
@@ -486,7 +543,7 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
         cacheCreationInputTokens,
         cacheReadInputTokens,
         turns,
-        errorMessage,
+        errorMessage: enrichedMessage,
       })
       .where(eq(stageRuns.id, stageRunId));
 
@@ -495,7 +552,7 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       inputTokens,
       outputTokens,
       turns,
-      errorMessage,
+      errorMessage: enrichedMessage,
       stageRunId,
     };
   }
