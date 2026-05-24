@@ -68,6 +68,21 @@ export function policyReviewersRequestedEvent(args: {
   });
 }
 
+// Shared helper for release-manager events scoped to a repo URL.
+function releaseRepoEvent(
+  eventType: AuditEvent["eventType"],
+  repoUrl: string,
+  payload: Record<string, unknown>,
+): AuditEvent {
+  return base({
+    eventType,
+    actor: "release-manager",
+    actorType: "release-manager",
+    scope: `repo:${repoUrl}`,
+    payload,
+  });
+}
+
 export function releaseFiredEvent(args: {
   repoUrl: string;
   branch: string;
@@ -75,17 +90,11 @@ export function releaseFiredEvent(args: {
   sha: string;
   mergedPrCount: number;
 }): AuditEvent {
-  return base({
-    eventType: "release.fired",
-    actor: "release-manager",
-    actorType: "release-manager",
-    scope: `repo:${args.repoUrl}`,
-    payload: {
-      branch: args.branch,
-      tag: args.tag,
-      sha: args.sha,
-      mergedPrCount: args.mergedPrCount,
-    },
+  return releaseRepoEvent("release.fired", args.repoUrl, {
+    branch: args.branch,
+    tag: args.tag,
+    sha: args.sha,
+    mergedPrCount: args.mergedPrCount,
   });
 }
 
@@ -94,12 +103,9 @@ export function releaseSkippedEvent(args: {
   branch: string;
   reason: string;
 }): AuditEvent {
-  return base({
-    eventType: "release.skipped",
-    actor: "release-manager",
-    actorType: "release-manager",
-    scope: `repo:${args.repoUrl}`,
-    payload: { branch: args.branch, reason: args.reason },
+  return releaseRepoEvent("release.skipped", args.repoUrl, {
+    branch: args.branch,
+    reason: args.reason,
   });
 }
 
@@ -108,6 +114,7 @@ export function releaseApprovedEvent(args: {
   branch: string;
   approvedBy: string;
 }): AuditEvent {
+  // actor is the Slack user who approved, not the generic release-manager string.
   return base({
     eventType: "release.approved",
     actor: `slack:${args.approvedBy}`,
@@ -122,12 +129,9 @@ export function releaseTagConflictEvent(args: {
   branch: string;
   tag: string;
 }): AuditEvent {
-  return base({
-    eventType: "release.tag_conflict",
-    actor: "release-manager",
-    actorType: "release-manager",
-    scope: `repo:${args.repoUrl}`,
-    payload: { branch: args.branch, tag: args.tag },
+  return releaseRepoEvent("release.tag_conflict", args.repoUrl, {
+    branch: args.branch,
+    tag: args.tag,
   });
 }
 
@@ -137,12 +141,10 @@ export function releasePartialEvent(args: {
   tag: string;
   attemptCount: number;
 }): AuditEvent {
-  return base({
-    eventType: "release.partial",
-    actor: "release-manager",
-    actorType: "release-manager",
-    scope: `repo:${args.repoUrl}`,
-    payload: { branch: args.branch, tag: args.tag, attemptCount: args.attemptCount },
+  return releaseRepoEvent("release.partial", args.repoUrl, {
+    branch: args.branch,
+    tag: args.tag,
+    attemptCount: args.attemptCount,
   });
 }
 
@@ -165,17 +167,11 @@ export function qaRunTriggeredEvent(args: {
   runId: number;
   sha: string;
 }): AuditEvent {
-  return base({
-    eventType: "qa.run_triggered",
-    actor: "release-manager",
-    actorType: "release-manager",
-    scope: `repo:${args.repoUrl}`,
-    payload: {
-      branch: args.branch,
-      workflow: args.workflow,
-      runId: args.runId,
-      sha: args.sha,
-    },
+  return releaseRepoEvent("qa.run_triggered", args.repoUrl, {
+    branch: args.branch,
+    workflow: args.workflow,
+    runId: args.runId,
+    sha: args.sha,
   });
 }
 
@@ -188,18 +184,12 @@ export function qaRunCompletedEvent(args: {
   /** Set to true when we synthesize a timeout (GitHub didn't conclude the run). */
   synthetic?: boolean;
 }): AuditEvent {
-  return base({
-    eventType: "qa.run_completed",
-    actor: "release-manager",
-    actorType: "release-manager",
-    scope: `repo:${args.repoUrl}`,
-    payload: {
-      branch: args.branch,
-      runId: args.runId,
-      conclusion: args.conclusion,
-      durationMs: args.durationMs,
-      synthetic: args.synthetic ?? false,
-    },
+  return releaseRepoEvent("qa.run_completed", args.repoUrl, {
+    branch: args.branch,
+    runId: args.runId,
+    conclusion: args.conclusion,
+    durationMs: args.durationMs,
+    synthetic: args.synthetic ?? false,
   });
 }
 
@@ -209,16 +199,10 @@ export function qaGapIssueFiledEvent(args: {
   workflowPath: string;
   linearIssueId: string;
 }): AuditEvent {
-  return base({
-    eventType: "qa.gap_issue_filed",
-    actor: "release-manager",
-    actorType: "release-manager",
-    scope: `repo:${args.repoUrl}`,
-    payload: {
-      branch: args.branch,
-      workflowPath: args.workflowPath,
-      linearIssueId: args.linearIssueId,
-    },
+  return releaseRepoEvent("qa.gap_issue_filed", args.repoUrl, {
+    branch: args.branch,
+    workflowPath: args.workflowPath,
+    linearIssueId: args.linearIssueId,
   });
 }
 
@@ -283,6 +267,23 @@ export function claudeAuthExpiredEvent(args: {
   });
 }
 
+// Shared helper for pipeline-tier gate events (system actor, run+issue scoped).
+function pipelineTierEvent(
+  eventType: AuditEvent["eventType"],
+  runId: string,
+  issueId: string,
+  payload: Record<string, unknown>,
+): AuditEvent {
+  return base({
+    eventType,
+    actor: "system",
+    actorType: "system",
+    runId,
+    issueId,
+    payload,
+  });
+}
+
 /**
  * Tier 1a — emitted when the scratch-file denylist gate matches one or more
  * agent-added files and forces the PR to draft. Payload includes the matched
@@ -294,17 +295,10 @@ export function pipelineScratchFilesBlockedEvent(args: {
   issueId: string;
   files: string[];
 }): AuditEvent {
-  return base({
-    eventType: "pipeline.scratch_files_blocked",
-    actor: "system",
-    actorType: "system",
-    runId: args.runId,
-    issueId: args.issueId,
-    payload: {
-      files: args.files.slice(0, 50),
-      truncated: args.files.length > 50,
-      count: args.files.length,
-    },
+  return pipelineTierEvent("pipeline.scratch_files_blocked", args.runId, args.issueId, {
+    files: args.files.slice(0, 50),
+    truncated: args.files.length > 50,
+    count: args.files.length,
   });
 }
 
@@ -320,16 +314,10 @@ export function pipelineTypecheckFailedEvent(args: {
   errorCount: number;
   firstMessages: string[];
 }): AuditEvent {
-  return base({
-    eventType: "pipeline.typecheck_failed",
-    actor: "system",
-    actorType: "system",
-    runId: args.runId,
-    issueId: args.issueId,
-    payload: {
-      errorCount: args.errorCount,
-      firstMessages: args.firstMessages.slice(0, 5),
-    },
+  return pipelineTierEvent("pipeline.typecheck_failed", args.runId, args.issueId, {
+    errorCount: args.errorCount,
+    firstMessages: args.firstMessages.slice(0, 5),
+    truncated: args.firstMessages.length > 5,
   });
 }
 
@@ -349,17 +337,10 @@ export function pipelineSpecVsImplFailedEvent(args: {
     promisedSymbol: string;
   }>;
 }): AuditEvent {
-  return base({
-    eventType: "pipeline.spec_vs_impl_failed",
-    actor: "system",
-    actorType: "system",
-    runId: args.runId,
-    issueId: args.issueId,
-    payload: {
-      findings: args.findings.slice(0, 20),
-      truncated: args.findings.length > 20,
-      count: args.findings.length,
-    },
+  return pipelineTierEvent("pipeline.spec_vs_impl_failed", args.runId, args.issueId, {
+    findings: args.findings.slice(0, 20),
+    truncated: args.findings.length > 20,
+    count: args.findings.length,
   });
 }
 
@@ -385,18 +366,11 @@ export function pipelineAutoDeepReviewBumpedEvent(args: {
   from: number;
   to: number;
 }): AuditEvent {
-  return base({
-    eventType: "pipeline.auto_deep_review_bumped",
-    actor: "system",
-    actorType: "system",
-    runId: args.runId,
-    issueId: args.issueId,
-    payload: {
-      metrics: args.metrics,
-      thresholds: args.thresholds,
-      from: args.from,
-      to: args.to,
-    },
+  return pipelineTierEvent("pipeline.auto_deep_review_bumped", args.runId, args.issueId, {
+    metrics: args.metrics,
+    thresholds: args.thresholds,
+    from: args.from,
+    to: args.to,
   });
 }
 

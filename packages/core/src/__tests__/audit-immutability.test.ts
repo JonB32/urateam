@@ -42,7 +42,7 @@ describe("audit_events immutability", () => {
     }
 
     const offenders = matches
-      .map((line) => line.split(":")[0]!)
+      .map((line) => line.split(":")[0])
       .filter((file) => !allowed.some((a) => file.endsWith(a) || file === a));
 
     expect(
@@ -112,7 +112,7 @@ describe("audit_events immutability", () => {
     }
 
     const offenders = matches
-      .map((line) => line.split(":")[0]!)
+      .map((line) => line.split(":")[0])
       .filter((file) => !allowed.some((a) => file.endsWith(a) || file === a));
 
     expect(
