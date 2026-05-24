@@ -5,7 +5,7 @@
  * Covers the 5 AC-required scenarios:
  *   1. Fully resolved   — findings reach zero (converged: true)
  *   2. Unresolved conflicts — count non-decreasing (shouldStop: true, reason: "non-decreasing")
- *   3. Contradictory requirements — same fingerprints repeat (reason: "stable-fingerprints")
+ *   3. Contradictory requirements — same fingerprints repeat (reason: "non-decreasing")
  *   4. Partial resolution — decreasing but pass limit hit (reason: "pass-limit")
  *   5. Edge cases — no findings from the first pass, single-item sets
  *
@@ -270,14 +270,13 @@ describe("Scenario 4 — partial resolution (pass limit hit)", () => {
 // ---------------------------------------------------------------------------
 
 describe("Scenario 5 — edge cases", () => {
-  it("handles a single persistent finding across all passes (stable-fingerprints)", () => {
+  it("handles a single persistent finding across all passes (non-decreasing stops loop)", () => {
     const fpA = buildFindingFingerprint(FINDING_A);
     const prev = new Set([fpA]);
-    // Single finding, count was 1 before, still 1 → non-decreasing fires first.
+    // Single finding, count was 1 before, still 1 → non-decreasing fires.
     const result = checkDeepReviewConvergence(prev, [FINDING_A], 1);
 
     expect(result.shouldStop).toBe(true);
-    // non-decreasing fires before stable-fingerprints since count check runs first.
     expect(result.reason).toBe("non-decreasing");
   });
 
