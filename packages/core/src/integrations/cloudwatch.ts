@@ -26,8 +26,12 @@
 
 import { Hono } from "hono";
 import { createVerify } from "crypto";
-import { getLinearClient } from "../util/linear.js";
 import { createLogger } from "../logger.js";
+import {
+  createIntegrationLinearClient,
+  resolveIntegrationLabels,
+  type IntegrationLinearClient,
+} from "./shared.js";
 
 const log = createLogger({ component: "CloudWatchIntegration" });
 
@@ -194,19 +198,7 @@ export async function verifySnsSignature(
  * Minimal Linear API surface needed by the CloudWatch integration.
  * Implemented by the real LinearClient factory and by test mocks.
  */
-export interface CloudWatchLinearClient {
-  issues(args: { filter: object; first?: number }): Promise<{ nodes: Array<{ id: string; identifier: string; title: string }> }>;
-  workflowStates(args: { filter: object }): Promise<{ nodes: Array<{ id: string; name: string }> }>;
-  issueLabels(args: { filter: object; first?: number }): Promise<{ nodes: Array<{ id: string; name: string }> }>;
-  createIssue(input: {
-    teamId: string;
-    title: string;
-    description: string;
-    stateId: string;
-    labelIds?: string[];
-    priority?: number;
-  }): Promise<{ issue?: { id: string; identifier: string } | null }>;
-}
+export type CloudWatchLinearClient = IntegrationLinearClient;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -322,18 +314,7 @@ function buildCloudWatchDescription(
  * @param apiKey Linear Personal API key
  */
 export async function createCloudWatchLinearClient(apiKey: string): Promise<CloudWatchLinearClient> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const client = (await getLinearClient(apiKey)) as any;
-  return {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    async issues(args) { return client.issues(args); },
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    async workflowStates(args) { return client.workflowStates(args); },
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    async issueLabels(args) { return client.issueLabels(args); },
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    async createIssue(input) { return client.createIssue(input); },
-  };
+  return createIntegrationLinearClient<CloudWatchLinearClient>(apiKey);
 }
 
 // ---------------------------------------------------------------------------
@@ -380,11 +361,20 @@ export function createCloudWatchWebhookHandler(
     if (snsMsg.Type === "SubscriptionConfirmation") {
       if (snsMsg.SubscribeURL) {
         try {
-          await fetch(snsMsg.SubscribeURL);
-          log.info(
-            { topicArn: snsMsg.TopicArn },
-            "CloudWatch: SNS subscription confirmed",
-          );
+          // Validate SubscribeURL is on amazonaws.com before fetching (SSRF prevention)
+          const subscribeUrl = new URL(snsMsg.SubscribeURL);
+          if (!subscribeUrl.hostname.endsWith(".amazonaws.com")) {
+            log.warn(
+              { topicArn: snsMsg.TopicArn, hostname: subscribeUrl.hostname },
+              "CloudWatch: SubscribeURL not on amazonaws.com — skipping confirmation",
+            );
+          } else {
+            await fetch(snsMsg.SubscribeURL);
+            log.info(
+              { topicArn: snsMsg.TopicArn },
+              "CloudWatch: SNS subscription confirmed",
+            );
+          }
         } catch (err) {
           log.error({ err }, "CloudWatch: failed to confirm SNS subscription");
         }
@@ -432,10 +422,14 @@ export function createCloudWatchWebhookHandler(
     const linearClient =
       _linearClient ?? (await createCloudWatchLinearClient(config.linearApiKey));
 
-    // Resolve Triage workflow state
-    const statesResp = await linearClient.workflowStates({
-      filter: { team: { id: { eq: config.linearTeamId } } },
-    });
+    // Resolve Triage workflow state and labels concurrently
+    const [statesResp, { labelIds, missingLabels }] = await Promise.all([
+      linearClient.workflowStates({
+        filter: { team: { id: { eq: config.linearTeamId } } },
+      }),
+      resolveIntegrationLabels(linearClient, config.linearTeamId),
+    ]);
+
     const triageState = statesResp.nodes.find((s) => s.name === triageStateName);
     if (!triageState) {
       log.error(
@@ -445,14 +439,12 @@ export function createCloudWatchWebhookHandler(
       return c.json({ error: "Triage state not found" }, 500);
     }
 
-    // Resolve bug + auto-implement label IDs
-    const labelsResp = await linearClient.issueLabels({
-      filter: { team: { id: { eq: config.linearTeamId } } },
-      first: 100,
-    });
-    const bugLabel = labelsResp.nodes.find((l) => l.name === "bug");
-    const autoImplLabel = labelsResp.nodes.find((l) => l.name === "auto-implement");
-    const labelIds = [bugLabel?.id, autoImplLabel?.id].filter((id): id is string => !!id);
+    if (missingLabels.length > 0) {
+      log.warn(
+        { missingLabels, teamId: config.linearTeamId },
+        "CloudWatch: some Linear labels not found — ticket will be created without them",
+      );
+    }
 
     // Idempotency: look for an existing ticket for this alarm within the window
     const titlePrefix = makeCloudWatchTitlePrefix(alarmName);

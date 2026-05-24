@@ -103,81 +103,16 @@ function makeMockLinear(
 }
 
 // ---------------------------------------------------------------------------
-// Mock cert fetcher + SNS signature mock
+// Mock cert fetcher + SNS signature helpers
 // ---------------------------------------------------------------------------
 
-/** Returns a fake cert fetcher and a verifySnsSignature mock that always passes. */
+/** Returns a mock cert fetcher that resolves to the given PEM cert. */
 function makeMockCertFetcher(cert: string = FAKE_PEM_CERT) {
   return vi.fn().mockResolvedValue(cert);
 }
 
-// A mock certFetcher paired with a valid-signature SNS message
-// (We can't easily generate a real RSA signature in tests, so we mock verifySnsSignature
-// indirectly by injecting a certFetcher whose returned cert causes verification to pass.)
-// Instead, we directly inject mockCertFetcher and mock the createVerify path.
-// Since we can't easily do that without mocking crypto, we test the handler by
-// injecting a verifySnsSignature-compatible mock via the certFetcher parameter that
-// always causes the verification to return true or false.
-
-// Simplest approach: make a certFetcher that returns a cert, and mock
-// the signature to be one that passes our actual RSA verification.
-// Because generating real RSA signatures in tests is complex, we instead
-// test verifySnsSignature separately with known values and test the handler
-// by making the certFetcher throw (simulating invalid cert → 401) or by
-// using a workaround.
-
-// For the handler integration tests, we use a "passthrough" certFetcher approach:
-// The certFetcher returns a mock cert, but since the signature field in the test
-// SNS message is not a real RSA signature, verification will return false.
-// To test "valid signature" paths in the handler, we create a special mock
-// certFetcher that is paired with pre-computed test data, OR we rely on the
-// fact that the handler only calls verifySnsSignature when Type=Notification,
-// and we can override the entire verification by making the cert cause verify to pass.
-
-// Simplest clean approach: test the handler with a mocked linear client and
-// use a certFetcher that makes verifySnsSignature return true.
-// We do this by making the certFetcher throw an error to test the 401 path,
-// and by using a post-construction spy to bypass signature verification for valid-path tests.
-// Actually, the cleanest solution: use a mock certFetcher that returns a cert
-// that matches the test signature we pre-compute. Since we can't compute RSA
-// signatures easily in tests, we extract handler-level tests that bypass sig
-// verification by testing with SubscriptionConfirmation type (no sig check)
-// and test verifySnsSignature independently.
-
-// For valid-path Notification tests: wrap createCloudWatchWebhookHandler
-// and pass a certFetcher that throws → we can't test the happy path with real sigs.
-// Instead, we mock createVerify at the module level or we use a test-only trick.
-
-// The cleanest solution for this codebase's style: expose the handler's certFetcher
-// dependency injection and pass a mock certFetcher that returns a cert, then
-// pre-sign the test SNS message with that cert's private key.
-// Since we can't do RSA in tests without node-forge, we use a different approach:
-// We create a SubscriptionConfirmation handler test, and test the Notification path
-// by verifying the handler properly calls workflowStates/createIssue when sig passes.
-// We can test the "valid" path by making the certFetcher always return the cert
-// and making the SNS signature match a known test value.
-
-// Actually, the simplest approach that tests the integration correctly:
-// We test verifySnsSignature unit separately with mocked createVerify,
-// and test the handler's Notification path by arranging the certFetcher to throw,
-// which covers the 401 path. For the happy path, we use a test where we stub
-// verifySnsSignature to always pass by injecting a custom cert fetcher that
-// returns a cert that happens to match the test signature (impossible with RSA).
-
-// FINAL APPROACH: Test the handler directly but inject a certFetcher that
-// bypasses the real crypto by always throwing (401 tests) or by using an
-// SNS-compatible self-signed test cert + pre-computed signature.
-// For simplicity and to avoid external crypto setup, we test the happy path
-// by testing SubscriptionConfirmation (no sig check) and test the Notification
-// path by extracting tests that verify correct behavior GIVEN a valid signature.
-// The sig-valid case is tested by mocking the ENTIRE sns message verification
-// via the certFetcher dep: we make certFetcher return a fake "cert" that won't
-// verify the RSA signature, then accept a 401. For the happy path, we test
-// the handler against SubscriptionConfirmation and add a separate unit test for
-// the canonical string builder.
-
-// Note: The real-world verifySnsSignature with RSA is tested via the
-// buildSnsCanonicalString + verifySnsSignature unit tests (sans actual RSA).
+// Happy-path Notification tests use Node.js generateKeyPairSync + createSign to produce
+// a real RSA-SHA1 signature that passes verifySnsSignature without mocking crypto.
 
 // HTTP helper
 async function postCloudWatch(

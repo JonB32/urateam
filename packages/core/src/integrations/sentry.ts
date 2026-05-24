@@ -20,8 +20,12 @@
 
 import { Hono } from "hono";
 import { createHmac, timingSafeEqual } from "crypto";
-import { getLinearClient } from "../util/linear.js";
 import { createLogger } from "../logger.js";
+import {
+  createIntegrationLinearClient,
+  resolveIntegrationLabels,
+  type IntegrationLinearClient,
+} from "./shared.js";
 
 const log = createLogger({ component: "SentryIntegration" });
 
@@ -100,19 +104,7 @@ export interface SentryWebhookPayload {
  * Minimal Linear API surface needed by the Sentry integration.
  * Implemented by the real LinearClient factory and by test mocks.
  */
-export interface SentryLinearClient {
-  issues(args: { filter: object; first?: number }): Promise<{ nodes: Array<{ id: string; identifier: string; title: string }> }>;
-  workflowStates(args: { filter: object }): Promise<{ nodes: Array<{ id: string; name: string }> }>;
-  issueLabels(args: { filter: object; first?: number }): Promise<{ nodes: Array<{ id: string; name: string }> }>;
-  createIssue(input: {
-    teamId: string;
-    title: string;
-    description: string;
-    stateId: string;
-    labelIds?: string[];
-    priority?: number;
-  }): Promise<{ issue?: { id: string; identifier: string } | null }>;
-}
+export type SentryLinearClient = IntegrationLinearClient;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -235,18 +227,7 @@ function extractAffectedFiles(event?: SentryEvent): string[] {
  * @param apiKey Linear Personal API key
  */
 export async function createSentryLinearClient(apiKey: string): Promise<SentryLinearClient> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const client = (await getLinearClient(apiKey)) as any;
-  return {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    async issues(args) { return client.issues(args); },
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    async workflowStates(args) { return client.workflowStates(args); },
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    async issueLabels(args) { return client.issueLabels(args); },
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    async createIssue(input) { return client.createIssue(input); },
-  };
+  return createIntegrationLinearClient<SentryLinearClient>(apiKey);
 }
 
 // ---------------------------------------------------------------------------
@@ -296,10 +277,14 @@ export function createSentryWebhookHandler(
 
     const linearClient = _linearClient ?? (await createSentryLinearClient(config.linearApiKey));
 
-    // Resolve Triage workflow state
-    const statesResp = await linearClient.workflowStates({
-      filter: { team: { id: { eq: config.linearTeamId } } },
-    });
+    // Resolve Triage workflow state and labels concurrently
+    const [statesResp, { labelIds, missingLabels }] = await Promise.all([
+      linearClient.workflowStates({
+        filter: { team: { id: { eq: config.linearTeamId } } },
+      }),
+      resolveIntegrationLabels(linearClient, config.linearTeamId),
+    ]);
+
     const triageState = statesResp.nodes.find((s) => s.name === triageStateName);
     if (!triageState) {
       log.error(
@@ -309,14 +294,12 @@ export function createSentryWebhookHandler(
       return c.json({ error: "Triage state not found" }, 500);
     }
 
-    // Resolve bug + auto-implement label IDs
-    const labelsResp = await linearClient.issueLabels({
-      filter: { team: { id: { eq: config.linearTeamId } } },
-      first: 100,
-    });
-    const bugLabel = labelsResp.nodes.find((l) => l.name === "bug");
-    const autoImplLabel = labelsResp.nodes.find((l) => l.name === "auto-implement");
-    const labelIds = [bugLabel?.id, autoImplLabel?.id].filter((id): id is string => !!id);
+    if (missingLabels.length > 0) {
+      log.warn(
+        { missingLabels, teamId: config.linearTeamId },
+        "Sentry: some Linear labels not found — ticket will be created without them",
+      );
+    }
 
     // Idempotency: look for an existing ticket for this Sentry issue
     const titlePrefix = makeSentryTitlePrefix(issue.id);

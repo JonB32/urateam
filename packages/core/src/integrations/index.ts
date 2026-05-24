@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 export {
+  BUG_LABEL_NAME,
+  AUTO_IMPLEMENT_LABEL_NAME,
+  createIntegrationLinearClient,
+  resolveIntegrationLabels,
+  type IntegrationLinearClient,
+} from "./shared.js";
+
+export {
   createSentryWebhookHandler,
   createSentryLinearClient,
   verifySentrySignature,
