@@ -269,6 +269,9 @@ budget check → **recover retriable runs** → recover stuck In Progress → **
 
 **Recovering from contaminated branches**: cherry-pick from contaminated branch onto correct branch, force-push-with-lease both branches, then `git rebase -i --onto <parent> <stray> HEAD` on the contaminated side.
 
+### Audit log module layout
+- Module: `packages/core/src/audit/` — `events.ts` (backward-compat re-export barrel; all factories importable from this path), `internal.ts` (shared `base()` helper), `pm-events.ts` (PM agent, run, budget, license factories), `dashboard-events.ts` (SSO login/logout/denied, RBAC manual-action factories via private `dashboardManualActionEvent` helper, config-loaded), `policy-release-events.ts` (policy gates, release lifecycle, Slack, QA, review fanout, pipeline tier events, claude-auth-expired), `writer.ts` (`logAuditEvent`, fire-and-forget; license-gated), `reader.ts` (`listAuditEvents` with cursor pagination), `projection.ts`, `retention.ts` (`pruneAuditLog` — sole authorized mutation), `csv.ts` (`streamAuditCsv` async iterator)
+
 ### Enterprise Features
 
 All gated by `isFeatureLicensed(<feature>)`. Routes 404 when unlicensed.
