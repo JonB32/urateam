@@ -95,6 +95,10 @@ export const stageRuns = sqliteTable("stage_runs", {
   cacheCreationInputTokens: integer("cache_creation_input_tokens").notNull().default(0),
   cacheReadInputTokens: integer("cache_read_input_tokens").notNull().default(0),
   turns: integer("turns").notNull().default(0),
+  /** Timestamp of the last progress update during stage execution. Updated
+   *  periodically by the executor's onProgress/onToolMessage callbacks.
+   *  Used by detectStageHang() to identify stuck implement stages. */
+  lastProgressAt: crossTimestamp("last_progress_at"),
   handoffArtifact: text("handoff_artifact"),
   errorMessage: text("error_message"),
 });
