@@ -62,11 +62,13 @@ import {
   getDiffLineCount,
   getChangedFiles,
   checkDuplicateBranch,
+  deleteRemoteBranch,
   branchName,
   createWorktreeFromRemote,
   pruneWorktreesInRepoDirs,
   gitExecSafe,
 } from "../repo/git.js";
+import { classifyExistingBranch } from "./branch-classifier.js";
 import {
   addPRComment,
   createGitHubClient,
@@ -127,6 +129,8 @@ import {
   pipelineSpecVsImplFailedEvent,
   pipelineAutoDeepReviewBumpedEvent,
   pmTriageQualityScoreEvent,
+  pipelineStaleBranchRecoveredEvent,
+  pipelineSkippedExistingBranchEvent,
   agentSessionCreatedEvent,
 } from "../audit/index.js";
 import {
@@ -275,14 +279,67 @@ export class PipelineRunner {
       return;
     }
 
-    // Check for existing remote branch (issue already has a PR/branch)
+    // Check for existing remote branch and classify its state (BEC-222).
     const existingBranch = await checkDuplicateBranch(repoConfig.url, issue.identifier);
+    // Track whether we recovered a stale branch; if so emit audit event after
+    // the runId is created.
+    let staleBranchToAudit: string | undefined;
+
     if (existingBranch) {
+      const db_ = this.db as AnyDb;
+      const classification = await classifyExistingBranch(repoConfig, existingBranch, db_);
+
+      if (classification.state === "active-run") {
+        // A live run holds this branch — preserve existing skip behaviour.
+        log.info(
+          { issueId: issue.identifier, existingBranch, activeRunId: classification.runId },
+          "skipping — active run already holds this branch",
+        );
+        await logAuditEvent(db_, pipelineSkippedExistingBranchEvent({
+          issueId: issue.identifier,
+          branch: existingBranch,
+          reason: "active-run",
+          activeRunId: classification.runId,
+        }));
+        return;
+      }
+
+      if (classification.state === "open-pr") {
+        // An open PR already exists — the issue is in review.  Don't restart
+        // from scratch; wait for a PR review comment to trigger feedback run.
+        log.info(
+          { issueId: issue.identifier, existingBranch, prNumber: classification.prNumber },
+          "skipping — open PR already exists for this branch",
+        );
+        await logAuditEvent(db_, pipelineSkippedExistingBranchEvent({
+          issueId: issue.identifier,
+          branch: existingBranch,
+          reason: "open-pr",
+          prNumber: classification.prNumber,
+        }));
+        return;
+      }
+
+      // state === "stale": dead branch from a prior failed/cancelled run.
+      // Delete it and proceed with a fresh pipeline start.
       log.info(
         { issueId: issue.identifier, existingBranch },
-        "skipping — remote branch already exists for this issue",
+        "stale remote branch detected — deleting and retrying from scratch",
       );
-      return;
+      const cloneUrlForDelete = (repoConfig.provider === "gitlab" && this.gitlabConfig)
+        ? buildAuthenticatedUrl(repoConfig.url, this.gitlabConfig)
+        : (repoConfig.provider === "bitbucket" && this.bitbucketConfig)
+          ? buildBitbucketAuthenticatedUrl(repoConfig.url, this.bitbucketConfig)
+          : repoConfig.url;
+      try {
+        await deleteRemoteBranch(cloneUrlForDelete, existingBranch);
+      } catch (err) {
+        // Best-effort: if delete fails (e.g. auth not available for plain URL),
+        // log and continue.  pushBranchForce will overwrite the stale branch
+        // via --force-with-lease at push time.
+        log.warn({ err, branch: existingBranch }, "deleteRemoteBranch failed — will overwrite via force-push");
+      }
+      staleBranchToAudit = existingBranch;
     }
 
     const runId = nanoid();
@@ -310,6 +367,15 @@ export class PipelineRunner {
         agentSessionId, // null when flag is off; UUID when BEC-227 is enabled
       });
     runLog.info({ branch }, "run queued");
+
+    // Emit stale-branch recovery audit event now that we have a runId.
+    if (staleBranchToAudit) {
+      await logAuditEvent(db, pipelineStaleBranchRecoveredEvent({
+        issueId: issue.identifier,
+        branch: staleBranchToAudit,
+        runId,
+      }));
+    }
 
     if (agentSessionId !== null) {
       void logAuditEvent(
