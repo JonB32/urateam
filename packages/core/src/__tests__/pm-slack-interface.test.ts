@@ -503,3 +503,66 @@ describe("POST /slack/events", () => {
     expect(json.challenge).toBe("test-challenge-abc");
   });
 });
+
+describe("PM Slack — operator stop/halt commands", () => {
+  it('parses "halt"', () => {
+    expect(parsePmCommand("halt")).toEqual({ type: "halt" });
+    expect(parsePmCommand("  Halt  ")).toEqual({ type: "halt" });
+  });
+
+  it('parses "cancel <runId>" and "stop <runId>"', () => {
+    expect(parsePmCommand("cancel abc123def")).toEqual({ type: "cancel", runId: "abc123def" });
+    expect(parsePmCommand("STOP run_xyz-456")).toEqual({ type: "stop", runId: "run_xyz-456" });
+  });
+
+  it("rejects too-short run ids", () => {
+    expect(parsePmCommand("cancel ab").type).toBe("unknown");
+  });
+
+  it("does not confuse short pause/resume with cancel/stop", () => {
+    expect(parsePmCommand("pause")).toEqual({ type: "pause" });
+    expect(parsePmCommand("resume")).toEqual({ type: "resume" });
+  });
+
+  it("executes cancel through the runner with cancel mode", async () => {
+    const requestStop = vi.fn().mockReturnValue({ issueId: "BEC-1", mode: "cancel" });
+    const text = await executePmCommand(
+      { type: "cancel", runId: "run-abc" },
+      { runner: { requestStop }, slackUserId: "U42" },
+    );
+    expect(requestStop).toHaveBeenCalledWith("run-abc", "cancel");
+    expect(text).toMatch(/Cancel signal sent/);
+  });
+
+  it("executes stop through the runner with graceful mode", async () => {
+    const requestStop = vi.fn().mockReturnValue({ issueId: "BEC-2", mode: "graceful" });
+    const text = await executePmCommand(
+      { type: "stop", runId: "run-xyz" },
+      { runner: { requestStop }, slackUserId: "U42" },
+    );
+    expect(requestStop).toHaveBeenCalledWith("run-xyz", "graceful");
+    expect(text).toMatch(/Graceful stop/);
+  });
+
+  it("executes halt through the runner", async () => {
+    const haltAll = vi.fn().mockReturnValue({ cancelledRunIds: ["r1", "r2", "r3"] });
+    const text = await executePmCommand({ type: "halt" }, { runner: { haltAll }, slackUserId: "U42" });
+    expect(haltAll).toHaveBeenCalled();
+    expect(text).toMatch(/Halted/);
+    expect(text).toMatch(/3 active run/);
+  });
+
+  it("reports a config error when runner is missing", async () => {
+    const text = await executePmCommand(
+      { type: "cancel", runId: "run-abc" },
+      { slackUserId: "U42" },
+    );
+    expect(text).toMatch(/Runner not configured/);
+  });
+
+  it("help text lists the new commands when the input is unrecognized", async () => {
+    const text = await executePmCommand({ type: "unknown", original: "garbage" }, {});
+    expect(text).toMatch(/\/pm cancel/);
+    expect(text).toMatch(/\/pm halt/);
+  });
+});

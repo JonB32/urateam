@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createDb } from "../db/client.js";
 import { pipelineRuns, stageRuns } from "../db/schema.js";
 import { computeRunCost } from "../cost/per-run.js";
-import { aggregateAll, aggregateHybrid } from "../cost/aggregate.js";
+import { aggregateHybrid } from "../cost/aggregate.js";
 import { recomputeCostRollups } from "../cost/rollup.js";
 import { streamCostCsv } from "../cost/csv.js";
 import { installTestProLicense, restoreLicense } from "./helpers/license.js";
@@ -75,10 +75,10 @@ describe("cost-roi defensive license gate", () => {
       expect(cost).toEqual({ inputTokens: 0, outputTokens: 0, dollars: 0, timeSavedHours: 0 });
     });
 
-    it("aggregateAll returns empty result", async () => {
+    it("aggregateHybrid returns empty result (exercises aggregateAll internally)", async () => {
       await seedOneRun();
       const filters = { from: new Date("2026-01-01"), to: new Date("2027-01-01") };
-      const result = await aggregateAll(db, filters, config);
+      const result = await aggregateHybrid(db, filters, config);
       expect(result.summary.runs).toBe(0);
       expect(result.summary.dollars).toBe(0);
       expect(result.byTeam).toEqual([]);
@@ -123,10 +123,10 @@ describe("cost-roi defensive license gate", () => {
       expect(cost.dollars).toBe(0);
     });
 
-    it("aggregateAll still returns empty", async () => {
+    it("aggregateHybrid still returns empty (exercises aggregateAll internally)", async () => {
       await seedOneRun();
       const filters = { from: new Date("2026-01-01"), to: new Date("2027-01-01") };
-      const result = await aggregateAll(db, filters, config);
+      const result = await aggregateHybrid(db, filters, config);
       expect(result.summary.runs).toBe(0);
     });
   });

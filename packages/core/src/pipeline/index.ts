@@ -9,6 +9,12 @@ export { resolvePipeline } from "./router.js";
 export { createQueue, type WorkQueue } from "./queue.js";
 export { PipelineRunner, type PipelineRunnerConfig, type LinearIssue } from "./runner.js";
 export {
+  requestStop as requestRunStop,
+  getStopSignal,
+  clearStopSignal,
+  type StopMode,
+} from "./control-signals.js";
+export {
   withBranchLock,
   createBranchLockAdapter,
   createPgLockAdapter,

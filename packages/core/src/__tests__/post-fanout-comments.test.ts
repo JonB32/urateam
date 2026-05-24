@@ -217,4 +217,51 @@ describe("postFanoutCommentsToPR", () => {
     const result = await postFanoutCommentsToPR({} as never, "o", "r", 1, [completedRun, rawOutputRun]);
     expect(result.suppressedEmptyCount).toBe(0);
   });
+
+  describe("upstream-provider failure suppression", () => {
+    const upstreamFault: ReviewModelRun = {
+      modelId: "nvidia/nemotron-3-super-120b-a12b:free",
+      providerId: "openrouter",
+      status: "failed",
+      findings: [],
+      inputTokens: 0,
+      outputTokens: 0,
+      durationMs: 120000,
+      errorMessage:
+        "openrouter response missing choices — provider returned 200 OK but no completion: Provider returned error",
+    };
+
+    it("does NOT post a PR comment for a 200 OK / no-completion provider failure", async () => {
+      addPRComment.mockResolvedValue(undefined);
+      const { postFanoutCommentsToPR } = await import(
+        "../executor/review/post-fanout-comments.js"
+      );
+      const result = await postFanoutCommentsToPR({} as never, "o", "r", 1, [upstreamFault]);
+      expect(addPRComment).not.toHaveBeenCalled();
+      expect(result.suppressedProviderFailureCount).toBe(1);
+    });
+
+    it("still posts comments for runs in the same batch that succeeded", async () => {
+      addPRComment.mockResolvedValue(undefined);
+      const { postFanoutCommentsToPR } = await import(
+        "../executor/review/post-fanout-comments.js"
+      );
+      const result = await postFanoutCommentsToPR({} as never, "o", "r", 1, [upstreamFault, completedRun]);
+      expect(addPRComment).toHaveBeenCalledTimes(1);
+      const body = addPRComment.mock.calls[0][4] as string;
+      expect(body).toContain("anthropic/claude-3.5-sonnet");
+      expect(body).not.toContain("nvidia/nemotron");
+      expect(result.suppressedProviderFailureCount).toBe(1);
+    });
+
+    it("still POSTS other failure types (e.g. rate-limit, auth) — only suppresses the missing-choices class", async () => {
+      addPRComment.mockResolvedValue(undefined);
+      const { postFanoutCommentsToPR } = await import(
+        "../executor/review/post-fanout-comments.js"
+      );
+      const result = await postFanoutCommentsToPR({} as never, "o", "r", 1, [failedRun]);
+      expect(addPRComment).toHaveBeenCalledTimes(1);
+      expect(result.suppressedProviderFailureCount).toBe(0);
+    });
+  });
 });

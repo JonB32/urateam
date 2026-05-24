@@ -1,0 +1,9 @@
+-- BEC-149: This migration was renumbered to 015_missing_indexes to follow the
+-- 014_stage_runs_cache_tokens renumbering (preserves monotonic prefix order).
+--
+-- This file is retained for git history only. The migrator skips it based on
+-- the POSTGRES_MIGRATION_RENAMES map in migrator.ts, which also renames any
+-- existing "014_missing_indexes" entries in schema_migrations to
+-- "015_missing_indexes" so existing deployments do not re-run this migration.
+--
+-- Active migration: packages/core/src/db/migrations/postgres/015_missing_indexes.sql

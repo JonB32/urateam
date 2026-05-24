@@ -1,11 +1,30 @@
 import type { PromoteResult, ConflictCheckResult } from "../types.js";
 import type { PipelineConfig } from "../../types.js";
 import { resolveWorkflowStates } from "../linear-helpers.js";
+import { resolveIssueRelations } from "../../util/linear.js";
 import { resolvePipeline } from "../../pipeline/router.js";
 import { createLogger } from "../../logger.js";
+import { truncateWithEllipsis } from "../../util/strings.js";
 import type { AnyDb } from "../../db/client.js";
-import { logAuditEventUnchecked, pmPromotedEvent, pmSkippedCircuitBreakerEvent } from "../../audit/index.js";
-import { batchCountConsecutiveFailures } from "./db-queries.js";
+import {
+  logAuditEventUnchecked,
+  pmPromotedEvent,
+  pmSkippedCircuitBreakerEvent,
+  pmEscalatedToNeedsDesignEvent,
+} from "../../audit/index.js";
+import {
+  batchCountConsecutiveFailures,
+  getLastFailureError,
+} from "./db-queries.js";
+import { circuitBreakerState } from "../../db/schema.js";
+
+/**
+ * Tier 5 — the pipeline label assigned to issues that have tripped the
+ * consecutive-failures circuit breaker. Mirrors the observer-marker gate
+ * vocabulary so operators see one consistent set of "human review needed"
+ * routings across surfaces.
+ */
+const ESCALATION_PIPELINE_LABEL = "needs-design";
 
 const log = createLogger({ component: "PmAgent:promote" });
 
@@ -37,6 +56,13 @@ export interface PromoteInput {
    */
   maxConsecutiveFailures?: number;
   /**
+   * BEC-236 — issue IDs the half-open probe selected this tick. Issues in
+   * this Set bypass the consecutive-failures circuit-breaker skip, allowing
+   * exactly one probe run per cooldown window. When undefined, breaker
+   * behavior is unchanged from BEC-161/181.
+   */
+  probeOverrideIds?: Set<string>;
+  /**
    * BEC-161/BEC-181: returns the number of consecutive failed runs for an
    * issue. Tests inject a stub here (avoids real DB rows). Production omits
    * this so `batchCountConsecutiveFailures` is used instead (single DB
@@ -44,6 +70,27 @@ export interface PromoteInput {
    * set when `maxConsecutiveFailures` is configured.
    */
   getFailureCount?: (issueId: string) => Promise<number>;
+  /**
+   * Tier 5 — fetches the most recent failed run's errorMessage for an
+   * issue. Used by the escalation path to summarize the failure mode in
+   * the Linear comment + Slack alert. Tests inject a stub. Production
+   * omits this so `getLastFailureError` is used against `db` instead.
+   * If neither is set, the escalation still fires but with `errorMessage:
+   * null`.
+   */
+  getLastError?: (issueId: string) => Promise<string | null>;
+  /**
+   * Tier 5 — Slack alert callback invoked when an issue is escalated to
+   * needs-design. Operators wire this to their PM notifier. Optional: if
+   * unset, escalation proceeds without a Slack post (Linear + audit
+   * event still fire).
+   */
+  slackPostAlert?: (args: {
+    issueId: string;
+    issueTitle: string;
+    failureCount: number;
+    errorMessage: string | null;
+  }) => Promise<void>;
 }
 
 export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteResult[]> {
@@ -99,18 +146,27 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
 
   let promotedCount = 0;
 
-  for (const candidate of candidates) {
-    if (promotedCount >= slotsAvailable) break;
+  // Pre-fetch all candidate relations in parallel before entering the loop.
+  // Each candidate's team/labels are independent, so a single Promise.all
+  // reduces wall-clock time from O(N × RTT) to O(RTT) for the batch.
+  const allCandidateRelations = await Promise.all(
+    candidates.map((c: any) => resolveIssueRelations(c)),
+  );
 
-    // BEC-150: short-circuit BEFORE any per-candidate Linear API call (team,
-    // conflict-check). Only promote issues whose labels resolve to a configured
-    // pipeline; this keeps Todo from filling with items the agent would later
-    // refuse to start, and avoids wasted `await candidate.team` round-trips
-    // for filtered candidates on large Backlogs.
+  for (let i = 0; i < candidates.length; i++) {
+    if (promotedCount >= slotsAvailable) break;
+    const candidate = candidates[i]!;
+
+    // Both team and labels were fetched concurrently above via Promise.all.
+    const { team, labels: labelsConnection } = allCandidateRelations[i]!;
+    const teamId = team?.id;
+    const labelNodes = labelsConnection?.nodes ?? [];
+    const labelNames: string[] = labelNodes.map((l: any) => l.name);
+
+    // BEC-150: filter candidates whose labels don't resolve to a configured
+    // pipeline, keeping Todo from filling with items the agent would later
+    // refuse to start.
     if (input.requirePipelineLabel) {
-      const labelsConnection = await candidate.labels?.();
-      const labelNodes = labelsConnection?.nodes ?? [];
-      const labelNames: string[] = labelNodes.map((l: any) => l.name);
       const resolved = resolvePipeline(labelNames, input.pipelineConfigs!);
       if (!resolved) {
         log.info(
@@ -131,7 +187,10 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
       const failureCount = input.getFailureCount
         ? await input.getFailureCount(candidate.identifier)
         : (prefetchedFailureCounts!.get(candidate.identifier) ?? 0);
-      if (failureCount >= input.maxConsecutiveFailures) {
+      if (
+        failureCount >= input.maxConsecutiveFailures &&
+        !input.probeOverrideIds?.has(candidate.identifier)
+      ) {
         log.warn(
           { issueId: candidate.identifier, failureCount, threshold: input.maxConsecutiveFailures },
           "skipped promote: circuit-breaker engaged (too many consecutive failures)",
@@ -147,18 +206,159 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
             }),
           );
         }
+
+        // Tier 5 — escalation. If the issue is NOT already routed to
+        // needs-design, move it there now, post a Linear comment with the
+        // last failure's error message, and send a Slack alert. Idempotent:
+        // subsequent ticks find the label already in place and skip
+        // re-escalation (the circuit-breaker event still fires every tick
+        // for observability).
+        const alreadyEscalated = labelNames
+          .map((n) => n.toLowerCase())
+          .includes(ESCALATION_PIPELINE_LABEL);
+        if (!alreadyEscalated) {
+          let errorMessage: string | null = null;
+          try {
+            errorMessage = input.getLastError
+              ? await input.getLastError(candidate.identifier)
+              : input.db
+              ? await getLastFailureError(input.db, candidate.identifier)
+              : null;
+          } catch (err) {
+            log.warn(
+              { issueId: candidate.identifier, err },
+              "Tier 5 escalation: failed to fetch last error message — proceeding with null",
+            );
+          }
+
+          // Best-effort label resolution. If `needs-design` doesn't exist in
+          // the workspace, log and continue — same defensive pattern as
+          // observer-origin / Tier 4.
+          const needsDesignLabelId = await (async () => {
+            try {
+              const allLabels = await linearClient.issueLabels({ first: 100 });
+              for (const label of allLabels.nodes ?? []) {
+                if (label.name.toLowerCase() === ESCALATION_PIPELINE_LABEL) {
+                  return label.id as string;
+                }
+              }
+            } catch (err) {
+              log.warn(
+                { issueId: candidate.identifier, err },
+                "Tier 5 escalation: failed to look up needs-design label",
+              );
+            }
+            return undefined;
+          })();
+
+          if (!needsDesignLabelId) {
+            log.warn(
+              { issueId: candidate.identifier, label: ESCALATION_PIPELINE_LABEL },
+              "Tier 5 escalation: '" +
+                ESCALATION_PIPELINE_LABEL +
+                "' label not found in Linear — escalation logged but issue not relabeled",
+            );
+          }
+
+          try {
+            // Replace the existing label set with [oldLabels..., needs-design]
+            // — add, don't overwrite, so existing pipeline labels remain
+            // visible (operator can see this used to be auto-implement, etc).
+            if (needsDesignLabelId) {
+              const existingIds = labelNodes
+                .map((l: any) => l.id)
+                .filter(Boolean);
+              const merged = [...new Set([...existingIds, needsDesignLabelId])];
+              await linearClient.updateIssue(candidate.id, { labelIds: merged });
+            }
+            const truncated = errorMessage
+              ? truncateWithEllipsis(errorMessage, 500)
+              : "(no error message captured on the most recent failed run)";
+            await linearClient.createComment({
+              issueId: candidate.id,
+              body:
+                `🚨 **PM Agent — Escalated to \`needs-design\`**\n\n` +
+                `This issue has hit the consecutive-failures circuit breaker: ` +
+                `**${failureCount}** consecutive failed pipeline runs ` +
+                `(threshold ${input.maxConsecutiveFailures}). The agent has stopped ` +
+                `retrying. A human should diagnose the failure mode before the ticket ` +
+                `is moved back into the pipeline.\n\n` +
+                `**Last failure:**\n\`\`\`\n${truncated}\n\`\`\``,
+            });
+          } catch (err) {
+            log.warn(
+              { issueId: candidate.identifier, err },
+              "Tier 5 escalation: failed to update issue / post comment",
+            );
+          }
+
+          // Slack alert (best-effort; isolated from Linear failures so a
+          // notifier outage doesn't suppress the audit signal).
+          if (input.slackPostAlert) {
+            try {
+              await input.slackPostAlert({
+                issueId: candidate.identifier,
+                issueTitle: candidate.title,
+                failureCount,
+                errorMessage,
+              });
+            } catch (err) {
+              log.warn(
+                { issueId: candidate.identifier, err },
+                "Tier 5 escalation: Slack alert failed",
+              );
+            }
+          }
+
+          // BEC-236 — record the Tier-5 escalation so the half-open probe can
+          // distinguish our auto-added needs-design from a human's. Idempotent on
+          // issue_id PK so re-escalations of the same issue don't double-insert.
+          if (input.db) {
+            try {
+              await (input.db as any)
+                .insert(circuitBreakerState)
+                .values({ issueId: candidate.identifier, escalatedAt: new Date() })
+                .onConflictDoNothing();
+            } catch (err) {
+              log.warn(
+                { err, issueId: candidate.identifier },
+                "failed to insert circuit_breaker_state row (probe recovery will skip this issue)",
+              );
+            }
+          }
+
+          if (input.db) {
+            void logAuditEventUnchecked(
+              input.db,
+              pmEscalatedToNeedsDesignEvent({
+                issueId: candidate.identifier,
+                failureCount,
+                errorMessage,
+              }),
+            );
+          }
+
+          log.warn(
+            {
+              issueId: candidate.identifier,
+              failureCount,
+              hasError: errorMessage !== null,
+            },
+            "Tier 5 escalation: moved issue to needs-design and notified",
+          );
+        }
+
         results.push({
           issueId: candidate.identifier,
           issueTitle: candidate.title,
           promoted: false,
-          reason: `circuit-breaker: ${failureCount} consecutive failed runs (threshold ${input.maxConsecutiveFailures})`,
+          reason: alreadyEscalated
+            ? `circuit-breaker: ${failureCount} consecutive failed runs (already escalated to needs-design)`
+            : `circuit-breaker: ${failureCount} consecutive failed runs (escalated to needs-design)`,
         });
         continue;
       }
     }
-
-    const team = await candidate.team;
-    const teamId = team?.id;
     const todoStateId = teamId ? todoStates.get(teamId) : undefined;
 
     const conflict = await checkConflict(candidate.description ?? "");

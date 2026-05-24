@@ -127,4 +127,50 @@ describe("OpenRouterClient", () => {
     ac.abort();
     await expect(p).rejects.toThrow();
   });
+
+  describe("BEC-164 maxTokens option", () => {
+    it("when maxTokens is undefined, max_tokens is not included in request body", async () => {
+      fetchMock.mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "hello" } }],
+            usage: { prompt_tokens: 12, completion_tokens: 7 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+      const { OpenRouterClient } = await import("../executor/review/openrouter-client.js");
+      const client = new OpenRouterClient({ apiKey: "k", baseUrl: "https://example.test/api/v1" });
+      await client.chatCompletion("m", [{ role: "user", content: "hi" }], {
+        signal: new AbortController().signal,
+        // maxTokens intentionally omitted
+      });
+
+      const [, init] = fetchMock.mock.calls[0];
+      const body = JSON.parse((init as RequestInit).body as string);
+      expect(body.max_tokens).toBeUndefined();
+    });
+
+    it("when maxTokens is set, max_tokens is included in request body", async () => {
+      fetchMock.mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "hello" } }],
+            usage: { prompt_tokens: 12, completion_tokens: 7 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+      const { OpenRouterClient } = await import("../executor/review/openrouter-client.js");
+      const client = new OpenRouterClient({ apiKey: "k", baseUrl: "https://example.test/api/v1" });
+      await client.chatCompletion("m", [{ role: "user", content: "hi" }], {
+        signal: new AbortController().signal,
+        maxTokens: 4000,
+      });
+
+      const [, init] = fetchMock.mock.calls[0];
+      const body = JSON.parse((init as RequestInit).body as string);
+      expect(body.max_tokens).toBe(4000);
+    });
+  });
 });

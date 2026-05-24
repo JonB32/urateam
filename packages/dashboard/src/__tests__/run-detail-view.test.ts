@@ -15,6 +15,7 @@ const baseRun = (overrides: Partial<RunInfo> = {}): RunInfo => ({
   totalInputTokens: 0,
   totalOutputTokens: 0,
   errorMessage: null,
+  agentSessionId: null,
   ...overrides,
 });
 
@@ -59,5 +60,58 @@ describe("runDetailView retry control", () => {
     );
     // form action uses encodeURIComponent
     expect(html).toContain("/runs/run%20with%20spaces/retry");
+  });
+});
+
+describe("runDetailView agent session display (BEC-227)", () => {
+  it("renders agent session ID truncated to first 8 chars with transcript link when present", () => {
+    const html = runDetailView(
+      baseRun({
+        id: "run_abc",
+        agentSessionId: "abcdef12-3456-7890-abcd-ef1234567890",
+      }),
+      [],
+      [],
+      1,
+      0,
+      false,
+    );
+    // Truncated to first 8 chars + ellipsis
+    expect(html).toContain("abcdef12");
+    expect(html).toContain("…");
+    // Link target
+    expect(html).toContain("/runs/run_abc/transcript");
+    // Section label is present
+    expect(html).toContain("Agent session");
+  });
+
+  it("does not render an Agent session row when agentSessionId is null", () => {
+    const html = runDetailView(
+      baseRun({ id: "run_abc", agentSessionId: null }),
+      [],
+      [],
+      1,
+      0,
+      false,
+    );
+    expect(html).not.toContain("Agent session");
+    expect(html).not.toContain("/runs/run_abc/transcript");
+  });
+
+  it("escapes agent session ID in the displayed text and URL", () => {
+    const html = runDetailView(
+      baseRun({
+        id: "run_abc",
+        // 8 chars including <> to prove escapeHtml runs on the truncated value
+        agentSessionId: "<scr>ipt-rest",
+      }),
+      [],
+      [],
+      1,
+      0,
+      false,
+    );
+    expect(html).not.toContain("<scr>ipt");
+    expect(html).toContain("&lt;scr&gt;ipt");
   });
 });

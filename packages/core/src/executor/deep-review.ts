@@ -10,9 +10,19 @@ import { createLogger } from "../logger.js";
 import { consumeAgentStream, parseJsonBlock } from "./agent-stream.js";
 import { buildStagePermissionOptions } from "./permissions.js";
 import { sanitize, buildSandboxedBlock } from "./prompt/sanitizer.js";
+import { resolveSessionOpts } from "./session-resolver.js";
+import type { AnyDb } from "../db/client.js";
 
 const log = createLogger({ component: "DeepReview" });
 const DEEP_REVIEW_MODEL = "claude-haiku-4-5-20251001";
+
+/**
+ * BEC-227 — stage label used when emitting agent-session audit events from
+ * deep-review sub-agents. Each of the three sub-agents (reuse, quality,
+ * efficiency) writes its own event, qualified by the agent name so
+ * operators can spot per-sub-agent resume patterns.
+ */
+const DEEP_REVIEW_STAGE_LABEL = "review";
 
 // ---------------------------------------------------------------------------
 // Convergence detection
@@ -358,13 +368,44 @@ interface RawFinding {
   fix?: unknown;
 }
 
+interface SubAgentSessionOpts {
+  /** Resolved model override — defaults to DEEP_REVIEW_MODEL when undefined. */
+  model?: string;
+  /** Per-run SDK session UUID (BEC-227). */
+  agentSessionId?: string | null;
+  /** True only on the very first resumable stage of the pipeline run. */
+  isFirstResumableStage?: boolean;
+  /** runId / issueId / db are required to emit audit events; if any is missing
+   *  the events are skipped silently. */
+  runId?: string;
+  issueId?: string;
+  db?: AnyDb;
+}
+
 async function runSubAgent(
   agentName: AgentName,
   prompt: string,
   workdir: string,
+  sessionOptsCtx: SubAgentSessionOpts = {},
 ): Promise<{ findings: DeepReviewFinding[]; inputTokens: number; outputTokens: number }> {
   try {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
+
+    // BEC-228 — resolve per-sub-agent session opts via shared helper (extracted
+    // from the ~70-line inline block that was duplicated in executor.ts).
+    // Each sub-agent uses a qualified stage label ("review:reuse" etc.) so
+    // operators can spot per-sub-agent resume patterns in the audit log.
+    const resolvedModel = sessionOptsCtx.model ?? DEEP_REVIEW_MODEL;
+    const agentSessionId = sessionOptsCtx.agentSessionId ?? null;
+    const sessionOpts = await resolveSessionOpts({
+      stage: `${DEEP_REVIEW_STAGE_LABEL}:${agentName}`,
+      model: resolvedModel,
+      agentSessionId,
+      workdir,
+      runId: sessionOptsCtx.runId,
+      issueId: sessionOptsCtx.issueId,
+      db: sessionOptsCtx.db,
+    });
 
     const messages = query({
       prompt,
@@ -374,8 +415,18 @@ async function runSubAgent(
         // keeping token cost reasonable (each turn can read multiple files).
         maxTurns: 8,
         cwd: workdir,
-        model: DEEP_REVIEW_MODEL,
+        model: resolvedModel,
         ...buildStagePermissionOptions("review"),
+        ...sessionOpts,
+        // BEC-227 Track C-1: strip per-session dynamic sections (cwd, git
+        // status) from the claude_code preset so the system prompt is
+        // stable across stages. Improves cache hit rate even when no SDK
+        // session is involved, so we ship it on unconditionally in Phase 1.
+        systemPrompt: {
+          type: "preset" as const,
+          preset: "claude_code" as const,
+          excludeDynamicSections: true,
+        },
       },
     });
 
@@ -421,6 +472,33 @@ async function runSubAgent(
 // ---------------------------------------------------------------------------
 
 /**
+ * Options for {@link runDeepReview}.
+ *
+ * BEC-227 — extended with `agentSessionId` / `isFirstResumableStage` / `model`
+ * so the three parallel sub-agents can resume the per-run SDK session when
+ * the pipeline is using a resumable model family. Audit-event fields
+ * (`runId` / `issueId` / `db`) are optional: when omitted, resume/fallback
+ * still happens but no audit events are written.
+ */
+export interface RunDeepReviewOpts {
+  handoff: HandoffArtifact;
+  workdir: string;
+  /** Optional model override. Defaults to the hardcoded `DEEP_REVIEW_MODEL`
+   *  (Haiku). Pass a Sonnet/Opus id to enable session resume. */
+  model?: string;
+  /** Per-run SDK session UUID (BEC-227). When null/undefined, sub-agents run
+   *  with a fresh session as before. */
+  agentSessionId?: string | null;
+  /** True only on the very first resumable stage of the run (BEC-227). */
+  isFirstResumableStage?: boolean;
+  /** Required (with runId+issueId) to emit `pipeline.agent_session_resumed`
+   *  / `pipeline.agent_session_missing_fallback` audit events. */
+  db?: AnyDb;
+  runId?: string;
+  issueId?: string;
+}
+
+/**
  * Run the three parallel deep-review sub-agents (reuse, quality, efficiency)
  * against the current worktree state.
  *
@@ -434,9 +512,9 @@ async function runSubAgent(
  * - Each agent receives only the file subset relevant to its focus area.
  */
 export async function runDeepReview(
-  handoff: HandoffArtifact,
-  workdir: string,
+  opts: RunDeepReviewOpts,
 ): Promise<DeepReviewResult> {
+  const { handoff, workdir } = opts;
   // Compute diff-stat once and share across all sub-agents.
   const diffStat = await gitExecSafe(["diff", "--stat", "HEAD"], workdir);
 
@@ -459,10 +537,19 @@ export async function runDeepReview(
     "deep review file subsets computed",
   );
 
+  const sessionCtx: SubAgentSessionOpts = {
+    model: opts.model,
+    agentSessionId: opts.agentSessionId,
+    isFirstResumableStage: opts.isFirstResumableStage,
+    runId: opts.runId,
+    issueId: opts.issueId,
+    db: opts.db,
+  };
+
   const [reuseResult, qualityResult, efficiencyResult] = await Promise.all([
-    runSubAgent("reuse", buildPrompt("reuse", summary, reuseFiles, diffStat), workdir),
-    runSubAgent("quality", buildPrompt("quality", summary, qualityFiles, diffStat), workdir),
-    runSubAgent("efficiency", buildPrompt("efficiency", summary, efficiencyFiles, diffStat), workdir),
+    runSubAgent("reuse", buildPrompt("reuse", summary, reuseFiles, diffStat), workdir, sessionCtx),
+    runSubAgent("quality", buildPrompt("quality", summary, qualityFiles, diffStat), workdir, sessionCtx),
+    runSubAgent("efficiency", buildPrompt("efficiency", summary, efficiencyFiles, diffStat), workdir, sessionCtx),
   ]);
 
   const findings = [

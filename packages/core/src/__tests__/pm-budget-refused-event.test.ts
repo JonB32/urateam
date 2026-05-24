@@ -80,6 +80,7 @@ describe("budget.run_refused audit event", () => {
       linearApiKey: "",
       slackBotToken: "",
       actions: mockActions as any,
+      authMonitor: { tick: async () => {} },
     });
 
     await scheduler.tick();
@@ -144,6 +145,7 @@ describe("budget.run_refused audit event", () => {
       linearApiKey: "",
       slackBotToken: "",
       actions: mockActions as any,
+      authMonitor: { tick: async () => {} },
     });
 
     await scheduler.tick();

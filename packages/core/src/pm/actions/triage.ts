@@ -1,17 +1,62 @@
+import type { Issue, LinearClient } from "@linear/sdk";
 import type { TriageResult } from "../types.js";
+import { parseTriageV2Extensions } from "../types.js";
 import { parseJsonObject } from "../../executor/agent-stream.js";
 import { resolveWorkflowStates } from "../linear-helpers.js";
+import { resolveIssueRelations } from "../../util/linear.js";
 import { createLogger } from "../../logger.js";
 import type { AnyDb } from "../../db/client.js";
 import { logAuditEventUnchecked, pmTriageClassifiedEvent } from "../../audit/index.js";
+import { upsertTriageResult } from "../triage-results-store.js";
+import {
+  buildTriageV1Prompt,
+  buildTriageV2Prompt,
+  isV2Disabled,
+  parseHandWrittenACs,
+} from "./triage-prompt.js";
+import {
+  renderTriageComment,
+  appendTriageSectionsToDescription,
+} from "./triage-render.js";
 
 const log = createLogger({ component: "PmAgent:triage" });
 
 const MAX_ISSUES_PER_TICK = 10;
 const DEFAULT_BATCH_SIZE = 3;
 
+/**
+ * Marker embedded in the body of every GitHub issue filed by the urateam
+ * quality-observer. `gh-linear-sync` copies the GitHub body verbatim into the
+ * Linear ticket description, so the marker survives the sync and is the
+ * authoritative way to detect observer-origin tickets on the Linear side
+ * (labels are not propagated by gh-linear-sync).
+ *
+ * Source of truth: urateam-quality-observer/src/github-issue-writer.ts.
+ */
+const OBSERVER_BODY_MARKER = "<!-- urateam-qo-observer:";
+
+/**
+ * Pipeline label assigned to observer-origin tickets. `needs-design` includes
+ * an `await-approval` stage that blocks until a human approves, so these
+ * findings surface without burning implement-stage tokens on a non-actionable
+ * diagnostic. See CLAUDE.md "Quality Observer" for the rationale.
+ */
+const OBSERVER_PIPELINE_LABEL = "needs-design";
+const BUG_LABEL = "bug";
+
+function isObserverOriginIssue(description: string | null | undefined): boolean {
+  return typeof description === "string" && description.includes(OBSERVER_BODY_MARKER);
+}
+
+function warnMissingPipelineLabel(issueId: string, label: string, context: string): void {
+  log.warn(
+    { issueId, label },
+    `${context}: '${label}' label not found in Linear — issue will move to Backlog without pipeline label and won't be routed by promote`,
+  );
+}
+
 export interface TriageInput {
-  linearClient: any; // LinearClient from @linear/sdk
+  linearClient: LinearClient;
   teamIds: string[];
   callClaude: (prompt: string) => Promise<string>;
   sanitize: (text: string) => string;
@@ -65,21 +110,80 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
   const results = (await runInBatches(
     issues.slice(0, MAX_ISSUES_PER_TICK),
     batchSize,
-    async (issue: any) => {
+    async (issue: Issue) => {
       try {
-        const sanitizedDesc = sanitize(issue.description ?? "");
-        const prompt =
-          `Classify this software issue and generate acceptance criteria. Respond with ONLY a JSON object, no other text.\n\n` +
-          `Issue: ${issue.identifier}\n` +
-          `Title: ${sanitize(issue.title)}\n` +
-          `Description: ${sanitizedDesc}\n\n` +
-          `IMPORTANT rules for generating acceptance criteria:\n` +
-          `1. INTEGRATION: Every new function, module, or utility MUST have a criterion that specifies where it is called from in existing code (e.g. "runner.ts calls checkFoo() after the test stage completes"). Code that is exported but never imported outside its own test file is incomplete.\n` +
-          `2. DOCUMENTATION: If the change adds new configuration, public API, CLI flags, or changes behavior, include a criterion requiring updates to relevant documentation (CLAUDE.md, README.md, deploy/README.md, or inline JSDoc).\n` +
-          `3. TESTING: Include a criterion for tests that exercise the integration path, not just the utility in isolation.\n` +
-          `4. Each criterion must be concrete and verifiable by reading the code — avoid vague criteria like "works correctly" or "is implemented".\n\n` +
-          `Respond with exactly this JSON format (no markdown, no explanation, just the JSON):\n` +
-          `{"priority": <1-4 where 1=urgent>, "labels": [<"bug"|"feature"|"backend"|"frontend"|"infra"|"docs">], "complexity": <"trivial"|"small"|"medium"|"large">, "rationale": "<one sentence>", "acceptanceCriteria": ["<integration criterion — specifies call site in existing code>", "<behavior criterion — testable outcome>", "<documentation criterion — if applicable>", ...]}`;
+        if (isObserverOriginIssue(issue.description)) {
+          const team = await issue.team;
+          const teamId = team?.id;
+          const backlogStateId = teamId ? stateMap.get(`${teamId}:Backlog`) : undefined;
+
+          const issueLabels = [OBSERVER_PIPELINE_LABEL];
+          const labelIds = issueLabels
+            .map((l) => labelMap.get(l.toLowerCase()))
+            .filter(Boolean);
+          if (labelIds.length === 0) {
+            warnMissingPipelineLabel(issue.identifier, OBSERVER_PIPELINE_LABEL, "observer-origin gate");
+          }
+
+          const rationale =
+            "Observer-origin finding (body marker detected) — routed to needs-design so the await-approval stage gates a human before any implement-stage work runs.";
+
+          const updatePayload: any = { priority: 3 };
+          if (labelIds.length > 0) updatePayload.labelIds = labelIds;
+          if (backlogStateId) updatePayload.stateId = backlogStateId;
+
+          await Promise.all([
+            linearClient.updateIssue(issue.id, updatePayload),
+            linearClient.createComment({
+              issueId: issue.id,
+              body: `🤖 **PM Agent — Triaged (Quality Observer finding)**\n\n**Pipeline:** ${OBSERVER_PIPELINE_LABEL}\n**Rationale:** ${rationale}`,
+            }),
+          ]);
+
+          const result: TriageResult = {
+            issueId: issue.identifier,
+            priority: 3,
+            labels: issueLabels,
+            complexity: "medium",
+            rationale,
+            acceptanceCriteria: [],
+          };
+          if (input.db) {
+            void logAuditEventUnchecked(input.db, pmTriageClassifiedEvent({
+              issueId: issue.identifier,
+              label: OBSERVER_PIPELINE_LABEL,
+              rationale,
+            }));
+          }
+          log.info(
+            { issueId: issue.identifier, pipelineLabel: OBSERVER_PIPELINE_LABEL },
+            "triaged observer-origin issue (skipped Claude classification)",
+          );
+          return result;
+        }
+
+        // Pre-parse hand-written ACs from the issue description. When the
+        // operator has already written a `**Acceptance Criteria:**` section,
+        // we use those items verbatim so the triage result stays in sync with
+        // the description text that the implement-stage prompt also sees.
+        // When no pre-written ACs are found, fall back to Haiku generation.
+        const preSuppliedACs = parseHandWrittenACs(issue.description);
+        const hasPreSuppliedACs = preSuppliedACs.length > 0;
+
+        // Tier 6a — pick v2 prompt by default; fall back to v1 when the
+        // operator has set URATEAM_DISABLE_TRIAGE_V2=true. Reads env at
+        // call time so flipping the var takes effect on the next PM tick
+        // without a daemon restart.
+        const useV2 = !isV2Disabled();
+        const promptInput = {
+          identifier: issue.identifier,
+          title: issue.title,
+          description: issue.description ?? "",
+          hasPreSuppliedACs,
+        };
+        const prompt = useV2
+          ? buildTriageV2Prompt(promptInput, sanitize)
+          : buildTriageV1Prompt(promptInput, sanitize);
 
         const response = await callClaude(prompt);
         const parsed = parseJsonObject(response);
@@ -94,55 +198,132 @@ export async function triageNewIssues(input: TriageInput): Promise<TriageResult[
           return null;
         }
 
-        const hasBug = labels.some((l: string) => l.toLowerCase() === "bug");
-        const pipelineLabel = hasBug ? "bug" : (complexity === "trivial" ? "quick-fix" : "auto-implement");
+        // Tier 4 — open-questions routing: if the agent flagged any
+        // unanswered questions, force the ticket to `needs-design` so the
+        // await-approval stage gates a human before any implement-stage
+        // tokens are spent. Mirrors the observer-marker gate at the top of
+        // this function. Empty / missing array means the issue is clearly
+        // specified and routes normally.
+        const openQuestions: string[] = Array.isArray(parsed.openQuestions)
+          ? parsed.openQuestions
+              .filter((q: any) => typeof q === "string" && q.trim().length > 0)
+              .map((q: string) => q.trim())
+          : [];
+        const antiAcceptanceCriteria: string[] = Array.isArray(parsed.antiAcceptanceCriteria)
+          ? parsed.antiAcceptanceCriteria
+              .filter((q: any) => typeof q === "string" && q.trim().length > 0)
+              .map((q: string) => q.trim())
+          : [];
+        const approachSummary: string =
+          typeof parsed.approachSummary === "string"
+            ? parsed.approachSummary.trim()
+            : "";
+
+        // `parsed.pipelineLabel` from the v2 prompt is INTENTIONALLY
+        // discarded here — Haiku's classification informs the response
+        // schema, but the authoritative pipeline routing happens below
+        // from `forceNeedsDesign` / `hasBug` / `complexity`. Wiring the
+        // model's self-classification directly into routing would let a
+        // prompt-injected issue self-route to `quick-fix` (escaping the
+        // bug-severity gate). Treat the model's `pipelineLabel` as
+        // telemetry only.
+        const forceNeedsDesign = openQuestions.length > 0;
+        const hasBug = labels.some((l: string) => l.toLowerCase() === BUG_LABEL);
+        const pipelineLabel = forceNeedsDesign
+          ? OBSERVER_PIPELINE_LABEL // same routing as observer-origin gate
+          : hasBug
+          ? "bug"
+          : complexity === "trivial"
+          ? "quick-fix"
+          : "auto-implement";
         const issueLabels = [...new Set([...labels, pipelineLabel])];
+
+        if (forceNeedsDesign) {
+          log.warn(
+            { issueId: issue.identifier, openQuestionsCount: openQuestions.length },
+            "Tier 4 open-questions routing: ticket forced to needs-design (Claude flagged unanswered questions)",
+          );
+          // Mirror the observer-origin gate's defensive label-existence warning
+          // (lines 104-109): if the operator's Linear workspace doesn't have a
+          // `needs-design` label, the issue still moves to Backlog but the
+          // routing label is dropped silently. Surface this so operators can
+          // diagnose why a ticket isn't being picked up by promote.
+          if (!labelMap.get(OBSERVER_PIPELINE_LABEL.toLowerCase())) {
+            warnMissingPipelineLabel(issue.identifier, OBSERVER_PIPELINE_LABEL, "Tier 4 routing");
+          }
+        }
 
         const labelIds = issueLabels
           .map((l: string) => labelMap.get(l.toLowerCase()))
           .filter(Boolean);
 
-        const team = await issue.team;
+        // Resolve the issue's team relation (parallelised with state/labels via
+        // resolveIssueRelations for consistency; only team is needed here).
+        const { team } = await resolveIssueRelations(issue);
         const teamId = team?.id;
         const backlogStateId = teamId ? stateMap.get(`${teamId}:Backlog`) : undefined;
 
-        const acceptanceCriteria: string[] = Array.isArray(parsed.acceptanceCriteria)
+        // Use pre-supplied ACs when the operator wrote them in the description;
+        // fall back to Haiku's generated list for fresh (no-AC) tickets.
+        const acceptanceCriteria: string[] = hasPreSuppliedACs
+          ? preSuppliedACs
+          : Array.isArray(parsed.acceptanceCriteria)
           ? parsed.acceptanceCriteria.filter((c: any) => typeof c === "string" && c.length > 0)
           : [];
 
-        // Append acceptance criteria to issue description if not already present
+        // Tier 6b — extract optional v2 fields when v2 is active. When v1
+        // is forced (env var), skip the extraction so the result shape
+        // stays bit-compatible with v1.
+        const v2Fields = useV2 ? parseTriageV2Extensions(parsed) : {};
+
+        // Build the TriageResult once so both the description appender
+        // and the comment renderer consume the same source of truth.
+        const result: TriageResult = {
+          issueId: issue.identifier,
+          priority,
+          labels: issueLabels,
+          complexity,
+          rationale,
+          acceptanceCriteria,
+          ...(approachSummary && { approachSummary }),
+          ...(openQuestions.length > 0 && { openQuestions }),
+          ...(antiAcceptanceCriteria.length > 0 && { antiAcceptanceCriteria }),
+          ...v2Fields,
+        };
+
         const updatePayload: any = { priority };
         if (labelIds.length > 0) updatePayload.labelIds = labelIds;
         if (backlogStateId) updatePayload.stateId = backlogStateId;
 
+        // Tier 6b — append all triage sections (AC + v2 fields) via the
+        // idempotent renderer. The function preserves existing sections
+        // already in the description (re-triage doesn't duplicate).
         const existingDesc = issue.description ?? "";
-        if (acceptanceCriteria.length > 0 && !existingDesc.includes("**Acceptance Criteria:**")) {
-          const criteriaSection = `\n\n**Acceptance Criteria:**\n${acceptanceCriteria.map((c: string) => `- [ ] ${c}`).join("\n")}`;
-          updatePayload.description = existingDesc + criteriaSection;
+        const updatedDesc = appendTriageSectionsToDescription(existingDesc, result);
+        if (updatedDesc !== existingDesc) {
+          updatePayload.description = updatedDesc;
         }
 
-        await linearClient.updateIssue(issue.id, updatePayload);
-
-        await linearClient.createComment({
-          issueId: issue.id,
-          body:
-            `🤖 **PM Agent — Triaged**\n\n` +
-            `**Priority:** ${priority} | **Complexity:** ${complexity}\n` +
-            `**Labels:** ${issueLabels.join(", ")}\n` +
-            `**Pipeline:** ${pipelineLabel}\n` +
-            `**Rationale:** ${rationale}` +
-            (acceptanceCriteria.length > 0
-              ? `\n\n**Generated Acceptance Criteria:**\n${acceptanceCriteria.map((c: string) => `- ${c}`).join("\n")}`
-              : ""),
-        });
-
-        const result: TriageResult = { issueId: issue.identifier, priority, labels: issueLabels, complexity, rationale, acceptanceCriteria };
+        await Promise.all([
+          linearClient.updateIssue(issue.id, updatePayload),
+          linearClient.createComment({
+            issueId: issue.id,
+            body: renderTriageComment(result, { forceNeedsDesign, pipelineLabel }),
+          }),
+        ]);
         if (input.db) {
           void logAuditEventUnchecked(input.db, pmTriageClassifiedEvent({
             issueId: issue.identifier,
             label: pipelineLabel,
             rationale: String(rationale),
           }));
+          // Tier 6e — persist v2 prediction so the runner can read it from
+          // DB instead of parsing the description text (which gets sliced at
+          // 4000 chars by mapIssueToSchema, losing the appended v2 sections
+          // for realistic issues). Empty extensions are still written so
+          // "triage ran but emitted no prediction" is distinguishable from
+          // "triage hasn't run" (no row).
+          void upsertTriageResult(input.db, issue.identifier, v2Fields);
         }
         log.info({ issueId: issue.identifier, priority, labels: issueLabels, pipelineLabel, complexity }, "triaged issue");
         return result;

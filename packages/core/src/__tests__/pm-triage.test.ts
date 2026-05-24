@@ -219,4 +219,175 @@ describe("triageNewIssues", () => {
     expect(results).toHaveLength(3);
     expect(callClaude).toHaveBeenCalledTimes(4);
   });
+
+  describe("observer-origin gate", () => {
+    function clientWithNeedsDesignLabel(issues: any[]) {
+      const c = mockLinearClient(issues);
+      c.issueLabels = vi.fn().mockResolvedValue({
+        nodes: [
+          { id: "lbl-bug", name: "bug" },
+          { id: "lbl-needs-design", name: "needs-design" },
+        ],
+      });
+      return c;
+    }
+
+    const observerDescription =
+      "Deep-review loop hit 90 turns. Inspect findings & implement-stage diffs.\n\n" +
+      "<!-- urateam-qo-fingerprint: abc123 -->\n" +
+      "<!-- urateam-qo-observer: run-patterns -->\n";
+
+    it("routes observer-origin issue to needs-design without calling Claude", async () => {
+      const client = clientWithNeedsDesignLabel([
+        {
+          id: "issue-qo-1",
+          identifier: "BEC-500",
+          title: "[GH#42] Pipeline urn-XYZ deep-review loop hit 90 turns",
+          description: observerDescription,
+          labels: { nodes: [] },
+          team: { id: "team-1" },
+        },
+      ]);
+      const callClaude = vi.fn();
+
+      const results = await triageNewIssues({
+        linearClient: client as any,
+        teamIds: ["team-1"],
+        callClaude,
+        sanitize: (s: string) => s,
+        stateMap: defaultStateMap,
+      });
+
+      expect(callClaude).not.toHaveBeenCalled();
+      expect(results).toHaveLength(1);
+      expect(results[0].issueId).toBe("BEC-500");
+      expect(results[0].labels).toEqual(["needs-design"]);
+      expect(results[0].acceptanceCriteria).toEqual([]);
+      expect(client.updateIssue).toHaveBeenCalledWith(
+        "issue-qo-1",
+        expect.objectContaining({
+          priority: 3,
+          labelIds: ["lbl-needs-design"],
+          stateId: "state-backlog",
+        }),
+      );
+      // No acceptance-criteria section appended.
+      expect(client.updateIssue).toHaveBeenCalledWith(
+        "issue-qo-1",
+        expect.not.objectContaining({ description: expect.any(String) }),
+      );
+      expect(client.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issueId: "issue-qo-1",
+          body: expect.stringContaining("Quality Observer finding"),
+        }),
+      );
+    });
+
+    it("does not trigger the gate for normal issues without the marker", async () => {
+      const client = clientWithNeedsDesignLabel([
+        {
+          id: "issue-normal",
+          identifier: "BEC-501",
+          title: "Add retry to webhook handler",
+          description: "Webhook fails intermittently — add exponential backoff.",
+          labels: { nodes: [] },
+          team: { id: "team-1" },
+        },
+      ]);
+      const callClaude = mockClaude(JSON.stringify({
+        priority: 2,
+        labels: ["bug"],
+        complexity: "small",
+        rationale: "Retry logic missing",
+        acceptanceCriteria: ["Add backoff in webhook handler"],
+      }));
+
+      await triageNewIssues({
+        linearClient: client as any,
+        teamIds: ["team-1"],
+        callClaude,
+        sanitize: (s: string) => s,
+        stateMap: defaultStateMap,
+      });
+
+      expect(callClaude).toHaveBeenCalledTimes(1);
+    });
+
+    it("routes when only the observer marker is present, even amid other content", async () => {
+      const client = clientWithNeedsDesignLabel([
+        {
+          id: "issue-qo-2",
+          identifier: "BEC-502",
+          title: "[GH#43] Stage `review` is timing out repeatedly",
+          description:
+            "## Header\n\nSome content from observer.\n\n" +
+            "<!-- urateam-qo-observer: run-patterns -->\n",
+          labels: { nodes: [] },
+          team: { id: "team-1" },
+        },
+      ]);
+      const callClaude = vi.fn();
+
+      const results = await triageNewIssues({
+        linearClient: client as any,
+        teamIds: ["team-1"],
+        callClaude,
+        sanitize: (s: string) => s,
+        stateMap: defaultStateMap,
+      });
+
+      expect(callClaude).not.toHaveBeenCalled();
+      expect(results[0].labels).toEqual(["needs-design"]);
+    });
+  });
+
+  describe("URATEAM_DISABLE_TRIAGE_V2 escape hatch", () => {
+    it("only appends **Acceptance Criteria:** to description (no v2 sections) when v2 is disabled", async () => {
+      vi.stubEnv("URATEAM_DISABLE_TRIAGE_V2", "true");
+      try {
+        const client = mockLinearClient([
+          {
+            id: "issue-v1d",
+            identifier: "BEC-V1D",
+            title: "Disable v2 path",
+            description: "",
+            labels: { nodes: [] },
+            team: { id: "team-1" },
+          },
+        ]);
+        // Even if Claude returns v2 fields, the disable path must drop them.
+        const callClaude = mockClaude(JSON.stringify({
+          priority: 2,
+          labels: ["feature"],
+          complexity: "small",
+          rationale: "Adds a thing",
+          acceptanceCriteria: ["Thing is added", "Thing has a test"],
+          assumptions: ["Should not appear in description"],
+          examples: [{ scenario: "X", expected: "Y" }],
+          affectedFiles: ["src/x.ts"],
+          testStrategy: { unit: "vitest" },
+          riskAssessment: { severity: "low", areas: ["api"] },
+        }));
+
+        await triageNewIssues({
+          linearClient: client as any,
+          teamIds: ["team-1"],
+          callClaude,
+          sanitize: (s: string) => s,
+          stateMap: defaultStateMap,
+        });
+
+        const updateCall = client.updateIssue.mock.calls[0]!;
+        const desc = (updateCall[1] as { description?: string }).description ?? "";
+        expect(desc).toContain("**Acceptance Criteria:**");
+        expect(desc).not.toContain("**Examples:**");
+        expect(desc).not.toContain("**Affected Files:**");
+        expect(desc).not.toContain("**Test Strategy:**");
+        expect(desc).not.toContain("**Risk Assessment:**");
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  });
 });

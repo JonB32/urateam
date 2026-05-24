@@ -1,0 +1,52 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderTriageComment — v1 + v2 markdown contract > matches a canonical snapshot for v1-only result 1`] = `
+"🤖 **PM Agent — Triaged**
+
+**Priority:** 2 | **Complexity:** small
+**Labels:** bug, backend
+**Pipeline:** bug
+**Rationale:** Server-side validation gap on empty email
+
+**Generated Acceptance Criteria:**
+- validator/email.ts:validate() called from /auth/login
+- Returns 400 on empty email instead of 500
+
+**Approach (Tier 4):**
+Add validator + 400-error path; cover with one test."
+`;
+
+exports[`renderTriageComment — v1 + v2 markdown contract > matches a canonical snapshot for v2 result 1`] = `
+"🤖 **PM Agent — Triaged**
+
+**Priority:** 2 | **Complexity:** small
+**Labels:** bug, backend
+**Pipeline:** bug
+**Rationale:** Server-side validation gap on empty email
+
+**Generated Acceptance Criteria:**
+- validator/email.ts:validate() called from /auth/login
+- Returns 400 on empty email instead of 500
+
+**Approach (Tier 4):**
+Add validator + 400-error path; cover with one test.
+
+### Assumptions
+- Empty email is the only 500 case
+- Other auth endpoints already validate
+
+### Examples
+1. **Scenario:** POST /auth/login {email:'', pw:'x'}
+   **Expected:** HTTP 400, code EMPTY_EMAIL
+
+### Affected Files
+- packages/api/src/routes/auth.ts
+- packages/api/src/validators/email.ts
+
+### Test Strategy
+- **Unit:** packages/api/src/__tests__/email-validator.test.ts
+- **Integration:** packages/api/src/__tests__/auth.test.ts
+
+### Risk Assessment
+**Severity:** low | **Areas:** auth, api"
+`;
