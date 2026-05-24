@@ -202,6 +202,24 @@ The implementation **must not duplicate** any pipeline logic. Call sites:
 ```typescript
 // packages/cli/src/commands/agent.ts
 
+/** Linear issue titles are capped at this length; longer prompts are truncated. */
+const TITLE_MAX_LENGTH = 72;
+
+/**
+ * Heuristic: classify a prompt as "quick-fix" when it contains one of the
+ * fix-intent keywords (case-insensitive). All other prompts default to
+ * "auto-implement". The operator can always override with --pipeline <key>.
+ * A Haiku-based classifier (same as PM Agent triage) is deferred to Phase 2.
+ */
+const QUICK_FIX_KEYWORDS = ["fix", "bug", "error", "crash", "typo", "revert"];
+
+function detectPipelineLabel(prompt: string): "quick-fix" | "auto-implement" {
+  const lower = prompt.toLowerCase();
+  return QUICK_FIX_KEYWORDS.some((kw) => lower.includes(kw))
+    ? "quick-fix"
+    : "auto-implement";
+}
+
 export const agentCommand = new Command("agent")
   .description('Run a pipeline from a prompt — creates a Linear ticket and opens a PR')
   .argument("<prompt>", "Natural-language description of the task")
@@ -211,19 +229,84 @@ export const agentCommand = new Command("agent")
   .option("--config <path>", "Pipeline config file path", "./pipeline.config.ts")
   .option("--repos <path>", "Repo config file path", "./repos.config.ts")
   .action(async (prompt: string, options) => {
-    // 1. Validate required env vars (LINEAR_API_KEY, ANTHROPIC_API_KEY, etc.)
+    // 1. Validate required env vars — fail fast with clear messages
+    const apiKey = process.env.LINEAR_API_KEY;
+    if (!apiKey) {
+      console.error("Error: LINEAR_API_KEY is not set.");
+      process.exit(1);
+    }
+    if (!process.env.ANTHROPIC_API_KEY) {
+      console.error("Error: ANTHROPIC_API_KEY is not set.");
+      process.exit(1);
+    }
+    const teamId = options.team ?? process.env.REPO_TEAM_ID;
+    if (!teamId) {
+      console.error("Error: --team or REPO_TEAM_ID must be set.");
+      process.exit(1);
+    }
+
     // 2. Load pipeline + repo configs (reuse loadPipelineConfigModule / loadRepoConfigModule)
+    let pipelineConfigs: Record<string, PipelineConfig>;
+    try {
+      const raw = await loadPipelineConfigModule(resolve(options.config as string));
+      pipelineConfigs = validatePipelineConfigs(raw);
+    } catch (err: any) {
+      console.error(`Error loading pipeline config: ${err?.message ?? String(err)}`);
+      process.exit(1);
+    }
+
+    let repoConfigs: Record<string, RepoConfig>;
+    try {
+      const raw = await loadRepoConfigModule(resolve(options.repos as string));
+      repoConfigs = validateRepoConfigs(raw);
+    } catch (err: any) {
+      console.error(`Error loading repo config: ${err?.message ?? String(err)}`);
+      process.exit(1);
+    }
+
     // 3. Create Linear issue via LinearClient
-    //    - title: prompt.slice(0, 72)
-    //    - description: prompt + "\n\n*Created by `ura agent`*"
-    //    - teamId: options.team ?? process.env.REPO_TEAM_ID
-    //    - label: options.pipeline ?? auto-detect("quick-fix" for short prompts, else "auto-implement")
+    const pipelineLabel = options.pipeline ?? detectPipelineLabel(prompt);
+    let issue: LinearIssue;
+    try {
+      const { LinearClient } = await import("@linear/sdk");
+      const client = new LinearClient({ apiKey });
+      const result = await client.createIssue({
+        title: prompt.slice(0, TITLE_MAX_LENGTH),
+        description: `${prompt}\n\n*Created by \`ura agent\`*`,
+        teamId,
+        // labelId resolved from team labels by pipeline label name
+      });
+      if (!result.success || !result.issue) throw new Error("createIssue returned no issue");
+      issue = await buildLinearIssue(result.issue, pipelineLabel);
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (msg.toLowerCase().includes("unauthorized") || msg.toLowerCase().includes("forbidden")) {
+        console.error("Error: Linear authentication failed. Verify LINEAR_API_KEY has issues:write scope.");
+      } else {
+        console.error(`Error creating Linear issue: ${msg}`);
+      }
+      process.exit(1);
+    }
+
     // 4. Move issue to Todo state via LinearClient.updateIssue()
     // 5. Build LinearIssue + SanitizedIssue objects from the created ticket
     // 6. Resolve repoConfig from repos.config.ts
+    const repoConfig = resolveRepoConfig(repoConfigs, issue.teamId);
+    if (!repoConfig) {
+      console.error("Error: No matching repo config found.");
+      process.exit(1);
+    }
+
     // 7. Create DB + runner (same as ura run)
     // 8. Call runner.start() — blocks via completionPromise
-    // 9. Print PR URL on completion; exit 1 on failure
+    try {
+      await runner.start(issue, pipelineLabel, pipelineConfig, repoConfig, sanitizedIssue);
+      await completionPromise; // resolves on onPipelineComplete, rejects on onPipelineFailed
+    } catch (err: any) {
+      console.error(`Pipeline failed: ${err?.message ?? String(err)}`);
+      process.exit(1);
+    }
+    // 9. Print PR URL on completion; exit 0
   });
 ```
 
@@ -233,8 +316,9 @@ export const agentCommand = new Command("agent")
 
 ### Unit tests (`packages/cli/src/__tests__/agent.test.ts`)
 
-- `createLinearTicketFromPrompt()` — verifies title truncation at 72 chars, label auto-detection, state ID resolution
-- `detectPipelineLabel()` — verifies heuristic: prompts with "fix", "bug", "error" → "quick-fix"; others → "auto-implement"
+- `createLinearTicketFromPrompt()` — verifies title truncation at `TITLE_MAX_LENGTH` (72) chars, label auto-detection, state ID resolution
+- `detectPipelineLabel()` — verifies keyword heuristic: prompts containing "fix", "bug", "error", "crash", "typo", or "revert" (case-insensitive) → "quick-fix"; all other prompts → "auto-implement"
+- Title truncation — verifies that a 100-char prompt produces a Linear issue title of exactly 72 chars
 - `--dry-run` flag — verifies no Linear API calls are made, expected plan printed to stdout
 
 ### Integration test scenario
@@ -280,6 +364,34 @@ it("creates a Linear ticket and calls runner.start()", async () => {
     expect.objectContaining({ title: "fix the bug in foo.ts:42" }),
   );
   expect(mockRunner.start).toHaveBeenCalledOnce();
+});
+
+it("truncates prompt longer than TITLE_MAX_LENGTH (72) in Linear issue title", async () => {
+  const longPrompt = "x".repeat(100);
+  const mockLinearClient = {
+    createIssue: vi.fn().mockResolvedValue({ success: true, issue: mockIssue }),
+    updateIssue: vi.fn().mockResolvedValue({ success: true }),
+    workflowStates: vi.fn().mockResolvedValue({ nodes: mockStates }),
+  };
+  const mockRunner = { start: vi.fn().mockResolvedValue(undefined) };
+
+  await runAgentCommand(longPrompt, {
+    linearClient: mockLinearClient,
+    runner: mockRunner,
+    pipelineConfigs: mockPipelineConfigs,
+    repoConfigs: mockRepoConfigs,
+  });
+
+  expect(mockLinearClient.createIssue).toHaveBeenCalledWith(
+    expect.objectContaining({ title: "x".repeat(72) }),
+  );
+});
+
+it("detects 'quick-fix' label from fix-intent keywords; defaults to 'auto-implement'", () => {
+  expect(detectPipelineLabel("fix the null deref in foo.ts")).toBe("quick-fix");
+  expect(detectPipelineLabel("add support for dark mode")).toBe("auto-implement");
+  expect(detectPipelineLabel("crash when uploading large files")).toBe("quick-fix");
+  expect(detectPipelineLabel("implement new billing dashboard")).toBe("auto-implement");
 });
 ```
 
