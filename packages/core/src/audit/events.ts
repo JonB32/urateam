@@ -1126,6 +1126,35 @@ export function systemSessionVolumeWarningEvent(args: {
 }
 
 /**
+ * BEC-252 — emitted by `recoverRetriableRuns` when a restart-interrupted run
+ * is successfully handed back to the runner. Both worktree and JSONL
+ * transcript were present at restart-detection time. `restartGapMs` is the
+ * elapsed time from when the interrupt was recorded (`completedAt`) to now.
+ */
+export function restartInterruptRecoveredEvent(args: {
+  runId: string;
+  issueId: string;
+  stage: string;
+  worktreeExisted: boolean;
+  transcriptExisted: boolean;
+  restartGapMs: number;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.restart_interrupt_recovered",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      stage: args.stage,
+      worktreeExisted: args.worktreeExisted,
+      transcriptExisted: args.transcriptExisted,
+      restartGapMs: args.restartGapMs,
+    },
+  });
+}
+
+/**
  * Tier 6e — emitted after each successful push. Records how closely triage
  * v2's `affectedFiles` prediction matched the actual changed files in the
  * final diff. When `hasV2Prediction` is false the triage stage ran v1 and

@@ -162,7 +162,7 @@ describe("BEC-252 — recoverStuckRuns should mark retriable when worktree + tra
     });
   }
 
-  it("BUG: marks run 'failed' even when worktree AND transcript both exist (should be 'retriable')", async () => {
+  it("marks run 'retriable' when worktree AND transcript both exist", async () => {
     const runId = nanoid();
     const issueId = "BEC-252-repro-1";
     const sessionId = nanoid();
@@ -191,22 +191,14 @@ describe("BEC-252 — recoverStuckRuns should mark retriable when worktree + tra
       delete process.env.URATEAM_CLAUDE_PROJECTS_DIR;
     }
 
-    // 5. Read back the run's final status
-    const [run] = await db
+    // 5. Read back the run's final status — now retriable (BEC-252 fixed)
+    const [run] = await (db as any)
       .select()
       .from(pipelineRuns)
       .where(eq(pipelineRuns.id, runId));
 
-    // CURRENT (BUGGY) BEHAVIOR: always "failed"
-    expect(run.status).toBe("failed");
+    expect(run.status).toBe("retriable");
     expect(run.errorMessage).toContain("interrupted by server restart");
-
-    // EXPECTED BEHAVIOR (the fix): should be "retriable" so recoverRetriableRuns
-    // can auto-resume it on the next PM tick via runner.resume(issueId).
-    //
-    // This assertion documents the desired post-fix state and WILL FAIL
-    // against the current code — that's the point of this reproduction test.
-    expect(run.status).toBe("retriable"); // <-- FAILS on current code (BEC-252 bug)
   });
 
   it("should still mark 'failed' when worktree is missing (no resumption possible)", async () => {
@@ -221,7 +213,7 @@ describe("BEC-252 — recoverStuckRuns should mark retriable when worktree + tra
     const runner = makeRunner();
     await runner.recoverStuckRuns();
 
-    const [run] = await db
+    const [run] = await (db as any)
       .select()
       .from(pipelineRuns)
       .where(eq(pipelineRuns.id, runId));
@@ -252,7 +244,7 @@ describe("BEC-252 — recoverStuckRuns should mark retriable when worktree + tra
       delete process.env.URATEAM_CLAUDE_PROJECTS_DIR;
     }
 
-    const [run] = await db
+    const [run] = await (db as any)
       .select()
       .from(pipelineRuns)
       .where(eq(pipelineRuns.id, runId));
@@ -289,7 +281,7 @@ describe("BEC-252 — recoverStuckRuns should mark retriable when worktree + tra
       delete process.env.URATEAM_CLAUDE_PROJECTS_DIR;
     }
 
-    const [run] = await db
+    const [run] = await (db as any)
       .select()
       .from(pipelineRuns)
       .where(eq(pipelineRuns.id, runId));
