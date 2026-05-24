@@ -20,7 +20,8 @@ describe("cost-roi license flag + core barrel re-export", () => {
 
   it("re-exports cost helpers from @urateam/core barrel", () => {
     expect(typeof (core as Record<string, unknown>).computeRunCost).toBe("function");
-    expect(typeof (core as Record<string, unknown>).aggregateAll).toBe("function");
+    // aggregateAll is module-private (BEC-191) — only aggregateHybrid is the public API
+    expect(typeof (core as Record<string, unknown>).aggregateHybrid).toBe("function");
     expect(typeof (core as Record<string, unknown>).resolveModelRate).toBe("function");
   });
 });

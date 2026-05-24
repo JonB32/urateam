@@ -11,13 +11,14 @@ import { AuditEventTypeSchema } from "../types.js";
 describe("claudeAuthExpiredEvent (BEC-207)", () => {
   it("returns a valid AuditEvent with eventType claude.auth_expired", () => {
     const now = new Date();
-    const event = claudeAuthExpiredEvent({ detectedAt: now });
+    const event = claudeAuthExpiredEvent({ detectedAt: now, authMethod: "mounted-session" });
     expect(event.eventType).toBe("claude.auth_expired");
     expect(event.actor).toBe("system");
     expect(event.actorType).toBe("system");
     expect(event.id).toMatch(/^evt_/);
     expect(event.payload).toMatchObject({
       detectedAt: now.toISOString(),
+      authMethod: "mounted-session",
     });
     expect(event.payload.hint).toContain("CLAUDE_CODE_OAUTH_TOKEN");
   });
@@ -29,7 +30,7 @@ describe("claudeAuthExpiredEvent (BEC-207)", () => {
 
   it("produces a parseable ISO date string for detectedAt", () => {
     const now = new Date();
-    const event = claudeAuthExpiredEvent({ detectedAt: now });
+    const event = claudeAuthExpiredEvent({ detectedAt: now, authMethod: "mounted-session" });
     const parsed = new Date(event.payload.detectedAt as string);
     expect(isNaN(parsed.getTime())).toBe(false);
     // Should be within 1 second of the input date

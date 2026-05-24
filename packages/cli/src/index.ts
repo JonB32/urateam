@@ -29,12 +29,15 @@ import { getPackageVersion } from "./version.js";
 import { licenseCommand } from "./commands/license.js";
 import { adminCommand } from "./commands/admin.js";
 import { stopCommand, haltCommand } from "./commands/control.js";
+import { retryCommand } from "./commands/retry.js";
 import { initCommand } from "./commands/init.js";
 import { repoCommand } from "./commands/repo.js";
 import { uninstallCommand } from "./commands/uninstall.js";
 import { serviceCommand } from "./commands/service.js";
 import { selfAuthLinearCommand } from "./commands/self-auth-linear.js";
 import { bootstrapCommand } from "./commands/bootstrap.js";
+import { triageQualityCommand } from "./commands/triage-quality.js";
+import { circuitCommand } from "./commands/circuit.js";
 
 const program = new Command();
 
@@ -53,11 +56,14 @@ program.addCommand(licenseCommand, { hidden: true });
 program.addCommand(adminCommand);
 program.addCommand(stopCommand);
 program.addCommand(haltCommand);
+program.addCommand(retryCommand);
 program.addCommand(initCommand);
 program.addCommand(repoCommand);
 program.addCommand(uninstallCommand);
 program.addCommand(serviceCommand);
 program.addCommand(selfAuthLinearCommand);
 program.addCommand(bootstrapCommand);
+program.addCommand(triageQualityCommand);
+program.addCommand(circuitCommand);
 
 program.parse();

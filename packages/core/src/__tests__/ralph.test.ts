@@ -37,6 +37,7 @@ function makeHandoff(overrides?: Partial<HandoffArtifact>): HandoffParseResult {
       ...overrides,
     },
     structured: true,
+    decisions: null,
   };
 }
 

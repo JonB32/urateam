@@ -1,6 +1,15 @@
 import type { AnyDb } from "../../db/client.js";
-import { pipelineRuns } from "../../db/schema.js";
-import { and, desc, eq, gte, inArray, or } from "drizzle-orm";
+import type { CircuitBrokenIssue } from "../types.js";
+import {
+  agentLogs,
+  circuitBreakerState,
+  pipelineRunDecisions,
+  pipelineRuns,
+  reviewModelRuns,
+  stageRuns,
+} from "../../db/schema.js";
+import { and, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
+import { isPostgres } from "../../db/client.js";
 
 /** Statuses considered "active" (pipeline currently running). */
 export const ACTIVE_STATUSES = ["queued", "running"] as const;
@@ -193,4 +202,184 @@ export async function batchCountConsecutiveFailures(
     result.set(issueId, countLeadingFailures(issueRows));
   }
   return result;
+}
+
+/**
+ * BEC-223: Fetch issues that have hit the circuit-breaker threshold (≥
+ * `minConsecutiveFailures` consecutive failed pipeline runs) and had at
+ * least one failed run within the last `windowDays` days.
+ *
+ * Issues whose most-recent terminal run is `'completed'` are automatically
+ * excluded by `batchCountConsecutiveFailures` (it returns 0 for recovered
+ * issues), so no extra filter is needed.
+ *
+ * Avoids N+1 queries: a single `batchCountConsecutiveFailures` round-trip
+ * processes all candidate issue IDs.
+ *
+ * BEC-187 (CLAUDE.md hot-path note): `pipeline_runs` lacks an index on
+ * `(status, started_at)` until BEC-187 ships. This query is bounded by:
+ *   - a 7-day cutoff on `started_at`,
+ *   - a row LIMIT (`CIRCUIT_BROKEN_FETCH_LIMIT`),
+ *   - frequency: invoked once per PM tick (default 30 min).
+ * The Slack digest only renders the top 10, so 50 candidate rows is more
+ * than enough headroom for dedup-by-issue-id.
+ */
+const CIRCUIT_BROKEN_FETCH_LIMIT = 50;
+
+export async function fetchCircuitBrokenIssues(
+  db: AnyDb,
+  minConsecutiveFailures: number = 3,
+  windowDays: number = 7,
+): Promise<CircuitBrokenIssue[]> {
+  const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
+
+  // Fetch up to CIRCUIT_BROKEN_FETCH_LIMIT most-recent failed runs in the
+  // window (most-recent first). See BEC-187 note above re: hot-path query
+  // budget.
+  const rows = await db
+    .select({
+      issueId: pipelineRuns.issueId,
+      issueTitle: pipelineRuns.issueTitle,
+      errorMessage: pipelineRuns.errorMessage,
+      startedAt: pipelineRuns.startedAt,
+      completedAt: pipelineRuns.completedAt,
+    })
+    .from(pipelineRuns)
+    .where(
+      and(
+        eq(pipelineRuns.status, "failed"),
+        gte(pipelineRuns.startedAt, cutoff),
+      ),
+    )
+    .orderBy(desc(pipelineRuns.startedAt), desc(pipelineRuns.id))
+    .limit(CIRCUIT_BROKEN_FETCH_LIMIT);
+
+  // Dedupe by issueId — keep the most-recent failed run's display data.
+  const byIssue = new Map<string, CircuitBrokenIssue>();
+  for (const row of rows as Array<{
+    issueId: string;
+    issueTitle: string;
+    errorMessage: string | null;
+    startedAt: Date;
+    completedAt: Date | null;
+  }>) {
+    if (!byIssue.has(row.issueId)) {
+      byIssue.set(row.issueId, {
+        issueId: row.issueId,
+        issueTitle: row.issueTitle,
+        errorMessage: row.errorMessage ?? undefined,
+        // Prefer completedAt (exact failure time); fall back to startedAt.
+        failedAt: row.completedAt ?? row.startedAt,
+        url: `https://linear.app/issue/${row.issueId}`,
+      });
+    }
+  }
+
+  if (byIssue.size === 0) return [];
+
+  const issueIds = Array.from(byIssue.keys());
+  const failureCounts = await batchCountConsecutiveFailures(db, issueIds);
+
+  // Retain only issues at or above the failure threshold.
+  // batchCountConsecutiveFailures returns 0 for recovered issues.
+  const results: CircuitBrokenIssue[] = [];
+  for (const issueId of issueIds) {
+    const count = failureCounts.get(issueId) ?? 0;
+    if (count >= minConsecutiveFailures) {
+      results.push(byIssue.get(issueId)!);
+    }
+  }
+
+  // Most-recently-broken first so the digest is stable across ticks.
+  results.sort((a, b) => b.failedAt.getTime() - a.failedAt.getTime());
+
+  return results;
+}
+
+/**
+ * BEC-236 — `ura circuit reset` DB implementation.
+ *
+ * Inside a single transaction:
+ *   1. Identify all `status = 'failed'` pipeline_runs for the issue.
+ *   2. Cascade-delete in FK-respecting order:
+ *      review_model_runs + agent_logs (children of stage_runs)
+ *      → stage_runs + pipeline_run_decisions (children of pipeline_runs)
+ *      → pipeline_runs (failed only).
+ *   3. Delete the circuit_breaker_state row (if present).
+ *
+ * Returns `{ hadStateRow, failedRunIds }` so the CLI layer can decide
+ * whether to strip the Linear `needs-design` label (only when the state
+ * row was present — avoids touching human-added labels).
+ *
+ * `completed` runs are NEVER deleted — only `status = 'failed'` rows.
+ */
+export async function deleteFailedRunsForIssue(
+  db: AnyDb,
+  issueId: string,
+): Promise<{ hadStateRow: boolean; failedRunCount: number }> {
+  // Snapshot state-row presence BEFORE the transaction deletes it.
+  const stateRows = (await db
+    .select({ issueId: circuitBreakerState.issueId })
+    .from(circuitBreakerState)
+    .where(eq(circuitBreakerState.issueId, issueId))) as Array<{ issueId: string }>;
+  const hadStateRow = stateRows.length > 0;
+
+  // Identify failed pipeline_run IDs for this issue.
+  const failedRunRows = (await db
+    .select({ id: pipelineRuns.id })
+    .from(pipelineRuns)
+    .where(
+      and(eq(pipelineRuns.issueId, issueId), eq(pipelineRuns.status, "failed")),
+    )) as Array<{ id: string }>;
+  const failedRunIds = failedRunRows.map((r) => r.id);
+
+  // Cascade-delete inside a transaction.
+  // Note: better-sqlite3 (SQLite driver) does not support async transaction
+  // callbacks. Use the same BEGIN IMMEDIATE / COMMIT / ROLLBACK pattern as
+  // setUserRole in rbac/user-role-store.ts. Postgres uses the native drizzle
+  // async transaction API.
+  const txBody = async (handle: any) => {
+    if (failedRunIds.length > 0) {
+      // Pull stage_run IDs first so we can delete agent_logs by stage_run_id.
+      const stageRunRows = (await handle
+        .select({ id: stageRuns.id })
+        .from(stageRuns)
+        .where(inArray(stageRuns.pipelineRunId, failedRunIds))) as Array<{ id: string }>;
+      const stageRunIds = stageRunRows.map((r) => r.id);
+      if (stageRunIds.length > 0) {
+        // Children of stage_runs (review_model_runs + agent_logs) must go first.
+        await handle.delete(reviewModelRuns).where(inArray(reviewModelRuns.stageRunId, stageRunIds));
+        await handle.delete(agentLogs).where(inArray(agentLogs.stageRunId, stageRunIds));
+        await handle.delete(stageRuns).where(inArray(stageRuns.id, stageRunIds));
+      }
+      // pipeline_run_decisions is a child of pipeline_runs (BEC-227 Phase 4).
+      await handle
+        .delete(pipelineRunDecisions)
+        .where(inArray(pipelineRunDecisions.pipelineRunId, failedRunIds));
+      await handle.delete(pipelineRuns).where(inArray(pipelineRuns.id, failedRunIds));
+    }
+    await handle.delete(circuitBreakerState).where(eq(circuitBreakerState.issueId, issueId));
+  };
+
+  if (isPostgres(db as any)) {
+    await (db as any).transaction(async (tx: any) => {
+      await txBody(tx);
+    });
+  } else {
+    // SQLite path — manual transaction (BEGIN IMMEDIATE → COMMIT/ROLLBACK).
+    await (db as any).run(sql`BEGIN IMMEDIATE`);
+    try {
+      await txBody(db);
+      await (db as any).run(sql`COMMIT`);
+    } catch (err) {
+      try {
+        await (db as any).run(sql`ROLLBACK`);
+      } catch {
+        // ignore rollback errors
+      }
+      throw err;
+    }
+  }
+
+  return { hadStateRow, failedRunCount: failedRunIds.length };
 }

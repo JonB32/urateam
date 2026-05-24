@@ -96,6 +96,10 @@ describe("BEC-103: security headers present on all responses", () => {
       // Must restrict scripts to 'self' and https://unpkg.com only
       expect(csp).toContain("default-src 'self'");
       expect(csp).toContain("script-src 'self' https://unpkg.com");
+      // BEC-131: style-src must allow inline styles and Google Fonts stylesheet
+      expect(csp).toContain("style-src 'self' 'unsafe-inline' https://fonts.googleapis.com");
+      // BEC-131: font-src must allow Google Fonts CDN for font files
+      expect(csp).toContain("font-src 'self' https://fonts.gstatic.com");
     },
   );
 
@@ -225,6 +229,26 @@ describe("BEC-103: rate limiting prevents brute-force attacks", () => {
 
     // Rate limiting kicks in after RATE_LIMIT_MAX requests per window
     expect(tooManyRequests).toBe(true);
+  });
+
+  it("normal authenticated traversal never triggers 429 (limiter counts only 401s)", async () => {
+    const app = makeApp(true); // auth enabled
+    let tooManyRequests = false;
+
+    // 60 successful requests in one window — 6× the failed-auth limit.
+    // A real dashboard page load fans out to dozens of asset/HTMX requests,
+    // so this is conservative. None of these are 401s, so none count.
+    for (let i = 0; i < 60; i++) {
+      const res = await app.request("/", {
+        headers: { Authorization: VALID_AUTH_HEADER },
+      });
+      if (res.status === 429) {
+        tooManyRequests = true;
+        break;
+      }
+    }
+
+    expect(tooManyRequests).toBe(false);
   });
 });
 

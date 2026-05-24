@@ -1,12 +1,39 @@
 import { randomUUID } from "node:crypto";
 import { eq, and, desc } from "drizzle-orm";
+import type { Octokit } from "@octokit/rest";
 import type { AnyDb } from "../db/client.js";
 import { releaseApprovals, releaseDecisions } from "../db/schema.js";
 import { logAuditEventUnchecked } from "../audit/writer.js";
 import { releaseApprovedEvent, releaseSkippedEvent } from "../audit/events.js";
 import { createLogger } from "../logger.js";
+import type { ReleaseManagerConfig } from "./types.js";
+import { collectState } from "./state.js";
+import { bumpFromConfigAndCommits } from "./versioning.js";
+import {
+  evalMergedPRsSince,
+  evalTimeSinceLastHours,
+  evalCiGreenForMinutes,
+  evalRequireSlackApproval,
+  evalQaCheck,
+} from "./triggers.js";
 
 const log = createLogger({ component: "ReleaseManager:slack-handler" });
+
+function relativeTime(d: Date | null): string {
+  if (!d) return "unknown";
+  const diffMs = Date.now() - d.getTime();
+  const diffMin = Math.round(diffMs / 60_000);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.round(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDays = Math.round(diffHr / 24);
+  return `${diffDays}d ago`;
+}
+
+function triggerGlyph(pass: boolean, waiting = false): string {
+  if (pass) return "✓";
+  return waiting ? "⏳" : "✗";
+}
 
 export type ReleaseSubcommand =
   | { kind: "approve" }
@@ -48,6 +75,10 @@ export interface HandleReleaseSubcommandInput {
   onSkip?: (reason: string) => void;
   /** Optional: hours until the next eligible tick after a /release skip. Used in the response text. */
   pauseDurationHours?: number;
+  /** When provided alongside config, status renders live trigger state (v2 rich mode). */
+  octokit?: Octokit;
+  /** When provided alongside octokit, status renders live trigger state (v2 rich mode). */
+  config?: ReleaseManagerConfig;
 }
 
 export interface SlackResponse {
@@ -124,6 +155,65 @@ export async function handleReleaseSubcommand(
     }
 
     case "status": {
+      const lines: string[] = [`*Release Manager status — ${repoUrl} (${branch})*`];
+
+      if (input.octokit && input.config) {
+        const { config } = input;
+        const ttlHours = config.triggers.timeSinceLastHours;
+        const approvalTtlMs = ttlHours && ttlHours > 0 ? ttlHours * 3600_000 : 24 * 3600_000;
+        try {
+          const state = await collectState({
+            octokit: input.octokit,
+            db,
+            repoUrl,
+            branch,
+            approvalTtlMs,
+          });
+          const proposedNext = bumpFromConfigAndCommits(
+            state.lastTag,
+            state.commitsSinceLastTag,
+            config.versionBump,
+          );
+          lines.push(`Last tag: ${state.lastTag ?? "(none)"} (${relativeTime(state.lastTagAt)})`);
+          lines.push(`Proposed next: ${proposedNext}`);
+          lines.push("Trigger state:");
+          const t = config.triggers;
+          if (t.mergedPRsSince !== undefined) {
+            const r = evalMergedPRsSince(state.mergedCommitsSinceLastTag, t.mergedPRsSince);
+            lines.push(`  ${triggerGlyph(r.pass)} ${r.reason}`);
+          }
+          if (t.timeSinceLastHours !== undefined) {
+            const r = evalTimeSinceLastHours(state.lastTagAt, t.timeSinceLastHours);
+            lines.push(`  ${triggerGlyph(r.pass)} ${r.reason}`);
+          }
+          if (t.ciGreenForMinutes !== undefined) {
+            const r = evalCiGreenForMinutes(state.ciStatus, state.ciGreenSince, t.ciGreenForMinutes);
+            lines.push(`  ${triggerGlyph(r.pass)} ${r.reason}`);
+          }
+          if (t.qaCheck !== undefined) {
+            const r = evalQaCheck({
+              qaConfig: t.qaCheck,
+              headSha: state.headSha,
+              workflowFileExists: true,
+              qaRun: state.qaRun,
+              runConclusion: null,
+            });
+            const waiting = r.reason === "qa_running" || r.reason === "qa_needs_trigger";
+            lines.push(`  ${triggerGlyph(r.pass, waiting)} qaCheck: ${r.reason}`);
+          }
+          if (t.requireSlackApproval === true) {
+            const r = evalRequireSlackApproval(true, state.hasFreshApproval);
+            const label = r.pass
+              ? "requireSlackApproval=true (approved)"
+              : "requireSlackApproval=true (no fresh approval)";
+            lines.push(`  ${triggerGlyph(r.pass, !r.pass)} ${label}`);
+          }
+        } catch (err: any) {
+          log.error({ err, repoUrl, branch }, "collectState failed in /release status");
+          lines.push(`_(live state unavailable: ${String(err?.message ?? err)})_`);
+        }
+      }
+
       const recent = await (db as any)
         .select({
           decidedAt: releaseDecisions.decidedAt,
@@ -136,7 +226,7 @@ export async function handleReleaseSubcommand(
         .orderBy(desc(releaseDecisions.decidedAt))
         .limit(5);
 
-      const lines: string[] = [`*Release Manager status — ${repoUrl} (${branch})*`, "Recent decisions:"];
+      lines.push("Recent decisions:");
       if (recent.length === 0) {
         lines.push("  _no decisions yet_");
       } else {

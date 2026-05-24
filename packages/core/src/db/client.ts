@@ -56,6 +56,8 @@ const MIGRATION_COLUMNS: MigrationColumn[] = [
   // BEC-94: auto-commit quality metric
   { table: "pipeline_runs", column: "auto_committed", sqliteType: "INTEGER", pgType: "BOOLEAN" },
   { table: "pipeline_runs", column: "linear_team_id", sqliteType: "TEXT", pgType: "TEXT" },
+  // BEC-227: agent session continuity — Claude Agent SDK session UUID for resumption
+  { table: "pipeline_runs", column: "agent_session_id", sqliteType: "TEXT", pgType: "TEXT" },
   // Feature 4.4: RBAC
   {
     table: "dashboard_users",
@@ -102,7 +104,8 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
     auto_merged ${bool},
     auto_merge_reason TEXT,
     auto_committed ${bool},
-    linear_team_id TEXT
+    linear_team_id TEXT,
+    agent_session_id TEXT
   );
 
   CREATE TABLE IF NOT EXISTS stage_runs (
@@ -152,6 +155,16 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
   CREATE INDEX IF NOT EXISTS idx_pm_approvals_status ON pm_approvals(status);
   -- BEC-187: hot-path index — kept in sync with migration files.
   CREATE INDEX IF NOT EXISTS idx_pm_approvals_issue_id ON pm_approvals(issue_id);
+
+  CREATE TABLE IF NOT EXISTS pipeline_run_decisions (
+    id TEXT PRIMARY KEY,
+    pipeline_run_id TEXT NOT NULL REFERENCES pipeline_runs(id),
+    iteration INTEGER NOT NULL,
+    stage TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at ${ts} NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_pipeline_run_decisions_run ON pipeline_run_decisions(pipeline_run_id, iteration);
 
   CREATE TABLE IF NOT EXISTS active_work (
     id TEXT PRIMARY KEY,
@@ -255,6 +268,22 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
 
   CREATE INDEX IF NOT EXISTS idx_review_model_runs_stage_run_id
     ON review_model_runs(stage_run_id);
+
+  CREATE TABLE IF NOT EXISTS triage_results (
+    issue_id TEXT PRIMARY KEY,
+    v2_prediction TEXT NOT NULL DEFAULT '{}',
+    triaged_at ${ts} NOT NULL DEFAULT (${now})
+  );
+
+  CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+    issue_id TEXT PRIMARY KEY,
+    escalated_at ${ts} NOT NULL DEFAULT (${now}),
+    last_probe_at ${ts},
+    probe_attempts INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_circuit_breaker_state_last_probe_at
+    ON circuit_breaker_state(last_probe_at);
 `;
 }
 

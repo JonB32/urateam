@@ -13,8 +13,9 @@ export * from "./cost/index.js";
 export * from "./rbac/index.js";
 export { computeConfigFingerprint } from "./audit/config-fingerprint.js";
 export { rootLogger, createLogger, addLogStream } from "./logger.js";
-export { createDb, isPostgres, sqlDateGroup, sqlDaysAgoFilter, type Db } from "./db/index.js";
-export { pipelineRuns, stageRuns, agentLogs, activeWork, pmApprovals } from "./db/index.js";
+export { createDb, isPostgres, sqlDateGroup, sqlDaysAgoFilter, type Db, type AnyDb } from "./db/index.js";
+export { pipelineRuns, stageRuns, agentLogs, activeWork, pmApprovals, circuitBreakerState, pipelineRunDecisions, reviewModelRuns } from "./db/index.js";
+export { batchCountConsecutiveFailures, deleteFailedRunsForIssue } from "./pm/actions/db-queries.js";
 export { createApp, type ServerConfig } from "./server.js";
 export { PipelineRunner, type PipelineRunnerConfig, type LinearIssue } from "./pipeline/index.js";
 export { type StopMode, requestRunStop, getStopSignal, clearStopSignal } from "./pipeline/index.js";
@@ -39,6 +40,7 @@ export {
 } from "./notifier/index.js";
 export { assemblePrompt, sanitize, mapIssueToSchema } from "./executor/index.js";
 export { executeStage } from "./executor/index.js";
+export { getSessionMessages, type SessionMessage } from "./executor/index.js";
 export { validateReviewModels } from "./executor/review/review-provider.js";
 export { validateHandoff, type ValidationResult } from "./executor/validate.js";
 export { extractHandoff } from "./executor/extract-handoff.js";
@@ -75,10 +77,13 @@ export type { PmAgentConfig, TickResult } from "./pm/types.js";
 export { PmAgentConfigSchema } from "./pm/types.js";
 export {
   loadMigrationFiles,
+  loadActiveMigrationFiles,
   runMigrationsSqlite,
   runMigrationsPostgres,
   getMigrationStatusSqlite,
   getMigrationStatusPostgres,
+  SQLITE_MIGRATION_RENAMES,
+  POSTGRES_MIGRATION_RENAMES,
   type Migration,
   type MigrationStatus,
 } from "./db/index.js";

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AuditEvent } from "../types.js";
+import { getAuthExpiredMessages } from "./auth-error-messages.js";
 
 function base(
   partial: Partial<AuditEvent> & Pick<AuditEvent, "eventType" | "actor" | "actorType">,
@@ -625,10 +626,14 @@ export function reviewModelLowOutputRatioEvent(args: {
 }
 
 /**
- * BEC-207: emitted by AuthMonitor when `claude auth status` reports the
- * session has expired. Operational signal — the operator must run `claude
- * login` or configure CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY before
- * new pipeline runs will succeed.
+ * BEC-207 / BEC-237: emitted by AuthMonitor when a Claude auth probe fails.
+ * Covers both the mounted-session path (`claude login`) and the OAuth-token
+ * path (`CLAUDE_CODE_OAUTH_TOKEN`). Operational signal — the operator must
+ * take action before new pipeline runs will succeed.
+ *
+ * `authMethod` distinguishes the two paths so the operator knows whether to
+ * run `claude setup-token` (OAuth token expired/revoked) or `claude login`
+ * (mounted session expired).
  *
  * NOTE: this event is written via `logAuditEventUnchecked` (the bypass call
  * site list in CLAUDE.md), because session expiry is a base-tier operational
@@ -636,14 +641,17 @@ export function reviewModelLowOutputRatioEvent(args: {
  */
 export function claudeAuthExpiredEvent(args: {
   detectedAt: Date;
+  authMethod: "oauth-token" | "mounted-session";
 }): AuditEvent {
+  const { hint } = getAuthExpiredMessages(args.authMethod);
   return base({
     eventType: "claude.auth_expired",
     actor: "system",
     actorType: "system",
     payload: {
       detectedAt: args.detectedAt.toISOString(),
-      hint: "Run `claude login` in the container, or switch to CLAUDE_CODE_OAUTH_TOKEN (see deploy/CLAUDE_AUTH.md)",
+      authMethod: args.authMethod,
+      hint,
     },
   });
 }
@@ -764,6 +772,71 @@ export function pmEscalatedToNeedsDesignEvent(args: {
       errorMessage: args.errorMessage
         ? args.errorMessage.slice(0, 500)
         : null,
+    },
+  });
+}
+
+/** BEC-236 — PM tick selected this issue for a half-open circuit-breaker
+ * probe. The breaker is currently engaged (≥ maxConsecutiveFailures), but
+ * the cooldown window has elapsed and the per-tick probe cap allows it
+ * through. */
+export function pmCircuitBreakerProbeEvent(args: {
+  issueId: string;
+  consecutiveFailures: number;
+  /**
+   * Minutes since this issue's previous probe. `-1` when there is no
+   * previous probe (= this is the first probe for the issue). NOT the age
+   * since the last failure — that would require a separate per-issue
+   * query and wasn't worth the N+1.
+   */
+  lastProbeAgeMin: number;
+  probeAttempts: number;
+}): AuditEvent {
+  return base({
+    eventType: "pm.circuit_breaker_probe",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    issueId: args.issueId,
+    payload: {
+      consecutiveFailures: args.consecutiveFailures,
+      lastProbeAgeMin: args.lastProbeAgeMin,
+      probeAttempts: args.probeAttempts,
+    },
+  });
+}
+
+/** BEC-236 — A probe run reached terminal `completed` status, so the
+ * circuit_breaker_state row was deleted and the Tier-5-added `needs-design`
+ * label was removed. */
+export function pmCircuitBreakerRecoveredEvent(args: {
+  issueId: string;
+  probeAttempts: number;
+}): AuditEvent {
+  return base({
+    eventType: "pm.circuit_breaker_recovered",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    issueId: args.issueId,
+    payload: {
+      probeAttempts: args.probeAttempts,
+    },
+  });
+}
+
+/** BEC-236 — `ura circuit reset` cleared the breaker for an issue. */
+export function pmCircuitBreakerResetManualEvent(args: {
+  issueId: string;
+  scope: "single" | "bulk";
+  failedRunsDeleted: number;
+}): AuditEvent {
+  return base({
+    eventType: "pm.circuit_breaker_reset_manual",
+    actor: "ura-cli",
+    actorType: "cli",
+    issueId: args.issueId,
+    payload: {
+      scope: args.scope,
+      failedRunsDeleted: args.failedRunsDeleted,
     },
   });
 }
@@ -918,6 +991,136 @@ export function pipelineSpecVsImplFailedEvent(args: {
       findings: args.findings.slice(0, 20),
       truncated: args.findings.length > 20,
       count: args.findings.length,
+    },
+  });
+}
+
+/**
+ * BEC-227 — a fresh per-run Agent SDK session was created on the first
+ * resumable stage. The `sessionId` is the UUID the SDK generates on the
+ * first `query()` call; downstream stages reuse it via `resume:`.
+ */
+export function agentSessionCreatedEvent(args: {
+  runId: string;
+  issueId: string;
+  sessionId: string;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.agent_session_created",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      runId: args.runId,
+      issueId: args.issueId,
+      sessionId: args.sessionId,
+    },
+  });
+}
+
+/**
+ * BEC-227 — a downstream stage resumed the per-run SDK session. Payload
+ * carries the stage name and the prior message count read from the
+ * session JSONL transcript so operators can see how much context was
+ * inherited from earlier stages.
+ */
+export function agentSessionResumedEvent(args: {
+  runId: string;
+  issueId: string;
+  sessionId: string;
+  stage: string;
+  priorMessageCount: number;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.agent_session_resumed",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      runId: args.runId,
+      issueId: args.issueId,
+      sessionId: args.sessionId,
+      stage: args.stage,
+      priorMessageCount: args.priorMessageCount,
+    },
+  });
+}
+
+/**
+ * BEC-227 Phase 4 / Track B. The review-fix loop's branch decision — was
+ * the surgical path taken (resume + findings + decisions prompt) or the
+ * legacy path (full implement-template re-run)? Always emitted, even on
+ * the legacy path, so operators can audit fallback rates.
+ */
+export function surgicalReviewFixEvent(args: {
+  runId: string;
+  issueId: string;
+  path: "surgical" | "legacy";
+  findingsCount: number;
+  decisionPayloadBytes: number;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.surgical_review_fix",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      runId: args.runId,
+      issueId: args.issueId,
+      path: args.path,
+      findingsCount: args.findingsCount,
+      decisionPayloadBytes: args.decisionPayloadBytes,
+    },
+  });
+}
+
+/**
+ * BEC-227 — a stage attempted to resume the per-run session but the
+ * underlying JSONL was missing, unreadable, or the SDK rejected the resume.
+ * The runner fell back to a fresh session for this stage. `reason` captures
+ * the failure mode so operators can spot tmpfs-loss / parse-error patterns.
+ */
+export function agentSessionMissingFallbackEvent(args: {
+  runId: string;
+  issueId: string;
+  sessionId: string;
+  reason: "jsonl-not-found" | "jsonl-parse-error" | "sdk-resume-error";
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.agent_session_missing_fallback",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      runId: args.runId,
+      issueId: args.issueId,
+      sessionId: args.sessionId,
+      reason: args.reason,
+    },
+  });
+}
+
+/**
+ * BEC-227 — emitted at boot when the session-volume check finds
+ * `~/.claude/projects` on tmpfs, missing, or unwritable. Session JSONLs
+ * won't survive container restarts in any of these cases, so the operator
+ * must remount before resume becomes reliable.
+ */
+export function systemSessionVolumeWarningEvent(args: {
+  projectsDir: string;
+  reason: "tmpfs" | "write-test-failed" | "not-found";
+}): AuditEvent {
+  return base({
+    eventType: "system.session_volume_warning",
+    actor: "system",
+    actorType: "system",
+    payload: {
+      projectsDir: args.projectsDir,
+      reason: args.reason,
     },
   });
 }

@@ -453,5 +453,37 @@ describe("startTodoIssues", () => {
       expect(results[0].started).toBe(true);
       expect(getFailureCount).not.toHaveBeenCalled();
     });
+
+    it("bypasses the breaker skip for issues in probeOverrideIds (BEC-236)", async () => {
+      // Same setup as the "skips Todo issue" breaker test but with probeOverrideIds
+      // containing the issue identifier — the circuit-broken issue should be started.
+      const labelsSpy = vi.fn().mockResolvedValue({ nodes: [{ name: "auto-implement" }] });
+      const issue = {
+        ...makeIssue({ identifier: "BEC-161-T1" }),
+        labels: labelsSpy,
+      };
+      const runner = { start: vi.fn().mockResolvedValue(undefined) };
+      const input: StartTodoInput = {
+        linearClient: mockLinearClient([issue]),
+        db: mockDb([]),
+        teamIds: ["team-1"],
+        runner: runner as any,
+        pipelineConfigs,
+        repoConfigs,
+        maxPerTick: 5,
+        maxConsecutiveFailures: 3,
+        getFailureCount: vi.fn().mockResolvedValue(3),
+        probeOverrideIds: new Set(["BEC-161-T1"]),
+      };
+
+      const results = await startTodoIssues(input);
+
+      // The issue is circuit-broken (3 >= 3) but in probeOverrideIds, so it
+      // should be started rather than skipped.
+      expect(results).toHaveLength(1);
+      expect(results[0].started).toBe(true);
+      expect(results[0].identifier).toBe("BEC-161-T1");
+      expect(runner.start).toHaveBeenCalledOnce();
+    });
   });
 });

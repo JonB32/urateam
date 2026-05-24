@@ -175,8 +175,11 @@ describe("Tier 5 — escalation fires when circuit breaker trips on a non-escala
     });
 
     const commentBody = linearClient.createComment.mock.calls[0]![0].body;
-    // Body contains the truncated form with a trailing ellipsis.
-    expect(commentBody).toMatch(/x{500}…/);
+    // Body contains the truncated form (499 chars + ellipsis = 500 total) with
+    // a trailing ellipsis. Matches truncateWithEllipsis(text, 500) semantics:
+    // result.length ≤ maxLen.
+    expect(commentBody).toMatch(/x{499}…/);
+    expect(commentBody).not.toMatch(/x{500}x/);
     expect(commentBody).not.toMatch(/x{1000}/);
   });
 });

@@ -35,6 +35,13 @@ export interface StartTodoInput {
    * round-trip for all candidates via the required `db` field).
    */
   getFailureCount?: (issueId: string) => Promise<number>;
+  /**
+   * BEC-236 — issue IDs the half-open probe selected this tick. Issues in
+   * this Set bypass the consecutive-failures circuit-breaker skip, allowing
+   * exactly one probe run per cooldown window. When undefined, breaker
+   * behavior is unchanged from BEC-161/181.
+   */
+  probeOverrideIds?: Set<string>;
 }
 
 export interface StartTodoResult {
@@ -141,7 +148,10 @@ export async function startTodoIssues(
       const failureCount = input.getFailureCount
         ? await input.getFailureCount(issue.identifier)
         : (prefetchedFailureCounts!.get(issue.identifier) ?? 0);
-      if (failureCount >= input.maxConsecutiveFailures) {
+      if (
+        failureCount >= input.maxConsecutiveFailures &&
+        !input.probeOverrideIds?.has(issue.identifier)
+      ) {
         log.warn(
           { identifier: issue.identifier, failureCount, threshold: input.maxConsecutiveFailures },
           "circuit-breaker engaged — skipping start",

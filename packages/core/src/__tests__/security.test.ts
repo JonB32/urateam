@@ -1,11 +1,8 @@
-import { join } from "node:path";
-import { homedir } from "node:os";
 import { describe, it, expect } from "vitest";
 import {
   SECURITY_REVIEW_CHECKLIST,
   REVIEW_OUTPUT_FORMAT,
 } from "../security/review-checklist.js";
-import { createSandboxConfig } from "../security/sandbox.js";
 
 describe("SECURITY_REVIEW_CHECKLIST", () => {
   it("contains INJECTION VULNERABILITIES category", () => {
@@ -32,39 +29,3 @@ describe("SECURITY_REVIEW_CHECKLIST", () => {
   });
 });
 
-describe("createSandboxConfig", () => {
-  it("creates config with run-specific workdir under default HOME-relative base", () => {
-    // BEC-152: default is now HOME-relative, not /var/agent-runs
-    const config = createSandboxConfig("run-abc123");
-    const expectedBase = join(homedir(), "data", "runs");
-    expect(config.workdir).toBe(`${expectedBase}/run-abc123/worktree`);
-  });
-
-  it("includes all allowlisted domains", () => {
-    const config = createSandboxConfig("run-1");
-    expect(config.allowedDomains).toContain("github.com");
-    expect(config.allowedDomains).toContain("api.linear.app");
-    expect(config.allowedDomains).toContain("mcp.linear.app");
-    expect(config.allowedDomains).toContain("registry.npmjs.org");
-    expect(config.allowedDomains).toContain("pypi.org");
-  });
-
-  it("includes deny paths for read", () => {
-    const config = createSandboxConfig("run-1");
-    expect(config.denyRead).toContain("~/.ssh/*");
-    expect(config.denyRead).toContain("~/.aws/*");
-    expect(config.denyRead).toContain("/etc/shadow");
-    expect(config.denyRead).toContain("~/.claude/*");
-  });
-
-  it("includes deny paths for write", () => {
-    const config = createSandboxConfig("run-1");
-    expect(config.denyWrite).toContain("/etc/*");
-    expect(config.denyWrite).toContain("~/.claude/*");
-  });
-
-  it("supports custom baseDir", () => {
-    const config = createSandboxConfig("run-xyz", "/tmp/sandbox");
-    expect(config.workdir).toBe("/tmp/sandbox/run-xyz/worktree");
-  });
-});

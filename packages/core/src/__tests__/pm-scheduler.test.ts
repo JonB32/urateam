@@ -76,6 +76,7 @@ describe("PmScheduler.tick", () => {
       linearApiKey: "",
       slackBotToken: "",
       actions: mockActions,
+      authMonitor: { tick: async () => {} },
     });
   }
 

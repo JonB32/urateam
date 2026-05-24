@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ReleaseManagerConfigSchema } from "./release-manager/types.js";
 
 // --- Stage Types ---
-export const StageTypeSchema = z.enum([
+const StageTypeSchema = z.enum([
   "triage", "await-approval", "reproduce", "implement", "test", "review",
 ]);
 export type StageType = z.infer<typeof StageTypeSchema>;
@@ -12,10 +12,10 @@ export const AGENT_STAGES: StageType[] = [
 ];
 
 // --- Pipeline Config ---
-export const RetryStrategySchema = z.enum(["fix-and-retry", "escalate", "fail-fast"]);
+const RetryStrategySchema = z.enum(["fix-and-retry", "escalate", "fail-fast"]);
 export type RetryStrategy = z.infer<typeof RetryStrategySchema>;
 
-export const RetryConfigSchema = z.object({
+const RetryConfigSchema = z.object({
   maxAttempts: z.number().int().min(0),
   strategy: RetryStrategySchema,
 });
@@ -143,16 +143,16 @@ export const DEFAULT_TRIGGER_MAP: TriggerMap = {
 // --- Repo Config ---
 // Each setup command is [command, ...args] to avoid shell parsing.
 // Example: ["pnpm", "install", "--frozen-lockfile"]
-export const SetupCommandSchema = z.array(z.string()).min(1);
+const SetupCommandSchema = z.array(z.string()).min(1);
 export type SetupCommand = z.infer<typeof SetupCommandSchema>;
 
-export const McpServerEntrySchema = z.object({
+const McpServerEntrySchema = z.object({
   command: z.string(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
 });
 
-export const PluginEntrySchema = z.object({
+const PluginEntrySchema = z.object({
   type: z.literal("local"),
   path: z.string(),
 });
@@ -171,7 +171,7 @@ export const PluginConfigSchema = z.object({
 });
 export type PluginConfig = z.infer<typeof PluginConfigSchema>;
 
-export const DevcontainerConfigSchema = z.object({
+const DevcontainerConfigSchema = z.object({
   /** Enable devcontainer usage. Default: "auto" (use if .devcontainer exists) */
   mode: z.enum(["auto", "always", "never"]).optional(),
   /** Override path to devcontainer config */
@@ -181,7 +181,7 @@ export const DevcontainerConfigSchema = z.object({
 });
 export type DevcontainerConfig = z.infer<typeof DevcontainerConfigSchema>;
 
-export const GitHubFeedbackConfigSchema = z.object({
+const GitHubFeedbackConfigSchema = z.object({
   /**
    * GitHub logins allowed to trigger feedback runs.
    * If empty/omitted, any reviewer can trigger.
@@ -243,7 +243,7 @@ export const RepoConfigSchema = z.object({
 export type RepoConfig = z.infer<typeof RepoConfigSchema>;
 
 // --- Handoff Artifact ---
-export const TestResultSchema = z.object({
+const TestResultSchema = z.object({
   passed: z.number().int().min(0),
   failed: z.number().int().min(0),
   firstFailure: z.object({
@@ -294,6 +294,31 @@ export const HandoffArtifactSchema = z.object({
 });
 export type HandoffArtifact = z.infer<typeof HandoffArtifactSchema>;
 
+/**
+ * BEC-227 Phase 4 / Track D. The implement agent emits this as a
+ * `<decisions>{ JSON }</decisions>` XML block at the end of its turn.
+ * Used by the review-fix loop's surgical prompt and by future Track F
+ * cross-run inheritance. Every field is optional — malformed or missing
+ * blocks degrade silently to an empty artifact.
+ */
+export const DecisionArtifactSchema = z.object({
+  decisions: z.array(
+    z.object({
+      choice: z.string(),
+      reason: z.string(),
+      alternativesConsidered: z.array(z.string()).default([]),
+    }),
+  ).default([]),
+  leftUnhandled: z.array(
+    z.object({
+      case: z.string(),
+      reason: z.string(),
+    }),
+  ).default([]),
+  keyFiles: z.array(z.string()).default([]),
+});
+export type DecisionArtifact = z.infer<typeof DecisionArtifactSchema>;
+
 // --- Review Feedback Context ---
 export const ReviewCommentSchema = z.object({
   author: z.string(),
@@ -325,7 +350,7 @@ export type ReviewFeedbackContext = z.infer<typeof ReviewFeedbackContextSchema>;
 // "resolve conflicts and continue rebase" prompt instead of the standard
 // "implement issue from scratch" path that confuses the agent into burning
 // all 50 turns without making progress.
-export const MergeConflictContextSchema = z.object({
+const MergeConflictContextSchema = z.object({
   /** The base branch name being rebased onto (e.g. "main"). */
   defaultBranch: z.string(),
 });
@@ -359,15 +384,32 @@ export type StageRunStatus = "running" | "completed" | "failed" | "skipped" | "c
 export type AgentLogType = "tool_call" | "tool_result" | "message" | "error" | "cancelled";
 
 // --- Sanitized Issue ---
-export interface SanitizedIssue {
-  id: string;
-  slug: string;
-  title: string;
-  description: string;
-  acceptanceCriteria: string[];
-  labels: string[];
-  priority: number;
-}
+export const SanitizedIssueSchema = z.object({
+  id: z.string(),
+  slug: z.string(),
+  title: z.string(),
+  description: z.string(),
+  acceptanceCriteria: z.array(z.string()),
+  labels: z.array(z.string()),
+  priority: z.number(),
+});
+export type SanitizedIssue = z.infer<typeof SanitizedIssueSchema>;
+
+// --- Resume Payload ---
+// Snapshot of all context needed to restart a paused or retriable pipeline run.
+// Stored as JSON in pipeline_runs.resume_payload; validated with safeParse on
+// resume so schema mismatches from older DB rows fail gracefully (run → failed).
+// Note: currentStageIndex may be -1 for transient-failure retries (stage 0 failed;
+// slice(-1+1) = slice(0) re-runs the full stage list from the start).
+export const ResumePayloadSchema = z.object({
+  worktreePath: z.string(),
+  currentStageIndex: z.number().int(),
+  handoff: HandoffArtifactSchema.nullable(),
+  pipelineConfig: PipelineConfigSchema,
+  repoConfig: RepoConfigSchema,
+  sanitizedIssue: SanitizedIssueSchema,
+});
+export type ResumePayload = z.infer<typeof ResumePayloadSchema>;
 
 // --- Stage Result ---
 export interface StageResult {
@@ -466,10 +508,11 @@ export interface Notifier {
   /** Called by sendDailyTokenSummary() with aggregated usage for a given date. */
   onDailyTokenSummary?(summary: DailyTokenSummary): Promise<void>;
   /**
-   * BEC-186: called when a PR is merged externally — either by a human via
-   * the GitHub UI or by GitHub's "auto-merge when ready" feature — after
-   * the pipeline has already completed. Implementations should transition
-   * the Linear issue to Done.
+   * BEC-186: called when a GitHub pull_request.closed webhook arrives with
+   * merged=true — either from a human merge via the GitHub UI or from
+   * GitHub's "auto-merge when ready" feature — after the pipeline has already
+   * completed. Transitions the Linear issue to Done and posts a "PR merged"
+   * comment.
    */
   onPRMerged?(run: PipelineRun): Promise<void>;
 }
@@ -551,6 +594,21 @@ export const AuditEventTypeSchema = z.enum([
    *  comment with the last failure's error message, and sending a Slack
    *  alert. Payload includes failureCount and a truncated errorMessage. */
   "pm.escalated_to_needs_design",
+  /** BEC-236 — PM tick selected this issue for a half-open circuit-breaker probe.
+   *  The breaker is currently engaged (≥ maxConsecutiveFailures), but the
+   *  cooldown window has elapsed and the per-tick probe cap allows it through.
+   *  Payload: issueId, consecutiveFailures, lastProbeAgeMin (minutes since the
+   *  previous probe; -1 for the first probe — NOT the age since the last
+   *  failure), probeAttempts. */
+  "pm.circuit_breaker_probe",
+  /** BEC-236 — A probe run reached terminal `completed` status, so the
+   *  circuit_breaker_state row was deleted and the Tier-5-added `needs-design`
+   *  label was removed. Payload: issueId, probeAttempts. */
+  "pm.circuit_breaker_recovered",
+  /** BEC-236 — `ura circuit reset` cleared the breaker for an issue. Payload:
+   *  issueId, scope ("single" | "bulk"), failedRunsDeleted (count of
+   *  pipeline_runs rows the reset deleted). */
+  "pm.circuit_breaker_reset_manual",
   /** `ura service install` succeeded — a launchd plist (macOS) or systemd-user
    *  unit (Linux) was written and the service was started. Operational signal
    *  so operators can audit unattended provisioning. */
@@ -575,6 +633,34 @@ export const AuditEventTypeSchema = z.enum([
    *  hash, so operators can audit which repos came/went without grepping
    *  the daemon log. */
   "config.reloaded",
+  /** BEC-227 — a fresh per-run Agent SDK session was created on the first
+   *  resumable stage. Payload: runId, issueId, sessionId (UUID generated
+   *  by the SDK on the first `query()` call). */
+  "pipeline.agent_session_created",
+  /** BEC-227 — a downstream stage resumed the per-run Agent SDK session via
+   *  `query({ resume: sessionId })`. Payload includes the stage name and
+   *  the prior message count read from the session JSONL transcript so
+   *  operators can see how much context was inherited. */
+  "pipeline.agent_session_resumed",
+  /** BEC-227 — a stage attempted to resume the per-run session but the
+   *  underlying JSONL transcript was missing, unreadable, or the SDK
+   *  rejected the resume. The runner fell back to a fresh session for
+   *  this stage. Payload `reason` carries the failure mode. */
+  "pipeline.agent_session_missing_fallback",
+  /** BEC-227 — at boot, the session-volume check found `~/.claude/projects`
+   *  on tmpfs, missing, or unwritable — meaning session JSONLs won't
+   *  survive container restarts. Payload carries the projectsDir path and
+   *  the failure reason so operators can fix their mount config. */
+  "system.session_volume_warning",
+  /** BEC-227 Phase 4 / Track B — the review-fix loop took the surgical path:
+   *  it resumed the per-run Agent SDK session and prompted the agent with
+   *  just the blocking review findings (plus the previously-persisted
+   *  decision artifact when available), instead of re-running the full
+   *  implement template. Payload: `runId`, `issueId`, `path` ("surgical" |
+   *  "legacy"), `findingsCount`, `decisionPayloadBytes` (0 when no
+   *  artifact was found). The `legacy` path is logged too so operators
+   *  can audit fallback rates. */
+  "pipeline.surgical_review_fix",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 
