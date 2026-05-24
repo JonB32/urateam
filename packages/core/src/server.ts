@@ -13,6 +13,8 @@ import type { GitHubConfig } from "./repo/github.js";
 import type { GitLabConfig } from "./repo/gitlab.js";
 import { isFeatureLicensed, checkLicense } from "./license.js";
 import { createLogger } from "./logger.js";
+import type { SentryIntegrationConfig } from "./integrations/sentry.js";
+import type { CloudWatchIntegrationConfig } from "./integrations/cloudwatch.js";
 
 const log = createLogger({ component: "server" });
 
@@ -55,6 +57,18 @@ export interface ServerConfig {
    * webhook handler so new runs are refused when spend caps are exhausted.
    */
   pmConfig?: PmAgentConfig;
+  /**
+   * When provided, mounts the Sentry webhook handler at POST /webhooks/sentry.
+   * Enables Sentry issue alert → Linear ticket creation with HMAC verification.
+   * See deploy/SENTRY_INTEGRATION_SETUP.md for setup instructions.
+   */
+  sentryIntegration?: SentryIntegrationConfig;
+  /**
+   * When provided, mounts the CloudWatch SNS handler at POST /webhooks/cloudwatch.
+   * Enables CloudWatch alarm → Linear ticket creation via AWS SNS.
+   * See deploy/CLOUDWATCH_INTEGRATION_SETUP.md for setup instructions.
+   */
+  cloudwatchIntegration?: CloudWatchIntegrationConfig;
 }
 
 export async function createApp(config: ServerConfig) {
@@ -152,6 +166,22 @@ export async function createApp(config: ServerConfig) {
       });
       app.route("/", slackRouter);
     }
+  }
+
+  // Sentry webhook handler (optional — for Sentry issue alert → Linear ticket)
+  if (config.sentryIntegration) {
+    const { createSentryWebhookHandler } = await import("./integrations/sentry.js");
+    const sentryApp = createSentryWebhookHandler(config.sentryIntegration);
+    app.route("/", sentryApp);
+    log.info("Sentry integration mounted at POST /webhooks/sentry");
+  }
+
+  // CloudWatch webhook handler (optional — for CloudWatch alarm → Linear ticket via SNS)
+  if (config.cloudwatchIntegration) {
+    const { createCloudWatchWebhookHandler } = await import("./integrations/cloudwatch.js");
+    const cloudwatchApp = createCloudWatchWebhookHandler(config.cloudwatchIntegration);
+    app.route("/", cloudwatchApp);
+    log.info("CloudWatch integration mounted at POST /webhooks/cloudwatch");
   }
 
   // Health check

@@ -101,3 +101,4 @@ export {
 export * from "./release-manager/index.js";
 export * from "./qa/index.js";
 export * from "./sync/index.js";
+export * from "./integrations/index.js";
