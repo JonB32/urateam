@@ -22,6 +22,7 @@ import type { DevcontainerSession } from "../repo/devcontainer.js";
 import { createLogger } from "../logger.js";
 import { consumeAgentStream, StagePreStreamStalledError, type StreamMessage } from "./agent-stream.js";
 import { isClaudeAuthValid, resolveClaudeAuth } from "./auth-check.js";
+import { detectStageHang, HANG_DETECTION_INTERVAL_MS } from "./hang-detection.js";
 import { resolveSessionOpts } from "./session-resolver.js";
 import { persistDecisionArtifact } from "../db/decisions-store.js";
 
@@ -295,14 +296,33 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
     });
     log.info("iterating agent messages");
 
+    // Track last progress timestamp for hang detection (BEC-209).
+    // Updated on every tool message and every onProgress tick so the
+    // HANG_DETECTION_INTERVAL_MS setInterval below has a fresh reference.
+    let lastProgressAt = new Date();
+
+    // BEC-209: start a 5-minute hang-detection interval for the implement stage.
+    // detectStageHang() logs an ERROR when no progress has been observed for
+    // 30+ minutes. This is a LOGGING mechanism only — termination is handled by
+    // the existing StageStalledError / WALL_CLOCK_STAGE_TIMEOUT_MS guards.
+    let hangCheckInterval: ReturnType<typeof setInterval> | undefined;
+    if (stage === "implement") {
+      hangCheckInterval = setInterval(() => {
+        detectStageHang(runId, stage, lastProgressAt);
+      }, HANG_DETECTION_INTERVAL_MS);
+    }
+
     // Batch agent_logs inserts for throughput
     const BATCH_SIZE = 20;
     let logBatch: Array<{ id: string; stageRunId: string; type: string; content: string }> = [];
 
     async function flushLogBatch() {
       if (logBatch.length === 0) return;
-      await db.insert(agentLogs).values(logBatch);
+      // Swap the array before inserting so new items pushed during the async
+      // insert are not lost when the original flush completes.
+      const itemsToInsert = logBatch;
       logBatch = [];
+      await db.insert(agentLogs).values(itemsToInsert);
     }
 
     // BEC-183: capture the iterator that consumeAgentStream will create so we
@@ -333,9 +353,18 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
     const result = await Promise.race([
       consumeAgentStream(messagesWithCapture, {
         onProgress: (stats) => {
+          // BEC-209: update progress timestamp for hang detection, then
+          // write to DB (fire-and-forget, rate-limited by progressIntervalMs).
+          lastProgressAt = new Date();
+          db.update(stageRuns)
+            .set({ lastProgressAt })
+            .where(eq(stageRuns.id, stageRunId))
+            .catch((err: unknown) => log.warn({ err }, "lastProgressAt DB update failed"));
           log.info(stats, "stage still in progress");
         },
         onToolMessage: (msg: StreamMessage) => {
+          // BEC-209: any tool message counts as progress.
+          lastProgressAt = new Date();
           logBatch.push({
             id: nanoid(),
             stageRunId: stageRunId,
@@ -363,6 +392,8 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       // or throws any other error — prevents the timer from dangling after the
       // stage exits the happy path.
       if (stageTimeoutTimer) clearTimeout(stageTimeoutTimer);
+      // BEC-209: clear hang-detection interval for implement stage.
+      if (hangCheckInterval) clearInterval(hangCheckInterval);
     });
 
     // Flush remaining log entries
