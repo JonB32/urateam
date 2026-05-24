@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createDb } from "../db/client.js";
 import { pipelineRuns, stageRuns } from "../db/schema.js";
-import { eq, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 
 describe("BEC-250: orphan stage_runs repro", () => {
@@ -27,7 +27,7 @@ describe("BEC-250: orphan stage_runs repro", () => {
    * Seed helpers — insert minimal valid rows into pipeline_runs and stage_runs.
    */
   async function seedRunningPipelineRun(id: string) {
-    await db.insert(pipelineRuns).values({
+    await (db as any).insert(pipelineRuns).values({
       id,
       issueId: `issue-${id}`,
       issueTitle: "Test issue",
@@ -38,7 +38,7 @@ describe("BEC-250: orphan stage_runs repro", () => {
   }
 
   async function seedRunningStageRun(id: string, pipelineRunId: string, stage = "implement") {
-    await db.insert(stageRuns).values({
+    await (db as any).insert(stageRuns).values({
       id,
       pipelineRunId,
       stage,
@@ -61,11 +61,11 @@ describe("BEC-250: orphan stage_runs repro", () => {
       .where(eq(pipelineRuns.id, runId));
 
     // Parent is now terminal
-    const [parent] = await db.select().from(pipelineRuns).where(eq(pipelineRuns.id, runId));
+    const [parent] = await (db as any).select().from(pipelineRuns).where(eq(pipelineRuns.id, runId));
     expect(parent.status).toBe("failed");
 
     // BUG: child stage_run is still 'running' even though parent is 'failed'
-    const [child] = await db.select().from(stageRuns).where(eq(stageRuns.id, stageRunId));
+    const [child] = await (db as any).select().from(stageRuns).where(eq(stageRuns.id, stageRunId));
     expect(child.status).toBe("running"); // <-- this is the orphan
   });
 
@@ -83,11 +83,11 @@ describe("BEC-250: orphan stage_runs repro", () => {
       .set({ status: "cancelled", completedAt: new Date(), errorMessage: "cancelled by operator (cancel)" })
       .where(eq(pipelineRuns.id, runId));
 
-    const [parent] = await db.select().from(pipelineRuns).where(eq(pipelineRuns.id, runId));
+    const [parent] = await (db as any).select().from(pipelineRuns).where(eq(pipelineRuns.id, runId));
     expect(parent.status).toBe("cancelled");
 
     // BUG: child still running
-    const [child] = await db.select().from(stageRuns).where(eq(stageRuns.id, stageRunId));
+    const [child] = await (db as any).select().from(stageRuns).where(eq(stageRuns.id, stageRunId));
     expect(child.status).toBe("running"); // <-- orphan
   });
 
@@ -104,11 +104,11 @@ describe("BEC-250: orphan stage_runs repro", () => {
       .set({ status: "failed", errorMessage: "Pipeline interrupted by server restart" })
       .where(eq(pipelineRuns.id, runId));
 
-    const [parent] = await db.select().from(pipelineRuns).where(eq(pipelineRuns.id, runId));
+    const [parent] = await (db as any).select().from(pipelineRuns).where(eq(pipelineRuns.id, runId));
     expect(parent.status).toBe("failed");
 
     // BUG: child still running
-    const [child] = await db.select().from(stageRuns).where(eq(stageRuns.id, stageRunId));
+    const [child] = await (db as any).select().from(stageRuns).where(eq(stageRuns.id, stageRunId));
     expect(child.status).toBe("running"); // <-- orphan
   });
 
@@ -127,7 +127,7 @@ describe("BEC-250: orphan stage_runs repro", () => {
 
     // A dashboard or quality-observer query asking "which stages are running?"
     // will return this orphan row, producing a permanent false positive.
-    const runningStages = await db
+    const runningStages = await (db as any)
       .select()
       .from(stageRuns)
       .where(eq(stageRuns.status, "running"));

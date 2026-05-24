@@ -15,6 +15,7 @@ import { startTodoIssues, type StartTodoInput, type StartTodoResult } from "./ac
 import { getCircuitBreakerProbeConfig } from "./actions/circuit-breaker-config.js";
 import { selectProbeCandidates } from "./actions/select-probe-candidates.js";
 import { sweepRecoveredCircuitBreakers } from "./actions/sweep-recovered-circuit-breakers.js";
+import { sweepOrphanStageRuns } from "./actions/sweep-orphan-stage-runs.js";
 import { getActiveFileMaps, predictConflict, type ActiveRun } from "./conflict.js";
 import { fetchCircuitBrokenIssues, ACTIVE_STATUSES } from "./actions/db-queries.js";
 import { PmSlackNotifier } from "./slack.js";
@@ -334,6 +335,18 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
             }
           } catch (err) {
             captureTickError(tick, "recoverStuck", err, "stuck issue recovery sweep failed");
+          }
+        }
+
+        // BEC-250 — orphan stage_runs sweep: cancel stage_runs whose parent is
+        // terminal and delete any whose parent is missing. Runs every tick;
+        // idempotent and fail-open. Guarded by !actions so tests that inject
+        // mock actions with db:{} don't hit a real DB call.
+        if (!actions) {
+          try {
+            await sweepOrphanStageRuns(db);
+          } catch (err) {
+            log.warn({ err }, "orphan stage_runs sweep failed");
           }
         }
 

@@ -609,6 +609,7 @@ export class PipelineRunner {
       .update(pipelineRuns)
       .set({ status: "aborted", completedAt: new Date() })
       .where(eq(pipelineRuns.id, runId));
+    await this.cancelRunningStageRuns(db, runId);
     this.activeRuns.delete(issueId);
   }
 
@@ -701,10 +702,28 @@ export class PipelineRunner {
         completedAt: new Date(),
       })
       .where(eq(pipelineRuns.id, runId));
+    await this.cancelRunningStageRuns(db, runId);
     run.status = "cancelled";
     this.activeRuns.delete(run.issueId);
     if (feedbackPrUrl) this.activeFeedbackRuns.delete(feedbackPrUrl);
     clearStopSignal(runId);
+  }
+
+  /**
+   * BEC-250 — Cancel any stage_runs still in status='running' for the given
+   * pipeline run. Called from every terminal-state transition so that orphaned
+   * in-flight stage rows don't accumulate as permanent false positives in
+   * dashboard / quality-observer queries.
+   *
+   * Idempotent: rows already in a terminal state are unaffected by the WHERE
+   * clause. The PM sweep (sweepOrphanStageRuns) handles any that slip through
+   * (e.g. process crash between the pipeline_run update and this call).
+   */
+  private async cancelRunningStageRuns(db: AnyDb, runId: string): Promise<void> {
+    await (db as any)
+      .update(stageRuns)
+      .set({ status: "cancelled", completedAt: new Date() })
+      .where(and(eq(stageRuns.pipelineRunId, runId), eq(stageRuns.status, "running")));
   }
 
   isActive(issueId: string): boolean {
@@ -3001,6 +3020,7 @@ export class PipelineRunner {
           autoCommitted: run.autoCommitted ?? null,
         })
         .where(eq(pipelineRuns.id, runId));
+      await this.cancelRunningStageRuns(db, runId);
       run.status = "completed";
 
       const totalStageRetries = run.stageRetries
@@ -3346,6 +3366,7 @@ export class PipelineRunner {
         errorMessage: errorMsg,
       })
       .where(eq(pipelineRuns.id, runId));
+    await this.cancelRunningStageRuns(db, runId);
     run.status = "failed";
     await this.notifier.onPipelineFailed(run, {
       stage,
@@ -3476,7 +3497,7 @@ export class PipelineRunner {
               errorMessage: errorMsg,
             })
             .where(eq(pipelineRuns.id, run.id));
-
+          await this.cancelRunningStageRuns(db, run.id);
           await removeActiveWork(db, run.id);
         }),
     );
