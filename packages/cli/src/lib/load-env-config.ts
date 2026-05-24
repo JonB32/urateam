@@ -21,7 +21,9 @@
  * Future maintainers may switch to Zod if they add it as a direct dep.
  */
 
-import { parseIntOr, parsePosIntOr, parseFloatOr, parseOptPosInt } from "@urateam/core";
+import { parseIntOr, parsePosIntOr, parseFloatOr, parseOptPosInt, createLogger } from "@urateam/core";
+
+const log = createLogger({ component: "env-validation" });
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -293,7 +295,8 @@ export function loadEnvConfig(
 
   // ── Report all errors at once ─────────────────────────────────────────────
   if (errors.length > 0) {
-    console.error(
+    log.error(
+      { errors },
       `\nBoot-time environment validation failed (${errors.length} error${errors.length === 1 ? "" : "s"}):\n` +
         errors.map((e) => `  • ${e}`).join("\n") +
         "\n\nCheck deploy/ENV_VARS.md for documentation on all supported variables.\n",

@@ -1,4 +1,24 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
+// Hoist the mock spy so it exists before vi.mock factory runs.
+const { mockLogError } = vi.hoisted(() => ({ mockLogError: vi.fn() }));
+
+// Mock @urateam/core, preserving real exports but overriding createLogger so
+// load-env-config.ts uses our spy instead of writing to the pino stream.
+vi.mock("@urateam/core", async () => {
+  const actual = await vi.importActual<typeof import("@urateam/core")>("@urateam/core");
+  return {
+    ...actual,
+    createLogger: () => ({
+      error: mockLogError,
+      warn: vi.fn(),
+      info: vi.fn(),
+      debug: vi.fn(),
+      trace: vi.fn(),
+    }),
+  };
+});
+
 import { loadEnvConfig } from "../lib/load-env-config.js";
 
 const MINIMAL_START_ENV: NodeJS.ProcessEnv = {
@@ -9,24 +29,28 @@ const MINIMAL_START_ENV: NodeJS.ProcessEnv = {
   REPO_URL: "https://github.com/org/repo",
 };
 
+/** Extract the message string from the structured log.error call: log.error(data, msg) */
+function getLoggedErrorMsg(): string {
+  // mockLogError is called as: log.error({ errors }, formattedMessage)
+  // arg[1] is the human-readable message string containing the bullet list.
+  return (mockLogError.mock.calls[0]?.[1] as string) ?? "";
+}
+
 describe("loadEnvConfig", { timeout: 10_000 }, () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let exitSpy: any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let errorSpy: any;
 
   beforeEach(() => {
+    mockLogError.mockClear();
     exitSpy = vi
       .spyOn(process, "exit")
       .mockImplementation(((_code?: number) => {
         throw new Error("__EXIT__");
       }) as never);
-    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
   afterEach(() => {
     exitSpy.mockRestore();
-    errorSpy.mockRestore();
   });
 
   // ── "start" mode ────────────────────────────────────────────────────────
@@ -49,7 +73,7 @@ describe("loadEnvConfig", { timeout: 10_000 }, () => {
     delete env.LINEAR_WEBHOOK_SECRET;
     expect(() => loadEnvConfig("start", env)).toThrow("__EXIT__");
     expect(exitSpy).toHaveBeenCalledWith(1);
-    const msg = errorSpy.mock.calls[0]!.join(" ");
+    const msg = getLoggedErrorMsg();
     expect(msg).toContain("LINEAR_WEBHOOK_SECRET");
   });
 
@@ -57,7 +81,7 @@ describe("loadEnvConfig", { timeout: 10_000 }, () => {
     const env = { ...MINIMAL_START_ENV };
     delete env.DASHBOARD_USER;
     expect(() => loadEnvConfig("start", env)).toThrow("__EXIT__");
-    const msg = errorSpy.mock.calls[0]!.join(" ");
+    const msg = getLoggedErrorMsg();
     expect(msg).toContain("DASHBOARD_USER");
   });
 
@@ -68,7 +92,7 @@ describe("loadEnvConfig", { timeout: 10_000 }, () => {
         REPO_URL: "https://github.com/o/r",
       }),
     ).toThrow("__EXIT__");
-    const msg = errorSpy.mock.calls[0]!.join(" ");
+    const msg = getLoggedErrorMsg();
     expect(msg).toContain("LINEAR_WEBHOOK_SECRET");
     expect(msg).toContain("DASHBOARD_USER");
     expect(msg).toContain("DASHBOARD_PASSWORD");
@@ -190,7 +214,7 @@ describe("loadEnvConfig", { timeout: 10_000 }, () => {
         PM_AGENT_TEAM_IDS: "team-a",
       }),
     ).toThrow("__EXIT__");
-    const msg = errorSpy.mock.calls[0]!.join(" ");
+    const msg = getLoggedErrorMsg();
     expect(msg).toContain("SLACK_BOT_TOKEN");
     expect(msg).toContain("PM_AGENT_ENABLED=true");
   });
@@ -205,7 +229,7 @@ describe("loadEnvConfig", { timeout: 10_000 }, () => {
         PM_AGENT_TEAM_IDS: "team-a",
       }),
     ).toThrow("__EXIT__");
-    const msg = errorSpy.mock.calls[0]!.join(" ");
+    const msg = getLoggedErrorMsg();
     expect(msg).toContain("PM_AGENT_DAILY_TOKEN_BUDGET");
   });
 
@@ -218,7 +242,7 @@ describe("loadEnvConfig", { timeout: 10_000 }, () => {
         RELEASE_MANAGER_ENABLED: "true",
       }),
     ).toThrow("__EXIT__");
-    const msg = errorSpy.mock.calls[0]!.join(" ");
+    const msg = getLoggedErrorMsg();
     expect(msg).toContain("GITHUB_APP_ID");
     expect(msg).toContain("GITHUB_PRIVATE_KEY_PATH");
   });
@@ -261,7 +285,7 @@ describe("loadEnvConfig", { timeout: 10_000 }, () => {
         REVIEW_MODELS: "openai/gpt-4o",
       }),
     ).toThrow("__EXIT__");
-    const msg = errorSpy.mock.calls[0]!.join(" ");
+    const msg = getLoggedErrorMsg();
     expect(msg).toContain("OPENROUTER_API_KEY");
     expect(msg).toContain("REVIEW_MODELS");
   });
@@ -274,7 +298,7 @@ describe("loadEnvConfig", { timeout: 10_000 }, () => {
         OPENROUTER_API_KEY: "sk-or-test",
       }),
     ).toThrow("__EXIT__");
-    const msg = errorSpy.mock.calls[0]!.join(" ");
+    const msg = getLoggedErrorMsg();
     expect(msg).toContain("REVIEW_MODELS");
     expect(msg).toContain("OPENROUTER_API_KEY");
   });

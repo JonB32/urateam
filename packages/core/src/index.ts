@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-export { parseIntOr, parsePosIntOr, parseFloatOr, parseOptPosInt } from "./util/env.js";
+export { parseIntOr, parsePosIntOr, parseFloatOr, parseOptPosInt, parseCsv } from "./util/env.js";
 export * from "./types.js";
 export {
   checkLicense,

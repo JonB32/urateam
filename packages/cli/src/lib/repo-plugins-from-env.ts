@@ -1,4 +1,5 @@
 import type { PluginConfig } from "@urateam/core";
+import { parseCsv } from "@urateam/core";
 
 /**
  * Build a PluginConfig from env vars, or return undefined if no relevant
@@ -26,9 +27,6 @@ import type { PluginConfig } from "@urateam/core";
  * Returns `undefined` when none of the above are set, so the resulting
  * RepoConfig stays free of an empty `plugins` field.
  */
-function parseCsv(raw: string): string[] {
-  return raw.split(",").map((s) => s.trim()).filter(Boolean);
-}
 
 export function repoPluginsFromEnv(env: NodeJS.ProcessEnv = process.env): PluginConfig | undefined {
   const excludePluginsRaw = env.REPO_EXCLUDE_PLUGINS;

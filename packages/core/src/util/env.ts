@@ -30,3 +30,8 @@ export function parseOptPosInt(raw: string | undefined): number | undefined {
   const n = parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
+
+/** Split a comma-separated string, trimming whitespace and dropping empty entries. */
+export function parseCsv(raw: string): string[] {
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
