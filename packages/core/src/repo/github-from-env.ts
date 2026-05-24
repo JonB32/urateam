@@ -13,6 +13,7 @@
  */
 import { readFileSync } from "node:fs";
 import type { GitHubConfig } from "./github.js";
+import { parseOptPosInt } from "../util/env.js";
 
 /**
  * Build an optional `GitHubConfig` from standard env vars.
@@ -25,8 +26,6 @@ export function buildGitHubConfigFromEnv(): GitHubConfig | undefined {
   return {
     appId: process.env.GITHUB_APP_ID,
     privateKey: readFileSync(process.env.GITHUB_PRIVATE_KEY_PATH, "utf-8"),
-    installationId: process.env.GITHUB_INSTALLATION_ID
-      ? parseInt(process.env.GITHUB_INSTALLATION_ID, 10)
-      : undefined,
+    installationId: parseOptPosInt(process.env.GITHUB_INSTALLATION_ID),
   };
 }

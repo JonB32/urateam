@@ -3,6 +3,7 @@ import type { AnyDb } from "../../db/client.js";
 import { AgenticDeepReviewProvider } from "./agentic-deep-review.js";
 import { OpenRouterFanoutProvider } from "./openrouter-fanout.js";
 import { createLogger } from "../../logger.js";
+import { parsePosIntOr, parseOptPosInt } from "../../util/env.js";
 
 const log = createLogger({ component: "review.provider" });
 
@@ -208,21 +209,11 @@ function levenshtein(a: string, b: string): number {
   return dp[n];
 }
 
+/** @deprecated Use parsePosIntOr from util/env.ts instead */
 function parseIntOr(raw: string | undefined, fallback: number): number {
-  if (!raw) return fallback;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
+  return parsePosIntOr(raw, fallback);
 }
 
 function parsePositiveIntOrUndefined(raw: string | undefined): number | undefined {
-  if (!raw) return undefined;
-  const n = parseInt(raw, 10);
-  if (!Number.isFinite(n) || n <= 0) {
-    log.warn(
-      { var: "REVIEW_MODELS_MAX_OUTPUT_TOKENS", value: raw },
-      "REVIEW_MODELS_MAX_OUTPUT_TOKENS is not a positive integer — treating as unset (model provider default applies)",
-    );
-    return undefined;
-  }
-  return n;
+  return parseOptPosInt(raw);
 }

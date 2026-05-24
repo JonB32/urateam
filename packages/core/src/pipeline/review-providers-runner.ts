@@ -10,19 +10,9 @@ import { createLogger } from "../logger.js";
 import { logAuditEventUnchecked } from "../audit/writer.js";
 import { reviewModelLowOutputRatioEvent } from "../audit/events.js";
 import { getModelHealthScores, flagLowYieldModels } from "../executor/review/model-health.js";
+import { parseIntOr, parseFloatOr } from "../util/env.js";
 
 const log = createLogger({ component: "ReviewProvidersRunner" });
-
-function parseFloatOr(envValue: string | undefined, fallback: number): number {
-  if (!envValue) return fallback;
-  const n = parseFloat(envValue);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-}
-function parseIntOr(envValue: string | undefined, fallback: number): number {
-  if (!envValue) return fallback;
-  const n = parseInt(envValue, 10);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-}
 
 export interface RunReviewProvidersOpts {
   env: NodeJS.ProcessEnv;
