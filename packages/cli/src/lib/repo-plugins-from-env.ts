@@ -30,10 +30,10 @@ function parseCsv(raw: string): string[] {
   return raw.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
-export function repoPluginsFromEnv(): PluginConfig | undefined {
-  const excludePluginsRaw = process.env.REPO_EXCLUDE_PLUGINS;
-  const excludeMcpRaw = process.env.REPO_EXCLUDE_MCP_SERVERS;
-  const autoDetectDisabled = process.env.REPO_DISABLE_PLUGIN_AUTODETECT === "true";
+export function repoPluginsFromEnv(env: NodeJS.ProcessEnv = process.env): PluginConfig | undefined {
+  const excludePluginsRaw = env.REPO_EXCLUDE_PLUGINS;
+  const excludeMcpRaw = env.REPO_EXCLUDE_MCP_SERVERS;
+  const autoDetectDisabled = env.REPO_DISABLE_PLUGIN_AUTODETECT === "true";
 
   if (!excludePluginsRaw && !excludeMcpRaw && !autoDetectDisabled) {
     return undefined;

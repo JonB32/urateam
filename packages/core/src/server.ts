@@ -35,6 +35,8 @@ export interface PmSlackInterfaceConfig {
   channelId: string;
   /** Team IDs for issue creation commands */
   teamIds?: string[];
+  /** BEC-135: optional handler for /release subcommands (Release Manager integration). */
+  releaseHandler?: (params: { text: string; userId: string }) => Promise<{ text: string; responseType: "ephemeral" | "in_channel" }>;
 }
 
 export interface ServerConfig {
@@ -223,6 +225,7 @@ export async function createApp(config: ServerConfig) {
           haltAll: runner.haltAll.bind(runner),
         },
         db: db as any,
+        releaseHandler: config.pmSlack.releaseHandler,
       });
       app.route("/", slackRouter);
     }

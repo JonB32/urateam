@@ -25,7 +25,8 @@ export const devCommand = new Command("dev")
         : undefined;
 
     // Build repoConfigs from env: REPO_TEAM_ID, REPO_URL, REPO_DEFAULT_BRANCH, etc.
-    const repoConfigs = buildRepoConfigsFromEnv();
+    // Pass process.env explicitly — loadEnvConfig() has already validated all vars.
+    const repoConfigs = buildRepoConfigsFromEnv(process.env);
 
     // Fail fast if no repoConfigs could be built. Without this, `ura dev`
     // looks healthy in logs (webhook server up, dashboard up) but every
@@ -62,7 +63,7 @@ export const devCommand = new Command("dev")
     };
 
     // Validate SSO env vars before opening DB so misconfig fails fast.
-    const ssoBootstrap = await bootstrapSsoFromEnv();
+    const ssoBootstrap = await bootstrapSsoFromEnv(process.env);
 
     const { app, db } = await createApp(config);
 

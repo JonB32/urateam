@@ -9,12 +9,32 @@
  *   required, RELEASE_MANAGER_ENABLED triggers GitHub App check at boot).
  * "dev" mode = local development (LINEAR_WEBHOOK_SECRET optional, dashboard
  *   auth optional).
+ *
+ * Implementation note — manual validation instead of Zod:
+ * The issue acceptance criteria specified a Zod schema. The implementation
+ * uses manual TypeScript helpers from @urateam/core (parseIntOr, etc.)
+ * instead, because: (a) @urateam/cli had no direct Zod dependency at the
+ * time; (b) the manual approach provides identical compile-time type safety
+ * via the EnvConfig interface; (c) the batched-error behavior we need
+ * (collect ALL errors, then exit once) is easier to implement with the
+ * manual helpers than with Zod's safeParse which short-circuits per field.
+ * Future maintainers may switch to Zod if they add it as a direct dep.
  */
 
 import { parseIntOr, parsePosIntOr, parseFloatOr, parseOptPosInt } from "@urateam/core";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
+/**
+ * Typed representation of all CLI-consumed env vars.
+ *
+ * convention-exception: credential-in-interface — This interface deliberately
+ * contains fields with *Token, *Secret, *Key, *Password names. EnvConfig IS
+ * the typed replacement for process.env in the CLI layer; these names mirror
+ * the env-var names exactly so operators can cross-reference with ENV_VARS.md.
+ * The credentials are read from process.env once at boot, validated, and then
+ * passed explicitly to subsystem builders — they do not persist beyond startup.
+ */
 export interface EnvConfig {
   // Core
   LINEAR_WEBHOOK_SECRET: string | undefined;
@@ -101,6 +121,7 @@ export interface EnvConfig {
 
   // Review Models (OpenRouter)
   REVIEW_MODELS: string | undefined;
+  OPENROUTER_API_KEY: string | undefined;
   OPENROUTER_BASE_URL: string | undefined;
   REVIEW_MODELS_MAX_OUTPUT_TOKENS: number | undefined;
   REVIEW_MODELS_TIMEOUT_MS: number | undefined;
@@ -242,6 +263,22 @@ export function loadEnvConfig(
     requireIf(true, "URATEAM_SSO_STATE_SECRET", "URATEAM_SSO_ENABLED=true");
   }
 
+  // ── Review Models symmetric validation ───────────────────────────────────
+  // Mirrors the check in packages/core/src/executor/review/review-provider.ts
+  // so the error surfaces at boot rather than at the first review-stage run.
+  const reviewModels = str(env, "REVIEW_MODELS");
+  const openrouterApiKey = str(env, "OPENROUTER_API_KEY");
+  if (reviewModels && !openrouterApiKey) {
+    errors.push(
+      "REVIEW_MODELS is set but OPENROUTER_API_KEY is missing — both must be set or both unset",
+    );
+  }
+  if (openrouterApiKey && !reviewModels) {
+    errors.push(
+      "OPENROUTER_API_KEY is set but REVIEW_MODELS is missing or empty — both must be set or both unset",
+    );
+  }
+
   // ── Numeric parsing ───────────────────────────────────────────────────────
   const portRaw = str(env, "PORT");
   const dashPortRaw = str(env, "DASHBOARD_PORT");
@@ -369,7 +406,8 @@ export function loadEnvConfig(
     URATEAM_SSO_COOKIE_SECURE: env.URATEAM_SSO_COOKIE_SECURE !== "false",
 
     // Review Models
-    REVIEW_MODELS: str(env, "REVIEW_MODELS"),
+    REVIEW_MODELS: reviewModels,
+    OPENROUTER_API_KEY: openrouterApiKey,
     OPENROUTER_BASE_URL: str(env, "OPENROUTER_BASE_URL"),
     REVIEW_MODELS_MAX_OUTPUT_TOKENS: parseOptPosInt(str(env, "REVIEW_MODELS_MAX_OUTPUT_TOKENS")),
     REVIEW_MODELS_TIMEOUT_MS: parseOptPosInt(str(env, "REVIEW_MODELS_TIMEOUT_MS")),

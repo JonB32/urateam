@@ -251,6 +251,51 @@ describe("loadEnvConfig", { timeout: 10_000 }, () => {
     expect(cfg.RELEASE_MANAGER_TRIGGER_CI_GREEN_FOR_MINUTES).toBe(10);
   });
 
+  // ── REVIEW_MODELS / OPENROUTER_API_KEY symmetric validation ────────────────
+
+  it("exits when REVIEW_MODELS is set without OPENROUTER_API_KEY", () => {
+    expect(() =>
+      loadEnvConfig("dev", {
+        REPO_TEAM_ID: "t",
+        REPO_URL: "u",
+        REVIEW_MODELS: "openai/gpt-4o",
+      }),
+    ).toThrow("__EXIT__");
+    const msg = errorSpy.mock.calls[0]!.join(" ");
+    expect(msg).toContain("OPENROUTER_API_KEY");
+    expect(msg).toContain("REVIEW_MODELS");
+  });
+
+  it("exits when OPENROUTER_API_KEY is set without REVIEW_MODELS", () => {
+    expect(() =>
+      loadEnvConfig("dev", {
+        REPO_TEAM_ID: "t",
+        REPO_URL: "u",
+        OPENROUTER_API_KEY: "sk-or-test",
+      }),
+    ).toThrow("__EXIT__");
+    const msg = errorSpy.mock.calls[0]!.join(" ");
+    expect(msg).toContain("REVIEW_MODELS");
+    expect(msg).toContain("OPENROUTER_API_KEY");
+  });
+
+  it("accepts REVIEW_MODELS and OPENROUTER_API_KEY when both are set", () => {
+    const cfg = loadEnvConfig("dev", {
+      REPO_TEAM_ID: "t",
+      REPO_URL: "u",
+      REVIEW_MODELS: "openai/gpt-4o",
+      OPENROUTER_API_KEY: "sk-or-test",
+    });
+    expect(cfg.REVIEW_MODELS).toBe("openai/gpt-4o");
+    expect(cfg.OPENROUTER_API_KEY).toBe("sk-or-test");
+  });
+
+  it("accepts neither REVIEW_MODELS nor OPENROUTER_API_KEY when both are unset", () => {
+    const cfg = loadEnvConfig("dev", { REPO_TEAM_ID: "t", REPO_URL: "u" });
+    expect(cfg.REVIEW_MODELS).toBeUndefined();
+    expect(cfg.OPENROUTER_API_KEY).toBeUndefined();
+  });
+
   // ── Dual-defaults removed ────────────────────────────────────────────────
 
   it("EnvConfig is the single source of truth for PM Agent defaults (no ?? fallbacks needed)", () => {

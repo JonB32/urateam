@@ -100,7 +100,8 @@ export const startCommand = new Command("start")
     };
 
     // Build repoConfigs from env: REPO_TEAM_ID, REPO_URL, REPO_DEFAULT_BRANCH, etc.
-    const repoConfigs = buildRepoConfigsFromEnv();
+    // Pass process.env explicitly — loadEnvConfig() has already validated all vars.
+    const repoConfigs = buildRepoConfigsFromEnv(process.env);
 
     // Fail fast if no repoConfigs could be built. Same guard as `ura dev` —
     // without it the webhook server starts looking healthy and silently
@@ -109,18 +110,19 @@ export const startCommand = new Command("start")
 
     // GitHub App config (optional)
     const { buildGitHubConfigFromEnv } = await import("@urateam/core");
-    const github = buildGitHubConfigFromEnv();
+    const github = buildGitHubConfigFromEnv(process.env);
 
     // PM Agent Slack interface (optional — requires signing secret)
     const slackSigningSecret = env.SLACK_SIGNING_SECRET;
-    const pmSlack = (slackSigningSecret && env.SLACK_BOT_TOKEN && env.PM_AGENT_SLACK_CHANNEL_ID)
-      ? {
-          signingSecret: slackSigningSecret,
-          botToken: env.SLACK_BOT_TOKEN,
-          channelId: env.PM_AGENT_SLACK_CHANNEL_ID,
-          teamIds: (env.PM_AGENT_TEAM_IDS ?? "").split(",").filter(Boolean),
-        }
-      : undefined;
+    let pmSlack: import("@urateam/core").PmSlackInterfaceConfig | undefined =
+      (slackSigningSecret && env.SLACK_BOT_TOKEN && env.PM_AGENT_SLACK_CHANNEL_ID)
+        ? {
+            signingSecret: slackSigningSecret,
+            botToken: env.SLACK_BOT_TOKEN,
+            channelId: env.PM_AGENT_SLACK_CHANNEL_ID,
+            teamIds: (env.PM_AGENT_TEAM_IDS ?? "").split(",").filter(Boolean),
+          }
+        : undefined;
 
     // --- PM Agent config (built up-front so createApp can thread it into the webhook) ---
     // The webhook-side budget gate in webhook/handler.ts needs config.pmConfig to
@@ -258,7 +260,7 @@ export const startCommand = new Command("start")
     // --- SSO (Enterprise, opt-in via URATEAM_SSO_ENABLED=true) ---
     // Validate SSO env vars BEFORE opening the DB / starting the runner so a
     // misconfigured deployment fails fast without leaking resources.
-    const ssoBootstrap = await bootstrapSsoFromEnv();
+    const ssoBootstrap = await bootstrapSsoFromEnv(process.env);
 
     // --- Start servers ---
     const { app, runner, db } = await createApp(config);
@@ -580,16 +582,18 @@ export const startCommand = new Command("start")
           ? {
               postMessage: async (channel, text) => {
                 const { postSlackMessage } = await import("@urateam/core");
+                // postSlackMessage returns Promise<any> — no cast needed
                 const r = await postSlackMessage(env.SLACK_BOT_TOKEN!, { channel, text });
-                return r !== null && (r as any).ok !== false;
+                return r !== null && r.ok !== false;
               },
             }
           : undefined,
       });
 
       // Plumb a release-handler closure through pmSlack so /release routes here.
+      // releaseHandler is now a typed optional field on PmSlackInterfaceConfig.
       if (pmSlack) {
-        (pmSlack as any).releaseHandler = async ({ text, userId }: { text: string; userId: string }) => {
+        pmSlack.releaseHandler = async ({ text, userId }) => {
           const cmd = parseReleaseSubcommand(text);
           const pauseDurationHours = rmConfig!.triggers.timeSinceLastHours ?? 24;
           return handleReleaseSubcommand({

@@ -150,6 +150,7 @@ Enables parallel review by multiple models via OpenRouter.
 | Variable | Type | Mode | Default | Description |
 |---|---|---|---|---|
 | `REVIEW_MODELS` | string (csv) | Optional | — | Comma-separated OpenRouter model IDs to use for deep review fanout |
+| `OPENROUTER_API_KEY` | string | Required if `REVIEW_MODELS` | — | OpenRouter API key (`sk-or-…`). Must be set if and only if `REVIEW_MODELS` is set |
 | `OPENROUTER_BASE_URL` | string | Optional | OpenRouter default | OpenRouter API base URL override |
 | `REVIEW_MODELS_MAX_OUTPUT_TOKENS` | integer | Optional | — | Per-model output token cap |
 | `REVIEW_MODELS_TIMEOUT_MS` | integer | Optional | — | Per-model request timeout in milliseconds |

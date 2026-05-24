@@ -18,14 +18,18 @@ import { parseOptPosInt } from "../util/env.js";
 /**
  * Build an optional `GitHubConfig` from standard env vars.
  * Returns `undefined` when `GITHUB_APP_ID` is not set.
+ *
+ * @param env - Environment to read from. Defaults to `process.env`.
+ *   Pass `process.env` explicitly after boot-time validation has run so the
+ *   dependency is visible at the call site.
  */
-export function buildGitHubConfigFromEnv(): GitHubConfig | undefined {
-  if (!process.env.GITHUB_APP_ID || !process.env.GITHUB_PRIVATE_KEY_PATH) {
+export function buildGitHubConfigFromEnv(env: NodeJS.ProcessEnv = process.env): GitHubConfig | undefined {
+  if (!env.GITHUB_APP_ID || !env.GITHUB_PRIVATE_KEY_PATH) {
     return undefined;
   }
   return {
-    appId: process.env.GITHUB_APP_ID,
-    privateKey: readFileSync(process.env.GITHUB_PRIVATE_KEY_PATH, "utf-8"),
-    installationId: parseOptPosInt(process.env.GITHUB_INSTALLATION_ID),
+    appId: env.GITHUB_APP_ID,
+    privateKey: readFileSync(env.GITHUB_PRIVATE_KEY_PATH, "utf-8"),
+    installationId: parseOptPosInt(env.GITHUB_INSTALLATION_ID),
   };
 }
