@@ -328,6 +328,24 @@ export const startCommand = new Command("start")
     const port = parseInt(process.env.PORT ?? options.port, 10);
     const dashboardPort = parseInt(process.env.DASHBOARD_PORT ?? options.dashboardPort, 10);
 
+    // --- PM Agent scheduler (create before dashboard so triggerPmTick can be wired in) ---
+    // The scheduler object is created here; the initial tick + interval are started after
+    // the servers come up. The dashboard callback captures the scheduler by reference.
+    let pmScheduler: { tick(): Promise<void> } | undefined;
+    if (pmAgentEnabled && pmConfig) {
+      const { createPmScheduler } = await import("@urateam/core");
+      pmScheduler = createPmScheduler({
+        config: pmConfig,
+        db,
+        linearApiKey: config.linearApiKey,
+        slackBotToken: process.env.SLACK_BOT_TOKEN!,
+        repoCloneDir: config.repoCloneDir,
+        runner,
+        pipelineConfigs: config.pipelineConfigs,
+        repoConfigs: config.repoConfigs,
+      });
+    }
+
     const dashboardApp = createDashboard({
       db,
       pipelineConfigs: config.pipelineConfigs,
@@ -341,6 +359,7 @@ export const startCommand = new Command("start")
         requestStop: runner.requestStop.bind(runner),
         haltAll: runner.haltAll.bind(runner),
       },
+      triggerPmTick: pmScheduler ? () => pmScheduler!.tick() : undefined,
     });
     if (ssoBootstrap) {
       console.log(`SSO: enabled (WorkOS client ${ssoBootstrap.sso.workosClientId})`);
@@ -582,27 +601,14 @@ export const startCommand = new Command("start")
       }
     }, 60 * 60 * 1000, "void");
 
-    // --- PM Agent (opt-in) ---
+    // --- PM Agent tick schedule (scheduler already created above, before createDashboard) ---
     let pmInterval: ReturnType<typeof setInterval> | undefined;
     let rmScheduler: import("@urateam/core").ReleaseManagerScheduler | undefined;
-    if (pmAgentEnabled && pmConfig) {
-      const { createPmScheduler } = await import("@urateam/core");
-      const slackBotToken = process.env.SLACK_BOT_TOKEN!;
-
-      const pmScheduler = createPmScheduler({
-        config: pmConfig,
-        db,
-        linearApiKey: config.linearApiKey,
-        slackBotToken,
-        repoCloneDir: config.repoCloneDir,
-        runner,
-        pipelineConfigs: config.pipelineConfigs,
-        repoConfigs: config.repoConfigs,
-      });
-
-      pmScheduler.tick().catch((err) => console.error("PM Agent initial tick failed:", err));
+    if (pmScheduler && pmConfig) {
+      const capturedScheduler = pmScheduler;
+      capturedScheduler.tick().catch((err: unknown) => console.error("PM Agent initial tick failed:", err));
       pmInterval = setInterval(
-        () => pmScheduler.tick().catch((err) => console.error("PM Agent tick failed:", err)),
+        () => capturedScheduler.tick().catch((err: unknown) => console.error("PM Agent tick failed:", err)),
         pmConfig.cronIntervalMs,
       );
       pmInterval.unref();

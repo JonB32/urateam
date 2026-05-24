@@ -823,6 +823,23 @@ export function pmCircuitBreakerRecoveredEvent(args: {
   });
 }
 
+/** BEC-253 — `ura tick` invoked a PM tick on demand via the CLI. */
+export function pmManualTickInvokedEvent(args: {
+  actor: string;
+  durationMs: number;
+  errors: string[];
+}): AuditEvent {
+  return base({
+    eventType: "pm.manual_tick_invoked",
+    actor: args.actor,
+    actorType: "cli",
+    payload: {
+      durationMs: args.durationMs,
+      errors: args.errors,
+    },
+  });
+}
+
 /** BEC-236 — `ura circuit reset` cleared the breaker for an issue. */
 export function pmCircuitBreakerResetManualEvent(args: {
   issueId: string;

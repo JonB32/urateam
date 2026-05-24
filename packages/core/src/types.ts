@@ -599,6 +599,10 @@ export const AuditEventTypeSchema = z.enum([
    *  issueId, scope ("single" | "bulk"), failedRunsDeleted (count of
    *  pipeline_runs rows the reset deleted). */
   "pm.circuit_breaker_reset_manual",
+  /** BEC-253 — `ura tick` invoked a PM tick on demand via the CLI. Payload:
+   *  actor (cli:<os-user>), durationMs (wall-clock time for the tick),
+   *  errors (string array, empty when tick succeeded without exceptions). */
+  "pm.manual_tick_invoked",
   /** `ura service install` succeeded — a launchd plist (macOS) or systemd-user
    *  unit (Linux) was written and the service was started. Operational signal
    *  so operators can audit unattended provisioning. */
