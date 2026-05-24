@@ -1455,7 +1455,7 @@ export class PipelineRunner {
       const hasImplement = config.stages.includes("implement");
 
       if (deepReviewPasses > 0 && hasReview && hasImplement) {
-        // Cap deep review iterations against maxReviewPasses
+        // Cap deep review iterations against maxDeepReviewPasses
         const passLimit = Math.min(deepReviewPasses, maxDeepReviewPasses);
 
         let previousFindingsCount = Infinity;

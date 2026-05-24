@@ -48,10 +48,9 @@ The loop exits early (before `passLimit`) when any of the following holds:
 | Reason | Description |
 |--------|-------------|
 | `zero-findings` | No findings remain — full convergence. |
-| `non-decreasing` | Finding count did not drop from the previous pass. |
-| `stable-fingerprints` | The surviving finding set is identical to the previous pass — the agent is stuck (likely contradictory requirements). |
+| `non-decreasing` | Finding count did not drop from the previous pass (covers both oscillating and stuck-on-contradictory-requirements cases; check `findingsDiff` to distinguish). |
 
-When none of these fire and the loop runs to `passLimit`, the reason is:
+When neither fires and the loop runs to `passLimit`, the reason is:
 
 | Reason | Description |
 |--------|-------------|
@@ -65,12 +64,13 @@ Each finding is fingerprinted from its `file:line:category:description-prefix`.
 This catches two patterns that count-only detection misses:
 
 1. **Oscillating findings**: count stays the same but different issues appear
-   each pass — the loop stops via `non-decreasing` but the operator can see
-   the `findingsDiff` in the log to diagnose cycling.
+   each pass — the loop stops via `non-decreasing`; the operator can inspect
+   `findingsDiff.added` in the log to diagnose which new issues appeared.
 
-2. **Stuck on contradictory requirements**: count drops (e.g. 3→1) but the
-   surviving finding is the same one that was there before — `stable-fingerprints`
-   stops the loop immediately rather than wasting another implement pass.
+2. **Stuck on contradictory requirements**: count stays the same and the same
+   fingerprints repeat — also caught by `non-decreasing`; `findingsDiff.common`
+   shows the persistent findings so the operator can relax their severity or
+   file a separate issue.
 
 ### Diagnostic Logs
 
@@ -117,8 +117,7 @@ When the loop **hits the pass limit** without converging (BEC-212 fix):
 | Diagnostic field | What it tells you |
 |------------------|-------------------|
 | `reason: "pass-limit"` | The agent was making progress but ran out of passes. Increase `deepReviewPasses` if the issue matters. |
-| `reason: "non-decreasing"` | The agent hit a wall — new findings appeared or the count stopped dropping. Review the `findingsDiff.added` items for newly introduced issues. |
-| `reason: "stable-fingerprints"` | The same findings repeat — likely contradictory requirements or an issue the implement agent cannot resolve autonomously. File a separate issue or relax the finding's severity to `suggestion`. |
+| `reason: "non-decreasing"` | The agent hit a wall — new findings appeared or the count stopped dropping. Check `findingsDiff.added` for newly introduced issues; check `findingsDiff.common` for persistent ones that may indicate contradictory requirements. |
 | `findingsDiff.common` | Issues that survived both passes — these are the persistent problems. |
 | `findingsDiff.removed` | Issues the agent resolved — useful for confirming partial progress. |
 | `diffStat` | The git diff stat after the final implement pass — confirms whether any code changes were made. An empty diff with remaining findings indicates the agent gave up rather than converging. |

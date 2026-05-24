@@ -81,9 +81,13 @@ export function checkDeepReviewConvergence(
 ): ConvergenceCheck {
   const currentFingerprints = new Set(currentFindings.map(buildFindingFingerprint));
 
-  const added = [...currentFingerprints].filter((fp) => !previousFingerprints.has(fp));
+  const added: string[] = [];
+  const common: string[] = [];
+  for (const fp of currentFingerprints) {
+    if (previousFingerprints.has(fp)) common.push(fp);
+    else added.push(fp);
+  }
   const removed = [...previousFingerprints].filter((fp) => !currentFingerprints.has(fp));
-  const common = [...currentFingerprints].filter((fp) => previousFingerprints.has(fp));
 
   const findingsDiff: FindingsDiff = { added, removed, common };
   const currentCount = currentFindings.length;
@@ -281,6 +285,11 @@ const AGENT_INSTRUCTIONS: Record<AgentName, { role: string; lookFor: string; exa
   },
 };
 
+/** Strip closing XML tags from untrusted content to prevent injection out of a wrapping element. */
+function escapeXmlClosingTag(content: string, tagName: string): string {
+  return content.replace(new RegExp(`</${tagName}>`, "gi"), `[/${tagName}]`);
+}
+
 /**
  * Build a sub-agent prompt for the given agent type.
  * Shared template — only the role, instructions, and example category differ.
@@ -301,10 +310,7 @@ function buildPrompt(
   );
   // diffStat is git output (not user-controlled), but still strip closing-tag
   // injection as an extra defence layer.
-  const safeDiffStat = (diffStat || "No file changes detected").replace(
-    /<\/diff-stat>/gi,
-    "[/diff-stat]",
-  );
+  const safeDiffStat = escapeXmlClosingTag(diffStat || "No file changes detected", "diff-stat");
 
   return `You are a ${role}. Your ONLY job is to find ${agentType === "reuse" ? "code duplication and missed helper opportunities" : agentType === "quality" ? "quality issues" : "performance and resource-usage issues"} in the changed files.
 
@@ -518,8 +524,7 @@ export function buildDeepReviewContext(
   // Sanitize untrusted finding fields using the full sanitize() from the prompt
   // sanitizer (strips injection phrases, script tags, etc.) plus a closing-tag
   // defence to prevent breaking out of the <deep-review> block.
-  const sanitizeField = (s: string) =>
-    sanitize(s).replace(/<\/deep-review>/gi, "[/deep-review]");
+  const sanitizeField = (s: string) => escapeXmlClosingTag(sanitize(s), "deep-review");
 
   const formatFindings = (fs: DeepReviewFinding[]) =>
     fs.length === 0
