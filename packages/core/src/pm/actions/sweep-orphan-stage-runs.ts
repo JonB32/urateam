@@ -40,22 +40,35 @@ const TERMINAL_PARENT_STATUSES = [
 export async function sweepOrphanStageRuns(
   db: AnyDb,
 ): Promise<{ cancelled: number; deleted: number }> {
-  // --- Case 1: parent has terminal status ---
-  const terminalOrphans = (await (db as any)
-    .select({ id: stageRuns.id })
-    .from(stageRuns)
-    .innerJoin(pipelineRuns, eq(stageRuns.pipelineRunId, pipelineRuns.id))
-    .where(
-      and(
-        eq(stageRuns.status, "running"),
-        inArray(pipelineRuns.status, [...TERMINAL_PARENT_STATUSES]),
-      ),
-    )) as Array<{ id: string }>;
+  // Run both SELECT queries concurrently — they are independent reads.
+  const [terminalOrphans, missingParentOrphans] = await Promise.all([
+    // Case 1: parent has a terminal status
+    db
+      .select({ id: stageRuns.id })
+      .from(stageRuns)
+      .innerJoin(pipelineRuns, eq(stageRuns.pipelineRunId, pipelineRuns.id))
+      .where(
+        and(
+          eq(stageRuns.status, "running"),
+          // Spread required: inArray() expects a mutable array; `as const` tuple is readonly.
+          inArray(pipelineRuns.status, [...TERMINAL_PARENT_STATUSES]),
+        ),
+      ) as Promise<Array<{ id: string }>>,
+
+    // Case 2: parent row is missing entirely (predates FK enforcement)
+    db
+      .select({ id: stageRuns.id })
+      .from(stageRuns)
+      .leftJoin(pipelineRuns, eq(stageRuns.pipelineRunId, pipelineRuns.id))
+      .where(
+        and(eq(stageRuns.status, "running"), isNull(pipelineRuns.id)),
+      ) as Promise<Array<{ id: string }>>,
+  ]);
 
   let cancelled = 0;
   if (terminalOrphans.length > 0) {
     const ids = terminalOrphans.map((r) => r.id);
-    await (db as any)
+    await db
       .update(stageRuns)
       .set({ status: "cancelled", completedAt: new Date() })
       .where(inArray(stageRuns.id, ids));
@@ -63,21 +76,10 @@ export async function sweepOrphanStageRuns(
     log.info({ count: cancelled }, "BEC-250: cancelled orphan stage_runs with terminal parent");
   }
 
-  // --- Case 2: parent row is missing entirely ---
-  const missingParentOrphans = (await (db as any)
-    .select({ id: stageRuns.id })
-    .from(stageRuns)
-    .leftJoin(pipelineRuns, eq(stageRuns.pipelineRunId, pipelineRuns.id))
-    .where(and(eq(stageRuns.status, "running"), isNull(pipelineRuns.id)))) as Array<{
-    id: string;
-  }>;
-
   let deleted = 0;
   if (missingParentOrphans.length > 0) {
     const ids = missingParentOrphans.map((r) => r.id);
-    await (db as any)
-      .delete(stageRuns)
-      .where(inArray(stageRuns.id, ids));
+    await db.delete(stageRuns).where(inArray(stageRuns.id, ids));
     deleted = ids.length;
     log.info({ count: deleted }, "BEC-250: deleted orphan stage_runs with missing parent");
   }

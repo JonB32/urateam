@@ -3490,15 +3490,14 @@ export class PipelineRunner {
             "recovering stuck pipeline run from previous restart",
           );
 
-          await db
-            .update(pipelineRuns)
-            .set({
-              status: "failed",
-              errorMessage: errorMsg,
-            })
-            .where(eq(pipelineRuns.id, run.id));
-          await this.cancelRunningStageRuns(db, run.id);
-          await removeActiveWork(db, run.id);
+          await Promise.all([
+            db
+              .update(pipelineRuns)
+              .set({ status: "failed", errorMessage: errorMsg })
+              .where(eq(pipelineRuns.id, run.id)),
+            this.cancelRunningStageRuns(db, run.id),
+            removeActiveWork(db, run.id),
+          ]);
         }),
     );
 
