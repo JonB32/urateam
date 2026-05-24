@@ -159,6 +159,27 @@ Known limitations being addressed (don't compound these):
   Both paths throw `StagePreStreamStalledError` → caught in `executeStage` catch block → `stage_runs.status = 'failed'`, run completes normally.
 - **`StageStalledError`** — mid-stream silence (after ≥1 message, no output tokens or turns) for `progressTimeoutMs` (default 30 min). See urateam#122.
 - **`StagePreStreamStalledError`** — pre-stream hang (no first message) within `firstMessageTimeoutMs` (default 5 min). See BEC-183. Exported from `executor/index.ts`.
+- **Implement-stage hang detection (BEC-209):** `detectStageHang(runId, stage, lastUpdateTime)` in `executor/hang-detection.ts`. Called every `HANG_DETECTION_INTERVAL_MS` (5 min) via `setInterval` in `executeStage()` (implement stage only). Logs ERROR when no progress for `DEFAULT_HANG_THRESHOLD_MS` (30 min). Detection is logging-only — actual termination is handled by the existing `StageStalledError` / wall-clock timeout guards. `stage_runs.last_progress_at` column written on each `onProgress`/`onToolMessage` tick for external visibility.
+- **Manual run termination:** `terminateRun(db, runId)` in `pipeline/terminate.ts` marks a run `status='failed'` with `error_message='manually terminated via CLI'`, clears the `active_work` entry, and allows resubmission. CLI: `ura admin terminate <runId>`. Does NOT signal the in-process executor; the running stage will still hit its wall-clock timeout. Use for recovery after process restarts with orphaned DB state.
+
+#### Implement-stage hang troubleshooting
+
+Symptoms of a hung implement stage:
+- Run `status='running'` for 30+ minutes with no `last_progress_at` update
+- No `stage still in progress` INFO log lines in the last 5+ minutes
+- Quality Observer files a `run-patterns` issue citing `stage: implement` and an old `updatedAt`
+
+Root causes:
+- **Auth retry loop**: Claude SDK stuck retrying expired credentials. Fix: `docker compose exec <svc> claude login` or set `ANTHROPIC_API_KEY`.
+- **MCP server deadlock**: MCP server failed to start or return. Check executor logs for MCP init errors. Restart the container.
+- **Resource exhaustion**: OOM killer or disk full causes the agent process to stall. Check `df -h` and container memory stats.
+- **Blocked I/O**: agent waiting on a tool (build, test, network) that never returns. Observed in long build pipelines with no tool timeout.
+
+Manual recovery procedure:
+1. Identify the run ID from the Quality Observer issue evidence JSON.
+2. `ura admin terminate <runId>` — marks the run failed, clears active_work.
+3. Move the Linear issue back to "Todo" (or wait for the PM Agent stuck-issue sweep, default 60 min).
+4. The next PM Agent tick will start a fresh pipeline run for the issue.
 
 ### Notifiers
 - Linear: issue comments + state transitions (In Progress → In Review → Done)
