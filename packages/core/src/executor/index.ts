@@ -13,6 +13,7 @@ export {
 export { parseHandoffArtifact } from "./handoff.js";
 export { executeStage, type ExecuteStageContext } from "./executor.js";
 export { consumeAgentStream, parseJsonBlock, StageStalledError, StagePreStreamStalledError } from "./agent-stream.js";
+export { detectStageHang, HANG_DETECTION_INTERVAL_MS, DEFAULT_HANG_THRESHOLD_MS, type HangDiagnostics } from "./hang-detection.js";
 export { sanitize, mapIssueToSchema, assemblePrompt } from "./prompt/index.js";
 export {
   runDeepReview,

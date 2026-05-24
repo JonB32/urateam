@@ -25,3 +25,4 @@ export {
   type AutomergeCheckResult,
   type AutomergeResult,
 } from "./automerge.js";
+export { terminateRun, type TerminateRunResult } from "./terminate.js";

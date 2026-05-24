@@ -5,6 +5,7 @@ import {
   isFeatureLicensed,
   listUsers,
   setUserRole,
+  terminateRun,
   type Role,
 } from "@urateam/core";
 
@@ -64,6 +65,15 @@ export async function runAdminRevoke(
   args: AdminDeps & { email: string },
 ): Promise<void> {
   await runAdminGrant({ ...args, newRole: "viewer" });
+}
+
+export async function runAdminTerminate(
+  args: AdminDeps & { runId: string },
+): Promise<void> {
+  const result = await terminateRun(args.db, args.runId);
+  args.log(`Terminated run ${result.runId} (issue: ${result.issueId}, was: ${result.previousStatus})`);
+  args.log("The issue can now be resubmitted without orphaned process state.");
+  args.log("Note: if the executor process is still running, it will hit its wall-clock timeout.");
 }
 
 // ---------------- commander wiring ----------------
@@ -139,6 +149,19 @@ export const adminCommand = new Command("admin")
             email,
             log: (s) => console.log(s),
           });
+        } catch (err) {
+          fail(err);
+        }
+      }),
+  )
+  .addCommand(
+    new Command("terminate")
+      .description("Terminate a stuck pipeline run and clear its execution lock")
+      .argument("<runId>", "Pipeline run ID to terminate (e.g. FyGPSITBTB49blnEdTMlX)")
+      .action(async (runId: string) => {
+        try {
+          const db = await openDb();
+          await runAdminTerminate({ db, runId, log: (s) => console.log(s) });
         } catch (err) {
           fail(err);
         }

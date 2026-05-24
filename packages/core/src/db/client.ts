@@ -63,6 +63,8 @@ const MIGRATION_COLUMNS: MigrationColumn[] = [
     sqliteType: "TEXT NOT NULL DEFAULT 'viewer'",
     pgType: "TEXT NOT NULL DEFAULT 'viewer'",
   },
+  // BEC-209: implement-stage hang detection — tracks last progress timestamp
+  { table: "stage_runs", column: "last_progress_at", sqliteType: "INTEGER", pgType: "TIMESTAMPTZ" },
 ];
 
 /**
@@ -115,6 +117,7 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
     input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
     turns INTEGER NOT NULL DEFAULT 0,
+    last_progress_at ${ts},
     handoff_artifact TEXT,
     error_message TEXT
   );
