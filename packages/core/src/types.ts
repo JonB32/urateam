@@ -535,6 +535,16 @@ export const AuditEventTypeSchema = z.enum([
    *  deep-review fanout runs. Payload includes the diff metrics and which
    *  threshold tripped. */
   "pipeline.auto_deep_review_bumped",
+  /** BEC-222 — a stale remote branch (no active DB run, no open PR) was
+   *  detected at pipeline start. The branch was deleted and the run
+   *  proceeds from scratch. Payload: branch, issueId, runId. */
+  "pipeline.stale_branch_recovered",
+  /** BEC-222 — an existing remote branch was detected at pipeline start but
+   *  a live run or open PR already holds it. The new start was skipped to
+   *  avoid concurrent contamination or duplicate work. Payload: branch,
+   *  reason ("active-run" | "open-pr"), and (where known) activeRunId /
+   *  prNumber. */
+  "pipeline.skipped_existing_branch",
   /** Tier 5 — an issue tripped the consecutive-failures circuit breaker
    *  (≥ `maxConsecutiveFailures` failed runs in a row). The PM Agent
    *  escalated by adding the `needs-design` label, posting a Linear

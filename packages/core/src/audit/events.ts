@@ -957,3 +957,51 @@ export function pmTriageQualityScoreEvent(args: {
     },
   });
 }
+
+/**
+ * BEC-222 — emitted when a stale remote branch (no active DB run, no open
+ * PR) is detected at pipeline start. The branch is deleted and the run
+ * proceeds from scratch. Payload includes the branch name so operators can
+ * see the recovery rate and identify patterns.
+ */
+export function pipelineStaleBranchRecoveredEvent(args: {
+  issueId: string;
+  branch: string;
+  runId: string;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.stale_branch_recovered",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: { branch: args.branch },
+  });
+}
+
+/**
+ * BEC-222 — emitted when an existing remote branch causes a pipeline start
+ * to be skipped because a live run or open PR already holds it. Surfaces
+ * the previously-silent skip in the audit log so operators can diagnose
+ * stalled issues.
+ */
+export function pipelineSkippedExistingBranchEvent(args: {
+  issueId: string;
+  branch: string;
+  reason: "active-run" | "open-pr";
+  activeRunId?: string;
+  prNumber?: number;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.skipped_existing_branch",
+    actor: "system",
+    actorType: "system",
+    issueId: args.issueId,
+    payload: {
+      branch: args.branch,
+      reason: args.reason,
+      ...(args.activeRunId !== undefined ? { activeRunId: args.activeRunId } : {}),
+      ...(args.prNumber !== undefined ? { prNumber: args.prNumber } : {}),
+    },
+  });
+}

@@ -870,6 +870,30 @@ export async function checkDuplicateBranch(
 }
 
 /**
+ * Delete a branch on the remote without requiring a local clone.
+ * Auth must be embedded in the URL for private repos.
+ * Throws if the push fails.
+ */
+export function deleteRemoteBranch(repoUrl: string, branch: string): Promise<void> {
+  const log = getLog();
+  return new Promise((resolve, reject) => {
+    execFile(
+      "git",
+      ["push", repoUrl, "--delete", branch],
+      { timeout: 30_000 },
+      (error, _stdout, stderr) => {
+        if (error) {
+          log.error({ branch, stderr: stderr?.slice(0, 200) }, "deleteRemoteBranch failed");
+          reject(new Error(`deleteRemoteBranch failed: ${stderr || error.message}`));
+        } else {
+          resolve();
+        }
+      },
+    );
+  });
+}
+
+/**
  * Generate a branch name from issue ID and slug.
  */
 export function branchName(issueId: string, slug: string): string {
