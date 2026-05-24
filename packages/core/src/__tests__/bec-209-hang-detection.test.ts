@@ -75,7 +75,7 @@ describe("BEC-209: detectStageHang() — logging", () => {
   });
 
   it("does NOT log when not hung", () => {
-    const consoleErrorSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const consoleErrorSpy = vi.spyOn(process.stdout, "write").mockReturnValue(true);
     const recentUpdate = new Date(Date.now() - 5 * 60_000);
     detectStageHang("run-4", "implement", recentUpdate, 30 * 60_000);
     // nothing written to stderr for a non-hung stage

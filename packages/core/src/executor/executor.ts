@@ -223,8 +223,11 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
 
     async function flushLogBatch() {
       if (logBatch.length === 0) return;
-      await db.insert(agentLogs).values(logBatch);
+      // Swap the array before inserting so new items pushed during the async
+      // insert are not lost when the original flush completes.
+      const itemsToInsert = logBatch;
       logBatch = [];
+      await db.insert(agentLogs).values(itemsToInsert);
     }
 
     // BEC-183: capture the iterator that consumeAgentStream will create so we

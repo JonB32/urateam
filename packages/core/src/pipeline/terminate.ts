@@ -6,6 +6,8 @@ import { createLogger } from "../logger.js";
 
 const log = createLogger({ component: "terminate" });
 
+const TERMINAL_STATUSES = ["completed", "aborted"];
+
 export interface TerminateRunResult {
   runId: string;
   issueId: string;
@@ -41,9 +43,9 @@ export async function terminateRun(
   }
 
   const run = rows[0];
-  const previousStatus = run.status as string;
+  const previousStatus = run.status;
 
-  if (previousStatus === "completed" || previousStatus === "aborted") {
+  if (TERMINAL_STATUSES.includes(previousStatus)) {
     throw new Error(`Run ${runId} is already ${previousStatus} — cannot terminate`);
   }
 
@@ -65,7 +67,7 @@ export async function terminateRun(
 
   return {
     runId,
-    issueId: run.issueId as string,
+    issueId: run.issueId,
     previousStatus,
   };
 }

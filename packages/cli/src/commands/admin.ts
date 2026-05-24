@@ -14,6 +14,8 @@ export interface AdminDeps {
   log: (msg: string) => void;
 }
 
+const VALID_ROLES = ["admin", "operator", "viewer"] as const;
+
 function requireLicensed(): void {
   if (!isFeatureLicensed("rbac")) {
     throw new Error(
@@ -30,13 +32,15 @@ function actorId(): string {
   }
 }
 
+const truncate = (s: string, w: number) => s.padEnd(w).slice(0, w);
+
 export async function runAdminList(deps: AdminDeps): Promise<void> {
   requireLicensed();
   const users = await listUsers(deps.db);
   deps.log("EMAIL                            ROLE       LAST_LOGIN");
   for (const u of users) {
-    const email = u.email.padEnd(32).slice(0, 32);
-    const role = u.role.padEnd(10).slice(0, 10);
+    const email = truncate(u.email, 32);
+    const role = truncate(u.role, 10);
     const ll = u.lastLoginAt ? u.lastLoginAt.toISOString() : "(never)";
     deps.log(`${email} ${role} ${ll}`);
   }
@@ -93,19 +97,23 @@ function fail(err: unknown): never {
   process.exit(1);
 }
 
+async function executeAdminCommand<T>(action: (db: any) => Promise<T>): Promise<void> {
+  try {
+    const db = await openDb();
+    await action(db);
+  } catch (err) {
+    fail(err);
+  }
+}
+
 export const adminCommand = new Command("admin")
   .description("Manage dashboard user roles (Enterprise)")
   .addCommand(
     new Command("list")
       .description("List all dashboard users and their roles")
-      .action(async () => {
-        try {
-          const db = await openDb();
-          await runAdminList({ db, log: (s) => console.log(s) });
-        } catch (err) {
-          fail(err);
-        }
-      }),
+      .action(() =>
+        executeAdminCommand((db) => runAdminList({ db, log: (s) => console.log(s) })),
+      ),
   )
   .addCommand(
     new Command("grant")
@@ -113,57 +121,35 @@ export const adminCommand = new Command("admin")
       .argument("<email>", "Target user email")
       .option(
         "--role <role>",
-        "New role: admin | operator | viewer",
+        `New role: ${VALID_ROLES.join(" | ")}`,
         "operator",
       )
-      .action(async (email: string, opts: { role: string }) => {
-        if (
-          opts.role !== "admin" &&
-          opts.role !== "operator" &&
-          opts.role !== "viewer"
-        ) {
+      .action((email: string, opts: { role: string }) => {
+        if (!VALID_ROLES.includes(opts.role as (typeof VALID_ROLES)[number])) {
           fail(new Error(`invalid --role: '${opts.role}'`));
         }
-        try {
-          const db = await openDb();
-          await runAdminGrant({
-            db,
-            email,
-            newRole: opts.role as Role,
-            log: (s) => console.log(s),
-          });
-        } catch (err) {
-          fail(err);
-        }
+        return executeAdminCommand((db) =>
+          runAdminGrant({ db, email, newRole: opts.role as Role, log: (s) => console.log(s) }),
+        );
       }),
   )
   .addCommand(
     new Command("revoke")
       .description("Revoke privileges — sets role to viewer")
       .argument("<email>", "Target user email")
-      .action(async (email: string) => {
-        try {
-          const db = await openDb();
-          await runAdminRevoke({
-            db,
-            email,
-            log: (s) => console.log(s),
-          });
-        } catch (err) {
-          fail(err);
-        }
-      }),
+      .action((email: string) =>
+        executeAdminCommand((db) =>
+          runAdminRevoke({ db, email, log: (s) => console.log(s) }),
+        ),
+      ),
   )
   .addCommand(
     new Command("terminate")
       .description("Terminate a stuck pipeline run and clear its execution lock")
       .argument("<runId>", "Pipeline run ID to terminate (e.g. FyGPSITBTB49blnEdTMlX)")
-      .action(async (runId: string) => {
-        try {
-          const db = await openDb();
-          await runAdminTerminate({ db, runId, log: (s) => console.log(s) });
-        } catch (err) {
-          fail(err);
-        }
-      }),
+      .action((runId: string) =>
+        executeAdminCommand((db) =>
+          runAdminTerminate({ db, runId, log: (s) => console.log(s) }),
+        ),
+      ),
   );
