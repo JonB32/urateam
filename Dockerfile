@@ -21,9 +21,9 @@ RUN apk add --no-cache git openssh-client github-cli sqlite tini python3 make g+
 ENV SHELL=/bin/bash
 
 # Pinned versions — image is reproducible per build.
-ARG URATEAM_CORE_VERSION=0.1.60
-ARG URATEAM_CLI_VERSION=0.1.62
-ARG URATEAM_DASHBOARD_VERSION=0.1.60
+ARG URATEAM_CORE_VERSION=0.1.61
+ARG URATEAM_CLI_VERSION=0.1.63
+ARG URATEAM_DASHBOARD_VERSION=0.1.61
 ARG CLAUDE_CODE_VERSION=2.1.128
 RUN npm install -g \
       @urateam/cli@${URATEAM_CLI_VERSION} \
