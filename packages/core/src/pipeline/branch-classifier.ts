@@ -52,7 +52,7 @@ export async function classifyExistingBranch(
   deps?: ClassifierDeps,
 ): Promise<BranchClassification> {
   // 1. Check DB for active runs that currently hold this branch.
-  const activeRows = await (db as any)
+  const activeRows = await db
     .select({ id: pipelineRuns.id })
     .from(pipelineRuns)
     .where(sql`${pipelineRuns.branch} = ${branch} AND ${pipelineRuns.status} IN ('running', 'queued')`)

@@ -883,8 +883,10 @@ export function deleteRemoteBranch(repoUrl: string, branch: string): Promise<voi
       { timeout: 30_000 },
       (error, _stdout, stderr) => {
         if (error) {
-          log.error({ branch, stderr: stderr?.slice(0, 200) }, "deleteRemoteBranch failed");
-          reject(new Error(`deleteRemoteBranch failed: ${stderr || error.message}`));
+          const safeStderr = stderr?.replace(/:\/\/[^@]+@/g, "://[redacted]@").slice(0, 200);
+          log.error({ branch, stderr: safeStderr }, "deleteRemoteBranch failed");
+          const safeMsg = (stderr || error.message).replace(/:\/\/[^@]+@/g, "://[redacted]@");
+          reject(new Error(`deleteRemoteBranch failed: ${safeMsg}`));
         } else {
           resolve();
         }
