@@ -25,6 +25,125 @@ const DEEP_REVIEW_MODEL = "claude-haiku-4-5-20251001";
 const DEEP_REVIEW_STAGE_LABEL = "review";
 
 // ---------------------------------------------------------------------------
+// Convergence detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Why the finding stopped the loop or was declared converged.
+ *
+ * - "zero-findings"  : no findings remain — full convergence.
+ * - "non-decreasing" : finding count did not drop between passes (stuck or
+ *                      cycling). Check findingsDiff to distinguish "same
+ *                      findings repeating" (contradictory requirements) from
+ *                      "new findings introduced" (oscillation).
+ * - "pass-limit"     : ran out of configured passes with findings still
+ *                      remaining (partial convergence).
+ */
+export type ConvergenceReason = "zero-findings" | "non-decreasing" | "pass-limit";
+
+export interface FindingsDiff {
+  /** Fingerprints of findings that appeared for the first time in this pass. */
+  added: string[];
+  /** Fingerprints of findings that disappeared since the previous pass. */
+  removed: string[];
+  /** Fingerprints present in both the previous and the current pass. */
+  common: string[];
+}
+
+export interface ConvergenceCheck {
+  /** True when all findings have been resolved (zero findings). */
+  converged: boolean;
+  /**
+   * True when the loop should exit early (converged OR count non-decreasing
+   * OR same fingerprints repeated). False means keep iterating.
+   */
+  shouldStop: boolean;
+  reason: ConvergenceReason | null;
+  findingsDiff: FindingsDiff;
+}
+
+/**
+ * Stable fingerprint for a ReviewFinding based on its location, category, and
+ * a prefix of the description. Collision risk is negligible given the small
+ * number of findings per run.
+ */
+export function buildFindingFingerprint(finding: ReviewFinding): string {
+  const descPrefix = finding.description.slice(0, 80).replace(/\s+/g, " ").trim();
+  return `${finding.file}:${finding.line}:${finding.category}:${descPrefix}`;
+}
+
+/**
+ * Check whether the deep-review loop has converged after a pass.
+ *
+ * Compares the fingerprint set of the current pass against the previous one
+ * to detect both count-based and content-based stagnation.
+ *
+ * @param previousFingerprints  Fingerprints from the previous pass
+ *                              (empty Set signals "first pass / Infinity").
+ * @param currentFindings       Findings produced in the current pass.
+ * @param previousFindingsCount Count from the previous pass (Infinity for
+ *                              first pass so any non-empty result continues).
+ */
+export function checkDeepReviewConvergence(
+  previousFingerprints: Set<string>,
+  currentFindings: ReviewFinding[],
+  previousFindingsCount: number,
+): ConvergenceCheck {
+  const currentFingerprints = new Set(currentFindings.map(buildFindingFingerprint));
+
+  const added: string[] = [];
+  const common: string[] = [];
+  for (const fp of currentFingerprints) {
+    if (previousFingerprints.has(fp)) common.push(fp);
+    else added.push(fp);
+  }
+  const removed = [...previousFingerprints].filter((fp) => !currentFingerprints.has(fp));
+
+  const findingsDiff: FindingsDiff = { added, removed, common };
+  const currentCount = currentFindings.length;
+
+  if (currentCount === 0) {
+    return { converged: true, shouldStop: true, reason: "zero-findings", findingsDiff };
+  }
+
+  // Stop when count is not going down — covers both "same findings" (stuck on
+  // contradictory requirements, findingsDiff.common shows the culprits) and
+  // "new findings introduced" (oscillating, findingsDiff.added shows new ones).
+  if (currentCount >= previousFindingsCount) {
+    return { converged: false, shouldStop: true, reason: "non-decreasing", findingsDiff };
+  }
+
+  // Count decreased → genuine progress. The findingsDiff records what was
+  // resolved (removed) and what persists (common) for post-loop diagnostics.
+  return { converged: false, shouldStop: false, reason: null, findingsDiff };
+}
+
+export interface DeepReviewNonConvergenceDiagnostic {
+  passLimit: number;
+  finalPass: number;
+  finalFindingsCount: number;
+  reason: ConvergenceReason;
+  findingsDiff: FindingsDiff;
+  diffStat: string;
+}
+
+/**
+ * Assemble a structured diagnostic for runs that exhausted the pass limit
+ * without converging. The object is intended to be attached to a structured
+ * log line for post-hoc analysis.
+ */
+export function buildNonConvergenceDiagnostic(
+  passLimit: number,
+  finalPass: number,
+  finalFindingsCount: number,
+  reason: ConvergenceReason,
+  findingsDiff: FindingsDiff,
+  diffStat: string,
+): DeepReviewNonConvergenceDiagnostic {
+  return { passLimit, finalPass, finalFindingsCount, reason, findingsDiff, diffStat };
+}
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -176,6 +295,11 @@ const AGENT_INSTRUCTIONS: Record<AgentName, { role: string; lookFor: string; exa
   },
 };
 
+/** Strip closing XML tags from untrusted content to prevent injection out of a wrapping element. */
+function escapeXmlClosingTag(content: string, tagName: string): string {
+  return content.replace(new RegExp(`</${tagName}>`, "gi"), `[/${tagName}]`);
+}
+
 /**
  * Build a sub-agent prompt for the given agent type.
  * Shared template — only the role, instructions, and example category differ.
@@ -196,10 +320,7 @@ function buildPrompt(
   );
   // diffStat is git output (not user-controlled), but still strip closing-tag
   // injection as an extra defence layer.
-  const safeDiffStat = (diffStat || "No file changes detected").replace(
-    /<\/diff-stat>/gi,
-    "[/diff-stat]",
-  );
+  const safeDiffStat = escapeXmlClosingTag(diffStat || "No file changes detected", "diff-stat");
 
   return `You are a ${role}. Your ONLY job is to find ${agentType === "reuse" ? "code duplication and missed helper opportunities" : agentType === "quality" ? "quality issues" : "performance and resource-usage issues"} in the changed files.
 
@@ -490,8 +611,7 @@ export function buildDeepReviewContext(
   // Sanitize untrusted finding fields using the full sanitize() from the prompt
   // sanitizer (strips injection phrases, script tags, etc.) plus a closing-tag
   // defence to prevent breaking out of the <deep-review> block.
-  const sanitizeField = (s: string) =>
-    sanitize(s).replace(/<\/deep-review>/gi, "[/deep-review]");
+  const sanitizeField = (s: string) => escapeXmlClosingTag(sanitize(s), "deep-review");
 
   const formatFindings = (fs: DeepReviewFinding[]) =>
     fs.length === 0

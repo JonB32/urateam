@@ -24,7 +24,12 @@ import { isFeatureLicensed } from "../license.js";
 import { checkRequirements, buildRalphContext } from "../executor/ralph.js";
 import { computeEffectiveRalphIterations } from "./runner-ralph-helpers.js";
 import { checkTestQuality } from "../executor/test-quality.js";
-import { buildDeepReviewContext } from "../executor/deep-review.js";
+import {
+  buildDeepReviewContext,
+  checkDeepReviewConvergence,
+  buildFindingFingerprint,
+  buildNonConvergenceDiagnostic,
+} from "../executor/deep-review.js";
 import { getStopSignal, requestStop, clearStopSignal, type StopMode } from "./control-signals.js";
 import { setPmPaused } from "../pm/pause-state.js";
 import { runReviewProviders } from "./review-providers-runner.js";
@@ -58,6 +63,7 @@ import {
   getChangedFiles,
   checkDuplicateBranch,
   branchName,
+  createWorktreeFromRemote,
   pruneWorktreesInRepoDirs,
   gitExecSafe,
 } from "../repo/git.js";
@@ -1827,10 +1833,16 @@ export class PipelineRunner {
       const maxDeepReviewPasses = config.maxDeepReviewPasses ?? 3;
 
       if (deepReviewPasses > 0 && hasReview && hasImplement) {
-        // Cap deep review iterations against maxReviewPasses
+        // Cap deep review iterations against maxDeepReviewPasses
         const passLimit = Math.min(deepReviewPasses, maxDeepReviewPasses);
 
         let previousFindingsCount = Infinity;
+        let previousFingerprints = new Set<string>();
+        // Tracks the last convergence check so we can emit a diagnostic after
+        // the loop when the pass limit is reached without full convergence.
+        let lastConvergenceCheck: ReturnType<typeof checkDeepReviewConvergence> | null = null;
+        let drPassFinal = 0;
+        let finalFindingsCount = 0;
 
         for (let drPass = 1; drPass <= passLimit; drPass++) {
           if (!handoff) {
@@ -1899,19 +1911,38 @@ export class PipelineRunner {
             "deep review: sub-agents complete",
           );
 
-          // Convergence: stop when no findings or count didn't change
-          if (findingsCount === 0) {
+          // BEC-212: content-aware convergence check — compares finding
+          // fingerprints (not just counts) to detect cycling/contradictory-
+          // requirement patterns and emit structured diagnostics.
+          const convergence = checkDeepReviewConvergence(
+            previousFingerprints,
+            deepResult.findings,
+            previousFindingsCount,
+          );
+          lastConvergenceCheck = convergence;
+          drPassFinal = drPass;
+          finalFindingsCount = findingsCount;
+
+          if (convergence.converged) {
             runLog.info({ drPass }, "deep review: no findings — converged");
             break;
           }
-          if (findingsCount >= previousFindingsCount) {
+          if (convergence.shouldStop) {
             runLog.info(
-              { drPass, findingsCount, previousFindingsCount },
-              "deep review: findings count did not decrease — stopping to prevent loop",
+              {
+                drPass,
+                findingsCount,
+                previousFindingsCount,
+                reason: convergence.reason,
+                findingsDiff: convergence.findingsDiff,
+              },
+              "deep review: convergence check stopped loop",
             );
             break;
           }
+
           previousFindingsCount = findingsCount;
+          previousFingerprints = new Set(deepResult.findings.map(buildFindingFingerprint));
 
           // Re-run implement stage with deep review context. The agentic
           // review provider already converts DeepReviewFinding -> ReviewFinding
@@ -2059,6 +2090,36 @@ export class PipelineRunner {
               );
             }
           }
+        }
+
+        // BEC-212: emit structured diagnostic when the loop exhausts all
+        // passes without converging to zero findings.
+        if (
+          lastConvergenceCheck !== null &&
+          !lastConvergenceCheck.converged &&
+          !lastConvergenceCheck.shouldStop
+        ) {
+          // Loop exited because drPass > passLimit (not via a break).
+          const diffStat = worktreePath
+            ? await gitExecSafe(["diff", "--stat", "HEAD"], worktreePath)
+            : "";
+          const diagnostic = buildNonConvergenceDiagnostic(
+            passLimit,
+            drPassFinal,
+            finalFindingsCount,
+            "pass-limit",
+            lastConvergenceCheck.findingsDiff,
+            diffStat,
+          );
+          runLog.warn(
+            {
+              diagnostic,
+              runId,
+              passLimit,
+              finalFindingsCount,
+            },
+            "deep review: pass limit reached without convergence — review findings remain unresolved; consider increasing deepReviewPasses or investigating contradictory requirements",
+          );
         }
       }
 
