@@ -33,13 +33,16 @@ import { persistDecisionArtifact } from "../db/decisions-store.js";
  * firstMessageTimeoutMs timer inside consumeAgentStream somehow fails to fire.
  * Default: 60 min for implement (longest legitimate stage), 30 min for others.
  */
-const WALL_CLOCK_STAGE_TIMEOUT_MS: Partial<Record<string, number>> = {
+const WALL_CLOCK_STAGE_TIMEOUT_MS: Partial<Record<StageType, number>> = {
   implement: 60 * 60_000, // 60 min — longest legitimate stage
 };
 const DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS = 30 * 60_000; // 30 min for all others
 
 /** First-message timeout passed to consumeAgentStream (BEC-183). */
 const FIRST_MESSAGE_TIMEOUT_MS = 5 * 60_000; // 5 min
+
+/** Max bytes stored per log entry in agent_logs (tool messages + error messages). */
+const LOG_CONTENT_MAX_BYTES = 2048;
 
 /**
  * BEC-182: review-feedback runs are bounded — N comments, push, done.
@@ -355,7 +358,7 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
             id: nanoid(),
             stageRunId: stageRunId,
             type: msg.type!,
-            content: JSON.stringify(msg).slice(0, 2048),
+            content: JSON.stringify(msg).slice(0, LOG_CONTENT_MAX_BYTES),
           });
           if (logBatch.length >= BATCH_SIZE) {
             flushLogBatch().catch((err) => log.warn({ err }, "mid-stream log batch flush failed"));
@@ -452,7 +455,7 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       id: nanoid(),
       stageRunId: stageRunId,
       type: "error",
-      content: errorMessage.slice(0, 2048),
+      content: errorMessage.slice(0, LOG_CONTENT_MAX_BYTES),
     });
 
     await db
