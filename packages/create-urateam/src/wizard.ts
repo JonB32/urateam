@@ -113,9 +113,18 @@ export async function runWizard(arg: string): Promise<WizardResult | null> {
       name: "anthropicAuth",
       message: "Anthropic auth method:",
       choices: [
-        { title: "Claude Code CLI (`claude login` after deploy)", value: "cli" },
-        { title: "API key (set ANTHROPIC_API_KEY now)", value: "apiKey" },
+        {
+          title: "OAuth token — `claude setup-token` (recommended: long-lived, subscription billing, no weekly expiry)",
+          value: "oauthToken",
+        },
+        { title: "API key — set ANTHROPIC_API_KEY now (pay-per-token)", value: "apiKey" },
+        { title: "Claude Code CLI — `claude login` after deploy (legacy, expires weekly)", value: "cli" },
       ],
+    },
+    {
+      type: (prev) => (prev === "oauthToken" ? "password" : null),
+      name: "claudeCodeOauthToken",
+      message: "CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`):",
     },
     {
       type: (prev) => (prev === "apiKey" ? "password" : null),
@@ -371,6 +380,7 @@ export async function runWizard(arg: string): Promise<WizardResult | null> {
     domain: stage3.domain,
     caddyEmail: stage3.caddyEmail,
     dashboardBasePath: normalizeBasePath(stage3.dashboardBasePath),
+    claudeCodeOauthToken: stage4.claudeCodeOauthToken,
     anthropicApiKey: stage4.anthropicApiKey,
     licenseKey: stage5.licenseKey,
     pmAgent,
