@@ -34,6 +34,10 @@ type AnyDb = any;
  * possible and stop/cancel signals are a no-op.
  */
 const TERMINAL_RUN_STATUSES = ["completed", "failed", "aborted", "cancelled"] as const;
+type TerminalRunStatus = typeof TERMINAL_RUN_STATUSES[number];
+
+/** Default page size for the runs feed list. */
+const DEFAULT_RUNS_LIMIT = 50;
 
 /** Returns true when a run status is eligible for retry. */
 function isRetryableStatus(status: string): boolean {
@@ -190,7 +194,7 @@ export function createRunsRouter(
       .select()
       .from(pipelineRuns)
       .orderBy(desc(pipelineRuns.startedAt))
-      .limit(50) as RunRow[];
+      .limit(DEFAULT_RUNS_LIMIT) as RunRow[];
 
     const content = runFeedView(runs);
 
@@ -208,7 +212,7 @@ export function createRunsRouter(
       .select()
       .from(pipelineRuns)
       .orderBy(desc(pipelineRuns.startedAt))
-      .limit(50) as RunRow[];
+      .limit(DEFAULT_RUNS_LIMIT) as RunRow[];
 
     return c.html(runFeedView(runs));
   });
@@ -401,7 +405,7 @@ export function createRunsRouter(
     const id = c.req.param("id");
     const run = await fetchRunById(id);
     if (!run) return c.text("Run not found", 404);
-    if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(run.status)) {
+    if (TERMINAL_RUN_STATUSES.includes(run.status as TerminalRunStatus)) {
       return c.text(`Cannot stop a run in status ${run.status}`, 409);
     }
 
@@ -504,7 +508,7 @@ export function createRunsRouter(
     const id = c.req.param("id");
     const run = await fetchRunById(id);
     if (!run) return c.text("Run not found", 404);
-    if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(run.status)) {
+    if (TERMINAL_RUN_STATUSES.includes(run.status as TerminalRunStatus)) {
       return c.json({ error: `Cannot stop a run in status ${run.status}` }, 409);
     }
     if (!runner?.requestStop) return c.text("Runner not configured", 500);

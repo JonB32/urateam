@@ -3,11 +3,17 @@ import { Hono } from "hono";
 import { createDb } from "@urateam/core";
 import { createRunsRouter } from "../routes/runs.js";
 
+const CLI_TOKEN = "test-token-1234567890-secret";
+const AUTH_HEADERS = {
+  "x-ura-cli-token": CLI_TOKEN,
+  "x-ura-actor": "alice",
+};
+
 let db: any;
 
 beforeEach(async () => {
   db = await createDb({ connectionString: ":memory:" });
-  process.env.URATEAM_CLI_TOKEN = "test-token-1234567890-secret";
+  process.env.URATEAM_CLI_TOKEN = CLI_TOKEN;
 });
 
 afterEach(() => {
@@ -29,17 +35,12 @@ function appWith(triggerPmTick?: () => Promise<void>) {
   return app;
 }
 
-const authHeaders = {
-  "x-ura-cli-token": "test-token-1234567890-secret",
-  "x-ura-actor": "alice",
-};
-
 describe("POST /cli/pm/tick", () => {
   it("returns 503 when triggerPmTick is not configured", async () => {
     const app = appWith(undefined);
     const res = await app.request("/cli/pm/tick", {
       method: "POST",
-      headers: authHeaders,
+      headers: AUTH_HEADERS,
     });
     expect(res.status).toBe(503);
   });
@@ -49,7 +50,7 @@ describe("POST /cli/pm/tick", () => {
     const app = appWith(triggerPmTick);
     const res = await app.request("/cli/pm/tick", {
       method: "POST",
-      headers: authHeaders,
+      headers: AUTH_HEADERS,
     });
     expect(res.status).toBe(200);
     expect(triggerPmTick).toHaveBeenCalledOnce();
@@ -67,7 +68,7 @@ describe("POST /cli/pm/tick", () => {
     const app = appWith(triggerPmTick);
     const res = await app.request("/cli/pm/tick", {
       method: "POST",
-      headers: authHeaders,
+      headers: AUTH_HEADERS,
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as any;
@@ -86,7 +87,7 @@ describe("POST /cli/pm/tick", () => {
     // Start first tick — do NOT await it yet so it stays in-flight.
     const firstReq = app.request("/cli/pm/tick", {
       method: "POST",
-      headers: authHeaders,
+      headers: AUTH_HEADERS,
     });
 
     // Give the router a chance to set tickInProgress = true before the second call.
@@ -95,7 +96,7 @@ describe("POST /cli/pm/tick", () => {
     // Second concurrent call should be rejected with 409.
     const secondRes = await app.request("/cli/pm/tick", {
       method: "POST",
-      headers: authHeaders,
+      headers: AUTH_HEADERS,
     });
     expect(secondRes.status).toBe(409);
     const secondBody = (await secondRes.json()) as any;
@@ -110,7 +111,7 @@ describe("POST /cli/pm/tick", () => {
     triggerPmTick.mockResolvedValue(undefined);
     const thirdRes = await app.request("/cli/pm/tick", {
       method: "POST",
-      headers: authHeaders,
+      headers: AUTH_HEADERS,
     });
     expect(thirdRes.status).toBe(200);
   });
@@ -129,7 +130,7 @@ describe("POST /cli/pm/tick", () => {
     const app = appWith(vi.fn());
     const res = await app.request("/cli/pm/tick", {
       method: "POST",
-      headers: authHeaders,
+      headers: AUTH_HEADERS,
     });
     expect(res.status).toBe(404);
   });

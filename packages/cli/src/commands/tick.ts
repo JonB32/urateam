@@ -10,39 +10,7 @@
  * elapsed time and any errors that surfaced during the tick.
  */
 import { Command } from "commander";
-import * as os from "node:os";
-
-function fail(msg: string): never {
-  console.error(msg);
-  process.exit(1);
-}
-
-function resolveDashboardUrl(override?: string): string {
-  const raw =
-    override ??
-    process.env.URATEAM_DASHBOARD_URL ??
-    "http://localhost:3001";
-  return raw.replace(/\/+$/, "");
-}
-
-function resolveToken(): string {
-  const token = process.env.URATEAM_CLI_TOKEN;
-  if (!token) {
-    fail(
-      "URATEAM_CLI_TOKEN is not set. Set it in the same environment as the " +
-        "urateam container (matches `URATEAM_CLI_TOKEN` in .env) and re-run.",
-    );
-  }
-  return token;
-}
-
-function actor(): string {
-  try {
-    return os.userInfo().username;
-  } catch {
-    return "unknown";
-  }
-}
+import { fail, resolveDashboardUrl, resolveToken, actor } from "../lib/cli-utils.js";
 
 export const tickCommand = new Command("tick")
   .description(

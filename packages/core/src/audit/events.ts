@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { AuditEvent } from "../types.js";
 import { getAuthExpiredMessages } from "./auth-error-messages.js";
 
+const MAX_RATIONALE_CHARS = 500;
+const MAX_PAYLOAD_ITEMS = 50;
+
 function base(
   partial: Partial<AuditEvent> & Pick<AuditEvent, "eventType" | "actor" | "actorType">,
 ): AuditEvent {
@@ -147,7 +150,7 @@ export function pmTriageClassifiedEvent(args: {
     issueId: args.issueId,
     // Truncate rationale to 500 chars to keep the audit payload bounded
     // (target max audit event JSON size ~2KB; most rationale strings are <100 chars).
-    payload: { label: args.label, rationale: args.rationale.slice(0, 500) },
+    payload: { label: args.label, rationale: args.rationale.slice(0, MAX_RATIONALE_CHARS) },
   });
 }
 
@@ -674,8 +677,8 @@ export function pipelineScratchFilesBlockedEvent(args: {
     runId: args.runId,
     issueId: args.issueId,
     payload: {
-      files: args.files.slice(0, 50),
-      truncated: args.files.length > 50,
+      files: args.files.slice(0, MAX_PAYLOAD_ITEMS),
+      truncated: args.files.length > MAX_PAYLOAD_ITEMS,
       count: args.files.length,
     },
   });
@@ -770,7 +773,7 @@ export function pmEscalatedToNeedsDesignEvent(args: {
     payload: {
       failureCount: args.failureCount,
       errorMessage: args.errorMessage
-        ? args.errorMessage.slice(0, 500)
+        ? args.errorMessage.slice(0, MAX_RATIONALE_CHARS)
         : null,
     },
   });
@@ -1172,8 +1175,8 @@ export function pmTriageQualityScoreEvent(args: {
       predicted: args.predicted,
       actual: args.actual,
       intersection: args.intersection,
-      missed: args.missed.slice(0, 50),
-      unexpected: args.unexpected.slice(0, 50),
+      missed: args.missed.slice(0, MAX_PAYLOAD_ITEMS),
+      unexpected: args.unexpected.slice(0, MAX_PAYLOAD_ITEMS),
     },
   });
 }

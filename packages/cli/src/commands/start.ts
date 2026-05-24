@@ -1,6 +1,8 @@
 import { Command } from "commander";
 import { join } from "node:path";
 import { homedir } from "node:os";
+
+const DEFAULT_PM_AGENT_CRON_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
 import { preflightClaudeAuth } from "../lib/preflight-claude-auth.js";
 import { preflightDirs } from "../lib/preflight-dirs.js";
@@ -160,7 +162,7 @@ export const startCommand = new Command("start")
       }
       pmConfig = PmAgentConfigSchema.parse({
         enabled: true,
-        cronIntervalMs: parseInt(process.env.PM_AGENT_CRON_INTERVAL_MS ?? "1800000", 10),
+        cronIntervalMs: parseInt(process.env.PM_AGENT_CRON_INTERVAL_MS ?? String(DEFAULT_PM_AGENT_CRON_INTERVAL_MS), 10),
         maxInFlight: parseInt(process.env.PM_AGENT_MAX_IN_FLIGHT ?? "3", 10),
         dailyTokenBudget: parseInt(dailyBudgetStr, 10),
         slackChannelId,

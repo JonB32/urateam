@@ -165,6 +165,7 @@ export function createDashboard(config: DashboardConfig): Hono {
         if (e && now - e.windowStart < RATE_LIMIT_WINDOW_MS) {
           e.count++;
         } else {
+          if (e) rateLimitMap.delete(ip);
           rateLimitMap.set(ip, { count: 1, windowStart: now });
         }
       }
