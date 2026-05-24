@@ -5,6 +5,9 @@ import { createLogger } from "../logger.js";
 
 const log = createLogger({ component: "PmAgent:conflict" });
 
+/** Max file path length passed to Claude in conflict-prediction prompts. */
+const MAX_FILE_PATH_LENGTH = 500;
+
 function parseGitLines(output: string): string[] {
   return output.split("\n").map((f) => f.trim()).filter(Boolean);
 }
@@ -110,7 +113,7 @@ async function getWorktreeFiles(
 
   if (statusResult.status === "fulfilled") {
     for (const line of statusResult.value.split("\n")) {
-      if (line.length < 4) continue;
+      if (line.length < 4) continue; // min: 2 status chars + 1 space + 1 filename char
       const path = line.slice(3).trim();
       // Renamed files appear as "old -> new"; take the destination name.
       const parts = path.split(" -> ");
@@ -149,7 +152,7 @@ export async function predictConflict(
 
   const safeDescription = sanitize ? sanitize(candidateDescription) : candidateDescription;
   const safeFiles = allActiveFiles.map((f) =>
-    f.replace(/[^\w/.@_-]/g, "").slice(0, 500),
+    f.replace(/[^\w/.@_-]/g, "").slice(0, MAX_FILE_PATH_LENGTH),
   );
 
   const prompt =
