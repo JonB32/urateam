@@ -38,6 +38,7 @@ import { selfAuthLinearCommand } from "./commands/self-auth-linear.js";
 import { bootstrapCommand } from "./commands/bootstrap.js";
 import { triageQualityCommand } from "./commands/triage-quality.js";
 import { circuitCommand } from "./commands/circuit.js";
+import { tickCommand } from "./commands/tick.js";
 
 const program = new Command();
 
@@ -65,5 +66,6 @@ program.addCommand(selfAuthLinearCommand);
 program.addCommand(bootstrapCommand);
 program.addCommand(triageQualityCommand);
 program.addCommand(circuitCommand);
+program.addCommand(tickCommand);
 
 program.parse();

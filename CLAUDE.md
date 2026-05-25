@@ -101,7 +101,7 @@ Each gate forces `shouldDraft = true` and emits one blocking `ReviewFinding` per
 - **Auto-merge**: configurable per pipeline (`autoMerge`, `autoMergeMaxLines` default 200, `autoMergeExcludePatterns` globs). DB columns `autoMerged`, `autoMergeReason`. Skip → `notifier.onHumanReviewNeeded()`.
 - **Per-stage model override**: `stageModels` map (e.g. `{ implement: "claude-opus-4-6" }`); resolved as `config.stageModels?.[stage] ?? profile.model`.
 - **Token budget**: optional `maxTokens` with 80% alert and hard abort.
-- **Transient failure recovery**: auth/network/rate-limit classified as `"retriable"`, worktree preserved, PM Agent auto-resumes (max 3 retries).
+- **Transient failure recovery**: auth/network/rate-limit classified as `"retriable"`, worktree preserved, PM Agent auto-resumes (max 3 retries). **Container restarts (BEC-252)** now self-heal via the same path: `recoverStuckRuns()` at startup marks orphaned runs `retriable` instead of `failed` when the worktree AND agent-session JSONL transcript are both on disk AND the last stage is idempotent-safe. Non-idempotent stages (`push`, `await-approval`) are excluded and remain `failed` with a "not safe to auto-resume" message. The `pipeline.restart_interrupt_recovered` audit event records each successful handoff.
 - **Worktree auto-recovery**: `createWorktree` detects both "already checked out" and "already used by worktree" errors, force-removes the stale worktree, `git worktree prune`, retries with idempotent `-B <branch>` to guarantee HEAD is on a symbolic ref (not detached). See BEC-179.
 - **GitHub PR feedback** at `/webhooks/github`: `pull_request_review`, `pull_request_review_comment`, and `issue_comment` (regular PR comments — supports `@ateam` trigger keyword) all trigger `review-feedback` pipeline runs that check out the existing branch.
 
@@ -124,16 +124,53 @@ Each gate forces `shouldDraft = true` and emits one blocking `ReviewFinding` per
 - CLAUDE.md injected into worktrees (git-excluded via `.git/info/exclude`)
 
 ### Agent SDK Stream Handling
+- `consumeAgentStream()` handles two message shapes:
+  - `message.content` — tool-using sessions (executor stages)
+  - `message.message` — no-tool sessions (PM Agent Haiku calls with `allowedTools: []`)
+- Always use `consumeAgentStream` — never hand-roll stream iteration
+- **Pre-stream stall protection (BEC-183):** Two-layer defence against hung stages:
+  1. `firstMessageTimeoutMs` (default 5 min) in `consumeAgentStream` — throws `StagePreStreamStalledError` if no message arrives before the deadline. Covers SDK hangs before the first message (auth-retry loop, MCP init failure, never-resolving iterator).
+  2. `WALL_CLOCK_STAGE_TIMEOUT_MS` in `executor.ts` — per-stage hard cap (`implement`: 60 min, others: 30 min) via `Promise.race`. Second layer in case the first-message timer somehow fails to fire.
+  Both paths throw `StagePreStreamStalledError` → caught in `executeStage` catch block → `stage_runs.status = 'failed'`, run completes normally.
+- **`StageStalledError`** — mid-stream silence (after ≥1 message, no output tokens or turns) for `progressTimeoutMs` (default 30 min). See urateam#122.
+- **`StagePreStreamStalledError`** — pre-stream hang (no first message) within `firstMessageTimeoutMs` (default 5 min). See BEC-183. Exported from `executor/index.ts`.
+- **Implement-stage hang detection (BEC-209):** `detectStageHang(runId, stage, lastUpdateTime)` in `executor/hang-detection.ts`. Called every `HANG_DETECTION_INTERVAL_MS` (5 min) via `setInterval` in `executeStage()` (implement stage only). Logs ERROR when no progress for `DEFAULT_HANG_THRESHOLD_MS` (30 min). Detection is logging-only — actual termination is handled by the existing `StageStalledError` / wall-clock timeout guards. `stage_runs.last_progress_at` column written on each `onProgress`/`onToolMessage` tick for external visibility.
+- **Manual run termination:** `terminateRun(db, runId)` in `pipeline/terminate.ts` marks a run `status='failed'` with `error_message='manually terminated via CLI'`, clears the `active_work` entry, and allows resubmission. CLI: `ura admin terminate <runId>`. Does NOT signal the in-process executor; the running stage will still hit its wall-clock timeout. Use for recovery after process restarts with orphaned DB state.
+
+#### Implement-stage hang troubleshooting
+
+Symptoms of a hung implement stage:
+- Run `status='running'` for 30+ minutes with no `last_progress_at` update
+- No `stage still in progress` INFO log lines in the last 5+ minutes
+- Quality Observer files a `run-patterns` issue citing `stage: implement` and an old `updatedAt`
+
+Root causes:
+- **Auth retry loop**: Claude SDK stuck retrying expired credentials. Fix: `docker compose exec <svc> claude login` or set `ANTHROPIC_API_KEY`.
+- **MCP server deadlock**: MCP server failed to start or return. Check executor logs for MCP init errors. Restart the container.
+- **Resource exhaustion**: OOM killer or disk full causes the agent process to stall. Check `df -h` and container memory stats.
+- **Blocked I/O**: agent waiting on a tool (build, test, network) that never returns. Observed in long build pipelines with no tool timeout.
+
+Manual recovery procedure:
+1. Identify the run ID from the Quality Observer issue evidence JSON.
+2. `ura admin terminate <runId>` — marks the run failed, clears active_work.
+3. Move the Linear issue back to "Todo" (or wait for the PM Agent stuck-issue sweep, default 60 min).
+4. The next PM Agent tick will start a fresh pipeline run for the issue.
 
 `consumeAgentStream()` handles two message shapes:
 - `message.content` — tool-using sessions (executor stages)
 - `message.message` — no-tool sessions (PM Agent Haiku calls with `allowedTools: []`)
 
-**Pre-stream stall protection (BEC-183)** — two layers:
+**Pre-stream stall protection (BEC-183 / BEC-249)** — two layers, both covering the triage stage:
 1. `firstMessageTimeoutMs` (default 5 min) in `consumeAgentStream` throws `StagePreStreamStalledError` if no message arrives. Covers SDK hangs (auth-retry loop, MCP init failure, never-resolving iterator).
-2. `WALL_CLOCK_STAGE_TIMEOUT_MS` in `executor.ts` — per-stage hard cap via `Promise.race` (implement: 60 min; others: 30 min).
+2. `WALL_CLOCK_STAGE_TIMEOUT_MS` in `executor.ts` — per-stage hard cap via `Promise.race` (implement: 60 min; others: 30 min). Timer is started **before** `resolveSessionOpts` is called (BEC-249 fix), so a hung Docker volume (`urateam-dogfood-agent-sessions`) can no longer stall the stage indefinitely.
 
 Both paths land in `stage_runs.status = 'failed'`. `StageStalledError` is for mid-stream silence (≥1 message, then no output for `progressTimeoutMs`, default 30 min). Exported from `executor/index.ts`.
+
+**Manual kill recipe for stuck runs**: if a run is stuck before the auto-recovery window fires —
+1. `ura stop <runId>` (cancel mode) — aborts via `AbortController` wired into `consumeAgentStream`. Use from dashboard or CLI.
+2. If unresponsive (pre-stream hang, signal never reaches the iterator): `ura halt` stops the container; restart will re-queue retriable runs.
+3. PM Agent auto-recovers stuck In Progress runs after `PM_AGENT_STUCK_RUN_AGE_MIN` minutes (default 120) via `recoverStuckInProgressIssues`.
+4. To clear a circuit-broken issue immediately: `ura circuit reset <issueId>` (cascade-deletes failed runs, resets breaker state, strips the Tier-5-added `needs-design` label).
 
 ### Linear SDK Lazy Relations
 
@@ -186,6 +223,7 @@ budget check → **recover retriable runs** → recover stuck In Progress → **
 - **Operator escape hatch (BEC-236)**: `ura circuit list` shows currently-circuit-broken issues (derived from `batchCountConsecutiveFailures`, LEFT JOINed to `circuit_breaker_state` for the escalated_at / last_probe_at / probe_attempts columns). `ura circuit reset <ID>` clears a single issue: cascade-deletes failed `pipeline_runs` (+ `stage_runs`, `agent_logs`), drops the state row, strips the label (only when state row was present — preserves human-added `needs-design`). `ura circuit reset --all` bulk-clears every currently-broken issue (requires `--yes` or interactive confirmation; per-issue transaction so partial failures stay isolated). Architecture: direct DB access via `createDb()` + `LINEAR_API_KEY` env var, matching the `ura admin` pattern (NOT the `ura stop`/`halt` HTTP pattern). Audit event: `pm.circuit_breaker_reset_manual` per cleared issue with `scope: "single" | "bulk"`.
 - **Tier 5 escalation**: when breaker trips for an issue without `needs-design`, `promoteReadyIssues` adds the label, posts a Linear comment with the last failed run's `errorMessage` (truncated 500 chars), invokes `slackPostAlert(...)`, emits `pm.escalated_to_needs_design`. Idempotent.
 - **Zombie run recovery (BEC-184)**: `recoverStuckInProgressIssues` also fails runs in `status='running'` longer than `PM_AGENT_STUCK_RUN_AGE_MIN` minutes (default 60). Moves Linear issue to `stuckIssueTargetState`, emits `pm.recovered_long_running`.
+- **Orphan stage_run sweep (BEC-250)**: `sweepOrphanStageRuns` (`pm/actions/sweep-orphan-stage-runs.ts`) runs every PM tick (guarded by `!actions` in scheduler.ts). Cancels `stage_runs` whose parent `pipeline_run` reached a terminal state (`failed`/`cancelled`/`completed`/`aborted`) but whose `status` is still `'running'`; deletes `stage_runs` whose parent row is missing entirely (predates FK enforcement). Idempotent. The runner also cancels child stage_runs inline at every terminal-state transition (`abort`, `markRunCancelledImpl`, `failPipeline` permanent path, `recoverStuckRuns`, normal completion) via `cancelRunningStageRuns(db, runId)` in `runner.ts`.
 
 **Key design:** promote action moves issues in Linear (triggering webhooks). `startTodoIssues` directly calls `runner.start()` as a fallback for missed webhooks.
 
@@ -246,12 +284,13 @@ All gated by `isFeatureLicensed(<feature>)`. Routes 404 when unlicensed.
 
 | Feature | License | Setup doc | Notes |
 |---------|---------|-----------|-------|
-| Audit log (4.2) | `audit-log` | — | Append-only `audit_events` + projection from `pipeline_runs`/`pm_approvals`/`budget_alerts`. Dashboard: `/audit` + `/audit/page` + `/audit/export.csv`. Mutation only via `audit/retention.ts:pruneAuditLog` (enforced by `__tests__/audit-immutability.test.ts`). Retention default 365d in PM tick. **Canonical event list lives in `AuditEventTypeSchema` (`packages/core/src/types.ts`)** — don't duplicate that list here. **Current count: 60 event types** — the Tier 1d test enforces this sentence stays in sync with `AuditEventTypeSchema.options.length`. |
+| Audit log (4.2) | `audit-log` | — | Append-only `audit_events` + projection from `pipeline_runs`/`pm_approvals`/`budget_alerts`. Dashboard: `/audit` + `/audit/page` + `/audit/export.csv`. Mutation only via `audit/retention.ts:pruneAuditLog` (enforced by `__tests__/audit-immutability.test.ts`). Retention default 365d in PM tick. **Canonical event list lives in `AuditEventTypeSchema` (`packages/core/src/types.ts`)** — don't duplicate that list here. **Current count: 64 event types** — the Tier 1d test enforces this sentence stays in sync with `AuditEventTypeSchema.options.length`. |
 | SSO via WorkOS (4.1) | `sso` | `deploy/SSO_SETUP.md` | `dashboard_users` + `dashboard_sessions` tables. Middleware `packages/dashboard/src/middleware/sso.ts` skips `/auth/*` + `/webhooks/*`. **`getUserById` MUST return `role`** — dropping it silently 403s every user. **Session IDs are credentials — never log them** (`touchSessionLastSeen` logs only `id.slice(0,8) + "…"`). |
 | RBAC (4.4) | `rbac` | `deploy/RBAC_SETUP.md` | Roles `admin` / `operator` / `viewer`, global only in v1. Bootstrap via `URATEAM_ADMIN_EMAILS` env var (comma-separated, case-insensitive). `setUserRole` wraps SELECT+COUNT+UPDATE in a transaction to prevent last-admin demotion TOCTOU. Admin UI `/users`; CLI `ura admin {list,grant,revoke}`. v1 write action: `POST /runs/:id/retry`. |
 | Org policy (4.6) | `org-policy` | — | `PipelineConfig.policy = { pathBlocklist, maxTokensPerIssue, overrideLabel, mandatoryReviewers }`. Cost gate checks token total once after all stages. Override: case-insensitive Linear-label check; **security note: relies on Linear label creation being restricted**. Reviewer gate fires on GitHub App path only at auto-merge — `gh` CLI fallback passes `--reviewer` at PR creation but can't poll approvals. **Team-membership cache** in `verifyApprovalsReceived` (TTL 15 min, keyed by `(org, team_slug)`) — prevents GitHub secondary rate-limit exhaustion. Audit: `policy.{path_blocked,cost_exceeded,override_used,reviewers_requested}`. |
 | Cost & ROI (4.5) | `cost-roi` | — | `cost_rollups_daily` rebuilt nightly via `recomputeCostRollups` in PM tick. **Uses `""` empty-string sentinel for `linear_team_id`** so composite UNIQUE fires correctly on both drivers. Half-open `[start, end)` day boundary (`lt`, not `lte`). Preset windows (7d/30d/90d/365d) use `aggregateHybrid` (rollups + live today). Custom ranges bypass rollups. **Rollups are immutable snapshots** — pricing changes don't backfill. `aggregateAll` caps at 10k runs → `summary.truncated = true`. Dashboard `/cost` + `/cost/export.csv`. |
 | Operator stop & halt | (base) | `deploy/STOP_AND_HALT.md` | `pipeline/control-signals.ts`. **Single-run** `requestStop(runId, mode)`: `"cancel"` aborts via `AbortController` wired into `consumeAgentStream`; `"graceful"` lets current stage finish then skips remaining. Both → `status: "cancelled"`. **Container halt** `haltAll()`: sets pause flag + cancels all `activeRuns` + `activeFeedbackRuns`. Reversible via `/pm resume` (in-flight cancellations stay cancelled). Three surfaces — dashboard (RBAC-gated), CLI (`ura stop`/`ura halt`/`ura retry`, auth via `URATEAM_CLI_TOKEN`), Slack (`/pm cancel`/`/pm stop`/`/pm halt`). Audit: `run.cancelled`, `system.halted`. **Single-process state**: signal map resets on restart. |
+| On-demand PM tick (BEC-253) | (base) | — | `ura tick` POSTs to `POST /cli/pm/tick` (dashboard); awaits the full tick before responding. Auth via `URATEAM_CLI_TOKEN`. 503 when PM Agent disabled; 409 when a tick is already in progress (mutex). Wired in `start.ts` via `triggerPmTick: () => pmScheduler.tick()`. Audit: `pm.manual_tick_invoked`. |
 
 ### Coordination (`packages/core/src/pm/coordination.ts`)
 DB-backed `active_work` table tracks files modified by in-flight runs. `upsertActiveWork` uses atomic `onConflictDoUpdate` (requires UNIQUE on `run_id`). `removeActiveWork` called in runner's `finally` block + `abort()`. `checkFileOverlap` compares candidate files against active runs.

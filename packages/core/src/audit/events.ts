@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { AuditEvent } from "../types.js";
 import { getAuthExpiredMessages } from "./auth-error-messages.js";
 
+const MAX_RATIONALE_CHARS = 500;
+const MAX_PAYLOAD_ITEMS = 50;
+
 function base(
   partial: Partial<AuditEvent> & Pick<AuditEvent, "eventType" | "actor" | "actorType">,
 ): AuditEvent {
@@ -147,7 +150,7 @@ export function pmTriageClassifiedEvent(args: {
     issueId: args.issueId,
     // Truncate rationale to 500 chars to keep the audit payload bounded
     // (target max audit event JSON size ~2KB; most rationale strings are <100 chars).
-    payload: { label: args.label, rationale: args.rationale.slice(0, 500) },
+    payload: { label: args.label, rationale: args.rationale.slice(0, MAX_RATIONALE_CHARS) },
   });
 }
 
@@ -674,8 +677,8 @@ export function pipelineScratchFilesBlockedEvent(args: {
     runId: args.runId,
     issueId: args.issueId,
     payload: {
-      files: args.files.slice(0, 50),
-      truncated: args.files.length > 50,
+      files: args.files.slice(0, MAX_PAYLOAD_ITEMS),
+      truncated: args.files.length > MAX_PAYLOAD_ITEMS,
       count: args.files.length,
     },
   });
@@ -770,7 +773,7 @@ export function pmEscalatedToNeedsDesignEvent(args: {
     payload: {
       failureCount: args.failureCount,
       errorMessage: args.errorMessage
-        ? args.errorMessage.slice(0, 500)
+        ? args.errorMessage.slice(0, MAX_RATIONALE_CHARS)
         : null,
     },
   });
@@ -819,6 +822,23 @@ export function pmCircuitBreakerRecoveredEvent(args: {
     issueId: args.issueId,
     payload: {
       probeAttempts: args.probeAttempts,
+    },
+  });
+}
+
+/** BEC-253 — `ura tick` invoked a PM tick on demand via the CLI. */
+export function pmManualTickInvokedEvent(args: {
+  actor: string;
+  durationMs: number;
+  errors: string[];
+}): AuditEvent {
+  return base({
+    eventType: "pm.manual_tick_invoked",
+    actor: args.actor,
+    actorType: "cli",
+    payload: {
+      durationMs: args.durationMs,
+      errors: args.errors,
     },
   });
 }
@@ -1126,6 +1146,35 @@ export function systemSessionVolumeWarningEvent(args: {
 }
 
 /**
+ * BEC-252 — emitted by `recoverRetriableRuns` when a restart-interrupted run
+ * is successfully handed back to the runner. Both worktree and JSONL
+ * transcript were present at restart-detection time. `restartGapMs` is the
+ * elapsed time from when the interrupt was recorded (`completedAt`) to now.
+ */
+export function restartInterruptRecoveredEvent(args: {
+  runId: string;
+  issueId: string;
+  stage: string;
+  worktreeExisted: boolean;
+  transcriptExisted: boolean;
+  restartGapMs: number;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.restart_interrupt_recovered",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      stage: args.stage,
+      worktreeExisted: args.worktreeExisted,
+      transcriptExisted: args.transcriptExisted,
+      restartGapMs: args.restartGapMs,
+    },
+  });
+}
+
+/**
  * Tier 6e — emitted after each successful push. Records how closely triage
  * v2's `affectedFiles` prediction matched the actual changed files in the
  * final diff. When `hasV2Prediction` is false the triage stage ran v1 and
@@ -1155,8 +1204,56 @@ export function pmTriageQualityScoreEvent(args: {
       predicted: args.predicted,
       actual: args.actual,
       intersection: args.intersection,
-      missed: args.missed.slice(0, 50),
-      unexpected: args.unexpected.slice(0, 50),
+      missed: args.missed.slice(0, MAX_PAYLOAD_ITEMS),
+      unexpected: args.unexpected.slice(0, MAX_PAYLOAD_ITEMS),
+    },
+  });
+}
+
+/**
+ * BEC-222 — emitted when a stale remote branch (no active DB run, no open
+ * PR) is detected at pipeline start. The branch is deleted and the run
+ * proceeds from scratch. Payload includes the branch name so operators can
+ * see the recovery rate and identify patterns.
+ */
+export function pipelineStaleBranchRecoveredEvent(args: {
+  issueId: string;
+  branch: string;
+  runId: string;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.stale_branch_recovered",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: { branch: args.branch },
+  });
+}
+
+/**
+ * BEC-222 — emitted when an existing remote branch causes a pipeline start
+ * to be skipped because a live run or open PR already holds it. Surfaces
+ * the previously-silent skip in the audit log so operators can diagnose
+ * stalled issues.
+ */
+export function pipelineSkippedExistingBranchEvent(args: {
+  issueId: string;
+  branch: string;
+  reason: "active-run" | "open-pr";
+  activeRunId?: string;
+  prNumber?: number;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.skipped_existing_branch",
+    actor: "system",
+    actorType: "system",
+    issueId: args.issueId,
+    payload: {
+      branch: args.branch,
+      reason: args.reason,
+      ...(args.activeRunId !== undefined ? { activeRunId: args.activeRunId } : {}),
+      ...(args.prNumber !== undefined ? { prNumber: args.prNumber } : {}),
     },
   });
 }
