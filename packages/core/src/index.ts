@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
+export { parseIntOr, parsePosIntOr, parseFloatOr, parseOptPosInt, parseCsv } from "./util/env.js";
 export * from "./types.js";
 export {
   checkLicense,
@@ -16,7 +17,7 @@ export { rootLogger, createLogger, addLogStream } from "./logger.js";
 export { createDb, isPostgres, sqlDateGroup, sqlDaysAgoFilter, type Db, type AnyDb } from "./db/index.js";
 export { pipelineRuns, stageRuns, agentLogs, activeWork, pmApprovals, circuitBreakerState, pipelineRunDecisions, reviewModelRuns } from "./db/index.js";
 export { batchCountConsecutiveFailures, deleteFailedRunsForIssue } from "./pm/actions/db-queries.js";
-export { createApp, type ServerConfig } from "./server.js";
+export { createApp, type ServerConfig, type PmSlackInterfaceConfig } from "./server.js";
 export { PipelineRunner, type PipelineRunnerConfig, type LinearIssue } from "./pipeline/index.js";
 export { type StopMode, requestRunStop, getStopSignal, clearStopSignal } from "./pipeline/index.js";
 export {

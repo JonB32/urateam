@@ -5,12 +5,9 @@
  * dev.ts and start.ts before BEC-152 (deep-review pass 1).
  */
 import type { RepoConfig } from "@urateam/core";
+import { parseCsv } from "@urateam/core";
 import { repoPluginsFromEnv } from "./repo-plugins-from-env.js";
 import { readUserLevelConfig } from "./user-level-config.js";
-
-function parseCsv(raw: string): string[] {
-  return raw.split(",").filter(Boolean);
-}
 
 /**
  * Build a RepoConfig map from standard env vars.
@@ -32,33 +29,33 @@ function parseCsv(raw: string): string[] {
  *
  * Returns an empty object when REPO_TEAM_ID or REPO_URL is unset.
  */
-export function buildRepoConfigsFromEnv(): Record<string, RepoConfig> {
+export function buildRepoConfigsFromEnv(env: NodeJS.ProcessEnv = process.env): Record<string, RepoConfig> {
   const repoConfigs: Record<string, RepoConfig> = {};
-  if (process.env.REPO_TEAM_ID && process.env.REPO_URL) {
+  if (env.REPO_TEAM_ID && env.REPO_URL) {
     const repoEntry: RepoConfig = {
-      url: process.env.REPO_URL,
-      defaultBranch: process.env.REPO_DEFAULT_BRANCH ?? "main",
-      testCommand: process.env.REPO_TEST_CMD ?? "pnpm test",
-      buildCommand: process.env.REPO_BUILD_CMD ?? "pnpm build",
+      url: env.REPO_URL,
+      defaultBranch: env.REPO_DEFAULT_BRANCH ?? "main",
+      testCommand: env.REPO_TEST_CMD ?? "pnpm test",
+      buildCommand: env.REPO_BUILD_CMD ?? "pnpm build",
     };
 
-    if (process.env.GITHUB_WEBHOOK_SECRET) {
+    if (env.GITHUB_WEBHOOK_SECRET) {
       repoEntry.githubFeedback = {
-        autoTrigger: process.env.GITHUB_FEEDBACK_AUTO_TRIGGER !== "false",
-        triggerKeyword: process.env.GITHUB_FEEDBACK_TRIGGER_KEYWORD,
-        allowedReviewers: process.env.GITHUB_FEEDBACK_ALLOWED_REVIEWERS
-          ? parseCsv(process.env.GITHUB_FEEDBACK_ALLOWED_REVIEWERS)
+        autoTrigger: env.GITHUB_FEEDBACK_AUTO_TRIGGER !== "false",
+        triggerKeyword: env.GITHUB_FEEDBACK_TRIGGER_KEYWORD,
+        allowedReviewers: env.GITHUB_FEEDBACK_ALLOWED_REVIEWERS
+          ? parseCsv(env.GITHUB_FEEDBACK_ALLOWED_REVIEWERS)
           : undefined,
-        botLogins: process.env.GITHUB_FEEDBACK_BOT_LOGINS
-          ? parseCsv(process.env.GITHUB_FEEDBACK_BOT_LOGINS)
+        botLogins: env.GITHUB_FEEDBACK_BOT_LOGINS
+          ? parseCsv(env.GITHUB_FEEDBACK_BOT_LOGINS)
           : undefined,
       };
     }
 
-    const pluginCfg = repoPluginsFromEnv();
+    const pluginCfg = repoPluginsFromEnv(env);
     if (pluginCfg) repoEntry.plugins = pluginCfg;
 
-    repoConfigs[process.env.REPO_TEAM_ID] = repoEntry;
+    repoConfigs[env.REPO_TEAM_ID] = repoEntry;
     return repoConfigs;
   }
 

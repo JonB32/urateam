@@ -3,6 +3,7 @@ import type { AnyDb } from "../../db/client.js";
 import { AgenticDeepReviewProvider } from "./agentic-deep-review.js";
 import { OpenRouterFanoutProvider } from "./openrouter-fanout.js";
 import { createLogger } from "../../logger.js";
+import { parsePosIntOr, parseOptPosInt, parseCsv } from "../../util/env.js";
 
 const log = createLogger({ component: "review.provider" });
 
@@ -71,16 +72,11 @@ const SANE_OUTPUT_TOKENS_FLOOR = 256;
  *  this is a non-blocking best-effort check and must not delay boot. */
 const CATALOG_FETCH_TIMEOUT_MS = 10_000;
 
-/** Splits a comma-separated model list, trims whitespace, drops empty entries. */
-function parseModels(raw: string): string[] {
-  return raw.split(",").map((s) => s.trim()).filter(Boolean);
-}
-
 export function getEnabledProviders(env: NodeJS.ProcessEnv): ReviewProvider[] {
   const providers: ReviewProvider[] = [new AgenticDeepReviewProvider()];
 
   const rawModels = env.REVIEW_MODELS ?? "";
-  const models = parseModels(rawModels);
+  const models = parseCsv(rawModels);
   const apiKey = env.OPENROUTER_API_KEY ?? "";
   const fanoutDesired = models.length > 0;
   const keyPresent = apiKey.length > 0;
@@ -100,7 +96,7 @@ export function getEnabledProviders(env: NodeJS.ProcessEnv): ReviewProvider[] {
   // BEC-164: optional output-token cap. Unset = the model's provider default
   // applies (can be huge → 402s on limited-budget accounts). Invalid input
   // falls through to undefined so the cap stays unset.
-  const maxOutputTokens = parsePositiveIntOrUndefined(env.REVIEW_MODELS_MAX_OUTPUT_TOKENS);
+  const maxOutputTokens = parseOptPosInt(env.REVIEW_MODELS_MAX_OUTPUT_TOKENS);
   if (maxOutputTokens !== undefined && maxOutputTokens < SANE_OUTPUT_TOKENS_FLOOR) {
     log.warn(
       {
@@ -117,8 +113,8 @@ export function getEnabledProviders(env: NodeJS.ProcessEnv): ReviewProvider[] {
       apiKey,
       baseUrl: env.OPENROUTER_BASE_URL ?? DEFAULT_BASE_URL,
       models,
-      timeoutMs: parseIntOr(env.REVIEW_MODELS_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
-      maxInputTokens: parseIntOr(env.REVIEW_MODELS_MAX_INPUT_TOKENS, DEFAULT_MAX_INPUT_TOKENS),
+      timeoutMs: parsePosIntOr(env.REVIEW_MODELS_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
+      maxInputTokens: parsePosIntOr(env.REVIEW_MODELS_MAX_INPUT_TOKENS, DEFAULT_MAX_INPUT_TOKENS),
       maxOutputTokens,
     }),
   );
@@ -141,7 +137,7 @@ export function getEnabledProviders(env: NodeJS.ProcessEnv): ReviewProvider[] {
  */
 export async function validateReviewModels(env: NodeJS.ProcessEnv): Promise<void> {
   const rawModels = env.REVIEW_MODELS ?? "";
-  const models = parseModels(rawModels);
+  const models = parseCsv(rawModels);
   const apiKey = env.OPENROUTER_API_KEY ?? "";
 
   // Only run when both vars are configured — same symmetric requirement as
@@ -208,21 +204,3 @@ function levenshtein(a: string, b: string): number {
   return dp[n];
 }
 
-function parseIntOr(raw: string | undefined, fallback: number): number {
-  if (!raw) return fallback;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-function parsePositiveIntOrUndefined(raw: string | undefined): number | undefined {
-  if (!raw) return undefined;
-  const n = parseInt(raw, 10);
-  if (!Number.isFinite(n) || n <= 0) {
-    log.warn(
-      { var: "REVIEW_MODELS_MAX_OUTPUT_TOKENS", value: raw },
-      "REVIEW_MODELS_MAX_OUTPUT_TOKENS is not a positive integer — treating as unset (model provider default applies)",
-    );
-    return undefined;
-  }
-  return n;
-}

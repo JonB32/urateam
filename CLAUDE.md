@@ -324,6 +324,7 @@ DB-backed `active_work` table tracks files modified by in-flight runs. `upsertAc
 - `matchesAnyPattern()` in `util/glob.ts` for glob matching (path-segment-aware `**` expansion, no ReDoS risk). Used by path gate + auto-merge excludes.
 - `getChangedFiles()` in `git.ts` logs warnings on failure (fail-open but visible)
 - **`create-urateam` package is exempt from `convention-console` and `credential-in-interface`**. It's the standalone install-wizard binary (think `create-react-app`): `console.log` IS the operator interface, and its job is collecting credentials to write to a fresh `.env`. Mark such interfaces with `/** @internal */` JSDoc. Review findings inside `packages/create-urateam/**` for these categories should be acknowledged and dismissed.
+- **`EnvConfig` credential-in-interface allow-list**: `packages/cli/src/lib/load-env-config.ts` exports `EnvConfig` which includes `*Token`, `*Secret`, `*Key`, and `*Password` fields by design — it IS the typed `process.env` replacement at the CLI layer, not a domain model. This is the sole allow-listed exception to the credential-in-interface convention.
 - Pipeline labels must match keys in `pipeline/config.ts`: `auto-implement`, `bug`, `quick-fix`, `needs-design`
 - Slack `url_verification` challenge must be handled before signature verification
 - **Redact credentials from URLs before logging**: `url.replace(/:\/\/[^@]+@/, "://[redacted]@")`

@@ -12,6 +12,7 @@ import {
   userLevelConfigPath,
   readUserLevelConfig,
 } from "../lib/user-level-config.js";
+import { loadEnvConfig } from "../lib/load-env-config.js";
 
 /**
  * User-level: also load `~/.urateam/.env` (or `$URATEAM_HOME/.env`) so secrets
@@ -72,45 +73,37 @@ export const startCommand = new Command("start")
   .action(async (options) => {
     try {
     loadUserLevelEnv();
+    // Boot-time env validation — runs first, reports all errors at once.
+    const env = loadEnvConfig("start");
+
+
     const { createApp, defaultConfigs, applyDeepReviewPassesOverride, applyAutoMergeOverride, cleanupWorktrees, runAgentBranchSweep, addLogStream, initSlackAlertManager, createSlackAlertStream, validateReviewModels } = await import("@urateam/core");
 
     // --- Slack error alerts (opt-in) ---
     if (
-      process.env.SLACK_ERROR_ALERTS === "true" &&
-      process.env.SLACK_BOT_TOKEN &&
-      process.env.PM_AGENT_SLACK_CHANNEL_ID
+      env.SLACK_ERROR_ALERTS &&
+      env.SLACK_BOT_TOKEN &&
+      env.PM_AGENT_SLACK_CHANNEL_ID
     ) {
       const manager = initSlackAlertManager(
-        process.env.SLACK_BOT_TOKEN,
-        process.env.PM_AGENT_SLACK_CHANNEL_ID,
+        env.SLACK_BOT_TOKEN,
+        env.PM_AGENT_SLACK_CHANNEL_ID,
       );
       addLogStream(createSlackAlertStream(manager));
-      console.log(`Slack error alerts: enabled (channel ${process.env.PM_AGENT_SLACK_CHANNEL_ID})`);
+      console.log(`Slack error alerts: enabled (channel ${env.PM_AGENT_SLACK_CHANNEL_ID})`);
     }
     const { createDashboard } = await import("@urateam/dashboard");
     const { serve } = await import("@hono/node-server");
 
-    // --- Validate required env vars ---
-    if (!process.env.LINEAR_WEBHOOK_SECRET) {
-      console.error("LINEAR_WEBHOOK_SECRET is required");
-      process.exit(1);
-    }
-
-    // --- Build config from env vars ---
-    const dashboardUser = process.env.DASHBOARD_USER;
-    const dashboardPass = process.env.DASHBOARD_PASSWORD;
-    if (!dashboardUser || !dashboardPass) {
-      console.error(
-        "DASHBOARD_USER and DASHBOARD_PASSWORD are required. " +
-          "The dashboard exposes sensitive operational data and must not be publicly accessible. " +
-          "Set both environment variables and restart.",
-      );
-      process.exit(1);
-    }
-    const dashboardAuth = { username: dashboardUser, password: dashboardPass };
+    // Dashboard auth is validated by loadEnvConfig("start") — safe to assert non-null.
+    const dashboardAuth = {
+      username: env.DASHBOARD_USER!,
+      password: env.DASHBOARD_PASSWORD!,
+    };
 
     // Build repoConfigs from env: REPO_TEAM_ID, REPO_URL, REPO_DEFAULT_BRANCH, etc.
-    const repoConfigs = buildRepoConfigsFromEnv();
+    // Pass process.env explicitly — loadEnvConfig() has already validated all vars.
+    const repoConfigs = buildRepoConfigsFromEnv(process.env);
 
     // Fail fast if no repoConfigs could be built. Same guard as `ura dev` —
     // without it the webhook server starts looking healthy and silently
@@ -119,72 +112,46 @@ export const startCommand = new Command("start")
 
     // GitHub App config (optional)
     const { buildGitHubConfigFromEnv } = await import("@urateam/core");
-    const github = buildGitHubConfigFromEnv();
+    const github = buildGitHubConfigFromEnv(process.env);
 
     // PM Agent Slack interface (optional — requires signing secret)
-    const slackSigningSecret = process.env.SLACK_SIGNING_SECRET;
-    const pmSlack = (slackSigningSecret && process.env.SLACK_BOT_TOKEN && process.env.PM_AGENT_SLACK_CHANNEL_ID)
-      ? {
-          signingSecret: slackSigningSecret,
-          botToken: process.env.SLACK_BOT_TOKEN,
-          channelId: process.env.PM_AGENT_SLACK_CHANNEL_ID,
-          teamIds: (process.env.PM_AGENT_TEAM_IDS ?? "").split(",").filter(Boolean),
-        }
-      : undefined;
+    const slackSigningSecret = env.SLACK_SIGNING_SECRET;
+    let pmSlack: import("@urateam/core").PmSlackInterfaceConfig | undefined =
+      (slackSigningSecret && env.SLACK_BOT_TOKEN && env.PM_AGENT_SLACK_CHANNEL_ID)
+        ? {
+            signingSecret: slackSigningSecret,
+            botToken: env.SLACK_BOT_TOKEN,
+            channelId: env.PM_AGENT_SLACK_CHANNEL_ID,
+            teamIds: (env.PM_AGENT_TEAM_IDS ?? "").split(",").filter(Boolean),
+          }
+        : undefined;
 
     // --- PM Agent config (built up-front so createApp can thread it into the webhook) ---
     // The webhook-side budget gate in webhook/handler.ts needs config.pmConfig to
     // activate the 100% hard-stop. If we only built this inside the PM_AGENT_ENABLED
     // branch below, the gate would be inert in production.
-    const pmAgentEnabled = process.env.PM_AGENT_ENABLED === "true";
     let pmConfig: import("@urateam/core").PmAgentConfig | undefined;
-    if (pmAgentEnabled) {
+    if (env.PM_AGENT_ENABLED) {
       const { PmAgentConfigSchema } = await import("@urateam/core");
-      const slackBotToken = process.env.SLACK_BOT_TOKEN;
-      if (!slackBotToken) {
-        console.error("SLACK_BOT_TOKEN is required when PM_AGENT_ENABLED=true");
-        process.exit(1);
-      }
-      const dailyBudgetStr = process.env.PM_AGENT_DAILY_TOKEN_BUDGET;
-      if (!dailyBudgetStr) {
-        console.error("PM_AGENT_DAILY_TOKEN_BUDGET is required when PM_AGENT_ENABLED=true");
-        process.exit(1);
-      }
-      const slackChannelId = process.env.PM_AGENT_SLACK_CHANNEL_ID;
-      if (!slackChannelId) {
-        console.error("PM_AGENT_SLACK_CHANNEL_ID is required when PM_AGENT_ENABLED=true");
-        process.exit(1);
-      }
-      const teamIds = (process.env.PM_AGENT_TEAM_IDS ?? "").split(",").filter(Boolean);
-      if (teamIds.length === 0) {
-        console.error("PM_AGENT_TEAM_IDS is required when PM_AGENT_ENABLED=true");
-        process.exit(1);
-      }
+      // All conditional requirements already validated by loadEnvConfig — safe to assert.
       pmConfig = PmAgentConfigSchema.parse({
         enabled: true,
-        cronIntervalMs: parseInt(process.env.PM_AGENT_CRON_INTERVAL_MS ?? String(DEFAULT_PM_AGENT_CRON_INTERVAL_MS), 10),
-        maxInFlight: parseInt(process.env.PM_AGENT_MAX_IN_FLIGHT ?? "3", 10),
-        dailyTokenBudget: parseInt(dailyBudgetStr, 10),
-        slackChannelId,
-        teamIds,
-        // BEC-150: opt-in label-match filter for the promote step. Default false
-        // for back-compat; set true to prevent unactionable Backlog items from
-        // being promoted to Todo.
-        requirePipelineLabelForPromote:
-          process.env.PM_AGENT_REQUIRE_PIPELINE_LABEL_FOR_PROMOTE === "true",
-        // BEC-161: skip promote/start-todo for issues with N+ consecutive
-        // failed runs. Default 3; set 0 to disable.
-        maxConsecutiveFailures: parseInt(
-          process.env.PM_AGENT_MAX_CONSECUTIVE_FAILURES ?? "3",
-          10,
-        ),
+        // Use EnvConfig values (defaults already applied); no ?? fallbacks needed.
+        cronIntervalMs: env.PM_AGENT_CRON_INTERVAL_MS,
+        maxInFlight: env.PM_AGENT_MAX_IN_FLIGHT,
+        dailyTokenBudget: env.PM_AGENT_DAILY_TOKEN_BUDGET,
+        slackChannelId: env.PM_AGENT_SLACK_CHANNEL_ID,
+        teamIds: (env.PM_AGENT_TEAM_IDS ?? "").split(",").filter(Boolean),
+        requirePipelineLabelForPromote: env.PM_AGENT_REQUIRE_PIPELINE_LABEL_FOR_PROMOTE,
+        maxConsecutiveFailures: env.PM_AGENT_MAX_CONSECUTIVE_FAILURES,
       });
     }
 
     // --- Release Manager config (BEC-135 — Pro tier) ---
+    // GitHub App credential check moved to loadEnvConfig — no longer deferred.
     let rmConfig: import("@urateam/core").ReleaseManagerConfig | undefined;
     let rmRepoUrl: string | undefined;
-    if (process.env.RELEASE_MANAGER_ENABLED === "true") {
+    if (env.RELEASE_MANAGER_ENABLED) {
       const { ReleaseManagerConfigSchema, isFeatureLicensed } = await import("@urateam/core");
 
       if (!isFeatureLicensed("release-manager")) {
@@ -204,53 +171,38 @@ export const startCommand = new Command("start")
       }
 
       const triggers: Record<string, unknown> = {};
-      if (process.env.RELEASE_MANAGER_TRIGGER_MERGED_PRS_SINCE) {
-        triggers.mergedPRsSince = parseInt(process.env.RELEASE_MANAGER_TRIGGER_MERGED_PRS_SINCE, 10);
+      if (env.RELEASE_MANAGER_TRIGGER_MERGED_PRS_SINCE !== undefined) {
+        triggers.mergedPRsSince = env.RELEASE_MANAGER_TRIGGER_MERGED_PRS_SINCE;
       }
-      if (process.env.RELEASE_MANAGER_TRIGGER_TIME_SINCE_LAST_HOURS) {
-        triggers.timeSinceLastHours = parseInt(process.env.RELEASE_MANAGER_TRIGGER_TIME_SINCE_LAST_HOURS, 10);
+      if (env.RELEASE_MANAGER_TRIGGER_TIME_SINCE_LAST_HOURS !== undefined) {
+        triggers.timeSinceLastHours = env.RELEASE_MANAGER_TRIGGER_TIME_SINCE_LAST_HOURS;
       }
-      if (process.env.RELEASE_MANAGER_TRIGGER_CI_GREEN_FOR_MINUTES) {
-        triggers.ciGreenForMinutes = parseInt(process.env.RELEASE_MANAGER_TRIGGER_CI_GREEN_FOR_MINUTES, 10);
+      if (env.RELEASE_MANAGER_TRIGGER_CI_GREEN_FOR_MINUTES !== undefined) {
+        triggers.ciGreenForMinutes = env.RELEASE_MANAGER_TRIGGER_CI_GREEN_FOR_MINUTES;
       }
-      if (process.env.RELEASE_MANAGER_TRIGGER_REQUIRE_SLACK_APPROVAL === "true") {
+      if (env.RELEASE_MANAGER_TRIGGER_REQUIRE_SLACK_APPROVAL) {
         triggers.requireSlackApproval = true;
       }
 
-      if (process.env.RELEASE_MANAGER_TRIGGER_QA_WORKFLOW) {
-        const qaWorkflow = process.env.RELEASE_MANAGER_TRIGGER_QA_WORKFLOW;
-        const qaTeamId = process.env.RELEASE_MANAGER_TRIGGER_QA_LINEAR_TEAM_ID;
-        const qaTimeoutMin = process.env.RELEASE_MANAGER_TRIGGER_QA_TIMEOUT_MINUTES;
-
-        if (!qaTeamId) {
-          console.error(
-            "RELEASE_MANAGER_TRIGGER_QA_WORKFLOW set but RELEASE_MANAGER_TRIGGER_QA_LINEAR_TEAM_ID is missing. " +
-            "Configure linearTeamId for filing gap issues.",
-          );
-          process.exit(1);
-        }
-        if (!process.env.LINEAR_API_KEY) {
-          console.error(
-            "qaCheck requires LINEAR_API_KEY (used to file gap issues). Set it and restart.",
-          );
-          process.exit(1);
-        }
-
+      if (env.RELEASE_MANAGER_TRIGGER_QA_WORKFLOW) {
+        // Conditional requirements already validated by loadEnvConfig.
         triggers.qaCheck = {
-          workflow: qaWorkflow,
-          linearTeamId: qaTeamId,
-          ...(qaTimeoutMin ? { timeoutMinutes: parseInt(qaTimeoutMin, 10) } : {}),
+          workflow: env.RELEASE_MANAGER_TRIGGER_QA_WORKFLOW,
+          linearTeamId: env.RELEASE_MANAGER_TRIGGER_QA_LINEAR_TEAM_ID!,
+          ...(env.RELEASE_MANAGER_TRIGGER_QA_TIMEOUT_MINUTES
+            ? { timeoutMinutes: env.RELEASE_MANAGER_TRIGGER_QA_TIMEOUT_MINUTES }
+            : {}),
         };
       }
 
       try {
         rmConfig = ReleaseManagerConfigSchema.parse({
           enabled: true,
-          schedule: process.env.RELEASE_MANAGER_SCHEDULE ?? "*/30 * * * *",
+          schedule: env.RELEASE_MANAGER_SCHEDULE,
           triggers,
-          versionBump: process.env.RELEASE_MANAGER_VERSION_BUMP ?? "patch",
-          slackChannel: process.env.RELEASE_MANAGER_SLACK_CHANNEL,
-          branch: process.env.RELEASE_MANAGER_BRANCH ?? "main",
+          versionBump: env.RELEASE_MANAGER_VERSION_BUMP,
+          slackChannel: env.RELEASE_MANAGER_SLACK_CHANNEL,
+          branch: env.RELEASE_MANAGER_BRANCH,
         });
       } catch (err) {
         console.error("Release Manager config invalid:", (err as Error).message);
@@ -270,14 +222,14 @@ export const startCommand = new Command("start")
     const pipelineConfigs = applyAutoMergeOverride(
       applyDeepReviewPassesOverride(
         defaultConfigs,
-        process.env.URATEAM_DEEP_REVIEW_PASSES,
+        env.URATEAM_DEEP_REVIEW_PASSES,
       ),
-      process.env.URATEAM_AUTO_MERGE,
+      env.URATEAM_AUTO_MERGE,
     );
 
     // --- Resolve and validate workspace directories ---
-    const agentRunDir = process.env.AGENT_RUN_DIR ?? join(homedir(), "data", "runs");
-    const repoCloneDir = process.env.REPO_CLONE_DIR ?? join(homedir(), "work", "repos");
+    const agentRunDir = env.AGENT_RUN_DIR ?? join(homedir(), "data", "runs");
+    const repoCloneDir = env.REPO_CLONE_DIR ?? join(homedir(), "work", "repos");
 
     // Run three independent I/O checks in parallel so startup is faster:
     //   • validateReviewModels (BEC-171) — checks REVIEW_MODELS against OpenRouter catalog
@@ -290,27 +242,27 @@ export const startCommand = new Command("start")
     ]);
 
     const config = {
-      webhookSecret: process.env.LINEAR_WEBHOOK_SECRET,
-      linearApiKey: process.env.LINEAR_API_KEY ?? "",
+      webhookSecret: env.LINEAR_WEBHOOK_SECRET!,
+      linearApiKey: env.LINEAR_API_KEY,
       pipelineConfigs,
       repoConfigs,
-      databaseUrl: process.env.DATABASE_URL,
-      slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
-      discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL,
-      concurrency: parseInt(process.env.MAX_CONCURRENT_RUNS ?? "3", 10),
+      databaseUrl: env.DATABASE_URL,
+      slackWebhookUrl: env.SLACK_WEBHOOK_URL,
+      discordWebhookUrl: env.DISCORD_WEBHOOK_URL,
+      concurrency: env.MAX_CONCURRENT_RUNS,
       agentRunDir,
       repoCloneDir,
       github,
       dashboardAuth,
       pmSlack,
       pmConfig,
-      githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET,
+      githubWebhookSecret: env.GITHUB_WEBHOOK_SECRET,
     };
 
     // --- SSO (Enterprise, opt-in via URATEAM_SSO_ENABLED=true) ---
     // Validate SSO env vars BEFORE opening the DB / starting the runner so a
     // misconfigured deployment fails fast without leaking resources.
-    const ssoBootstrap = await bootstrapSsoFromEnv();
+    const ssoBootstrap = await bootstrapSsoFromEnv(process.env);
 
     // --- Start servers ---
     const { app, runner, db } = await createApp(config);
@@ -327,20 +279,20 @@ export const startCommand = new Command("start")
 
     // --- Recover runs interrupted by a previous restart ---
     await runner.recoverStuckRuns();
-    const port = parseInt(process.env.PORT ?? options.port, 10);
-    const dashboardPort = parseInt(process.env.DASHBOARD_PORT ?? options.dashboardPort, 10);
+    const port = env.PORT;
+    const dashboardPort = env.DASHBOARD_PORT;
 
     // --- PM Agent scheduler (create before dashboard so triggerPmTick can be wired in) ---
     // The scheduler object is created here; the initial tick + interval are started after
     // the servers come up. The dashboard callback captures the scheduler by reference.
     let pmScheduler: { tick(): Promise<void> } | undefined;
-    if (pmAgentEnabled && pmConfig) {
+    if (env.PM_AGENT_ENABLED && pmConfig) {
       const { createPmScheduler } = await import("@urateam/core");
       pmScheduler = createPmScheduler({
         config: pmConfig,
         db,
         linearApiKey: config.linearApiKey,
-        slackBotToken: process.env.SLACK_BOT_TOKEN!,
+        slackBotToken: env.SLACK_BOT_TOKEN!,
         repoCloneDir: config.repoCloneDir,
         runner,
         pipelineConfigs: config.pipelineConfigs,
@@ -561,9 +513,7 @@ export const startCommand = new Command("start")
     }
 
     // --- Worktree cleanup cron ---
-    // agentRunDir is already resolved above (before preflightClaudeAuth).
-    const _parsedTtl = parseInt(process.env.WORKTREE_TTL_HOURS ?? "24", 10);
-    const worktreeTtlHours = Number.isFinite(_parsedTtl) && _parsedTtl > 0 ? _parsedTtl : 24;
+    const worktreeTtlHours = env.WORKTREE_TTL_HOURS;
 
     const cleanupInterval = await scheduleRepeatedly(async () => {
       const removed = await cleanupWorktrees(agentRunDir, worktreeTtlHours);
@@ -576,14 +526,7 @@ export const startCommand = new Command("start")
     // Sweeps `agent/*` branches on origin whose tip commit is older than
     // PM_AGENT_AGENT_BRANCH_TTL_DAYS (default 7) AND that have no open PR.
     // Skips branches with open PRs to preserve active human review.
-    const _parsedAgentBranchTtl = parseInt(
-      process.env.PM_AGENT_AGENT_BRANCH_TTL_DAYS ?? "7",
-      10,
-    );
-    const agentBranchTtlDays =
-      Number.isFinite(_parsedAgentBranchTtl) && _parsedAgentBranchTtl > 0
-        ? _parsedAgentBranchTtl
-        : 7;
+    const agentBranchTtlDays = env.PM_AGENT_AGENT_BRANCH_TTL_DAYS;
 
     // Compute repoUrls per-tick so hot-reloaded additions/removals are
     // picked up by the branch sweep without requiring a daemon restart.
@@ -606,7 +549,7 @@ export const startCommand = new Command("start")
     // --- PM Agent tick schedule (scheduler already created above, before createDashboard) ---
     let pmInterval: ReturnType<typeof setInterval> | undefined;
     let rmScheduler: import("@urateam/core").ReleaseManagerScheduler | undefined;
-    if (pmScheduler && pmConfig) {
+    if (env.PM_AGENT_ENABLED && pmScheduler && pmConfig) {
       const capturedScheduler = pmScheduler;
       capturedScheduler.tick().catch((err: unknown) => console.error("PM Agent initial tick failed:", err));
       pmInterval = setInterval(
@@ -616,29 +559,24 @@ export const startCommand = new Command("start")
       pmInterval.unref();
 
       console.log(`PM Agent: enabled (every ${pmConfig.cronIntervalMs / 60000}min, max ${pmConfig.maxInFlight} in-flight)`);
-      if (process.env.PM_AGENT_PAUSED === "true") {
+      if (env.PM_AGENT_PAUSED) {
         console.log(`PM Agent: PM_AGENT_PAUSED=true — promote/start-todo/recover-stuck will be skipped on every tick until the env var is cleared and the container restarted`);
       }
     }
 
     // --- Release Manager (BEC-135 — Pro tier, opt-in) ---
     if (rmConfig && rmRepoUrl) {
-      if (!github) {
-        console.error(
-          "RELEASE_MANAGER_ENABLED=true requires GITHUB_APP_ID + GITHUB_PRIVATE_KEY_PATH so the agent can create tags/releases.",
-        );
-        process.exit(1);
-      }
+      // GitHub App credentials already verified at boot by loadEnvConfig.
       const { createGitHubClient, createReleaseManagerScheduler, isFeatureLicensed,
         handleReleaseSubcommand, parseReleaseSubcommand } = await import("@urateam/core");
       const [rmOctokit, linearSdk] = await Promise.all([
-        createGitHubClient(github),
+        createGitHubClient(github!),
         rmConfig.triggers.qaCheck ? import("@linear/sdk") : Promise.resolve(null),
       ]);
 
       let linearClient: import("@linear/sdk").LinearClient | undefined;
       if (rmConfig.triggers.qaCheck && linearSdk) {
-        linearClient = new linearSdk.LinearClient({ apiKey: process.env.LINEAR_API_KEY! });
+        linearClient = new linearSdk.LinearClient({ apiKey: env.LINEAR_API_KEY });
       }
 
       rmScheduler = createReleaseManagerScheduler({
@@ -648,20 +586,22 @@ export const startCommand = new Command("start")
         repoUrl: rmRepoUrl,
         isLicensed: () => isFeatureLicensed("release-manager"),
         linear: linearClient,
-        slack: process.env.SLACK_BOT_TOKEN
+        slack: env.SLACK_BOT_TOKEN
           ? {
               postMessage: async (channel, text) => {
                 const { postSlackMessage } = await import("@urateam/core");
-                const r = await postSlackMessage(process.env.SLACK_BOT_TOKEN!, { channel, text });
-                return r !== null && (r as any).ok !== false;
+                // postSlackMessage returns Promise<any> — no cast needed
+                const r = await postSlackMessage(env.SLACK_BOT_TOKEN!, { channel, text });
+                return r !== null && r.ok !== false;
               },
             }
           : undefined,
       });
 
       // Plumb a release-handler closure through pmSlack so /release routes here.
+      // releaseHandler is now a typed optional field on PmSlackInterfaceConfig.
       if (pmSlack) {
-        (pmSlack as any).releaseHandler = async ({ text, userId }: { text: string; userId: string }) => {
+        pmSlack.releaseHandler = async ({ text, userId }) => {
           const cmd = parseReleaseSubcommand(text);
           const pauseDurationHours = rmConfig!.triggers.timeSinceLastHours ?? 24;
           return handleReleaseSubcommand({
