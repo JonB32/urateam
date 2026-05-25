@@ -45,6 +45,13 @@ export interface DashboardConfig {
     requestStop?: (runId: string, mode: "cancel" | "graceful") => { issueId: string | null; mode: "cancel" | "graceful" };
     haltAll?: () => { cancelledRunIds: string[] };
   };
+  /**
+   * Optional callback to trigger a PM scheduler tick on demand. When provided,
+   * `POST /cli/pm/tick` awaits this and responds with timing + error info.
+   * When absent, the route returns 503 (PM Agent not configured).
+   * `start.ts` wires in `() => pmScheduler.tick()` after the scheduler is created.
+   */
+  triggerPmTick?: () => Promise<void>;
   /** Optional costs config for the Cost & ROI dashboard (enterprise). */
   costs?: CostsConfig;
   auth?: { username: string; password: string };
@@ -158,6 +165,7 @@ export function createDashboard(config: DashboardConfig): Hono {
         if (e && now - e.windowStart < RATE_LIMIT_WINDOW_MS) {
           e.count++;
         } else {
+          if (e) rateLimitMap.delete(ip);
           rateLimitMap.set(ip, { count: 1, windowStart: now });
         }
       }
@@ -340,6 +348,7 @@ export function createDashboard(config: DashboardConfig): Hono {
   const runsRouter = createRunsRouter({
     db: config.db,
     runner: config.runner,
+    triggerPmTick: config.triggerPmTick,
     basePath,
   });
   app.route(mountPrefix, runsRouter);

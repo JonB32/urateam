@@ -10,6 +10,7 @@ import {
   dashboardRetryRunEvent,
   runCancelledEvent,
   systemHaltedEvent,
+  pmManualTickInvokedEvent,
   isFeatureLicensed,
   canAccess,
   createLogger,
@@ -33,6 +34,10 @@ type AnyDb = any;
  * possible and stop/cancel signals are a no-op.
  */
 const TERMINAL_RUN_STATUSES = ["completed", "failed", "aborted", "cancelled"] as const;
+type TerminalRunStatus = typeof TERMINAL_RUN_STATUSES[number];
+
+/** Default page size for the runs feed list. */
+const DEFAULT_RUNS_LIMIT = 50;
 
 /** Returns true when a run status is eligible for retry. */
 function isRetryableStatus(status: string): boolean {
@@ -60,6 +65,12 @@ export interface RunsRouterDeps {
     /** Container-wide halt: pauses PM Agent + cancels every active run. */
     haltAll?: () => { cancelledRunIds: string[] };
   };
+  /**
+   * Optional callback to trigger a PM scheduler tick on demand. When provided,
+   * `POST /cli/pm/tick` awaits this and responds with timing + error info.
+   * When absent, the route returns 503 (PM Agent not configured).
+   */
+  triggerPmTick?: () => Promise<void>;
   basePath?: string;
 }
 
@@ -70,6 +81,7 @@ export function createRunsRouter(
   // Backwards-compatible: accept either (db, basePath) or a deps object.
   let db: Db;
   let runner: RunsRouterDeps["runner"];
+  let triggerPmTick: RunsRouterDeps["triggerPmTick"];
   let effectiveBasePath: string;
   if (
     dbOrDeps &&
@@ -79,11 +91,15 @@ export function createRunsRouter(
     const deps = dbOrDeps as RunsRouterDeps;
     db = deps.db;
     runner = deps.runner;
+    triggerPmTick = deps.triggerPmTick;
     effectiveBasePath = deps.basePath ?? "";
   } else {
     db = dbOrDeps as Db;
     effectiveBasePath = basePath;
   }
+
+  // Mutex for /cli/pm/tick — prevents overlapping concurrent ticks.
+  let tickInProgress = false;
 
   const router = new Hono();
   const d = db as AnyDb;
@@ -178,7 +194,7 @@ export function createRunsRouter(
       .select()
       .from(pipelineRuns)
       .orderBy(desc(pipelineRuns.startedAt))
-      .limit(50) as RunRow[];
+      .limit(DEFAULT_RUNS_LIMIT) as RunRow[];
 
     const content = runFeedView(runs);
 
@@ -196,7 +212,7 @@ export function createRunsRouter(
       .select()
       .from(pipelineRuns)
       .orderBy(desc(pipelineRuns.startedAt))
-      .limit(50) as RunRow[];
+      .limit(DEFAULT_RUNS_LIMIT) as RunRow[];
 
     return c.html(runFeedView(runs));
   });
@@ -389,7 +405,7 @@ export function createRunsRouter(
     const id = c.req.param("id");
     const run = await fetchRunById(id);
     if (!run) return c.text("Run not found", 404);
-    if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(run.status)) {
+    if (TERMINAL_RUN_STATUSES.includes(run.status as TerminalRunStatus)) {
       return c.text(`Cannot stop a run in status ${run.status}`, 409);
     }
 
@@ -492,7 +508,7 @@ export function createRunsRouter(
     const id = c.req.param("id");
     const run = await fetchRunById(id);
     if (!run) return c.text("Run not found", 404);
-    if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(run.status)) {
+    if (TERMINAL_RUN_STATUSES.includes(run.status as TerminalRunStatus)) {
       return c.json({ error: `Cannot stop a run in status ${run.status}` }, 409);
     }
     if (!runner?.requestStop) return c.text("Runner not configured", 500);
@@ -561,6 +577,30 @@ export function createRunsRouter(
     // Per-run audit trail — batched to avoid N+1 queries.
     void auditCancelledRunsBatch(cancelledRunIds, actor, "cli");
     return c.json({ cancelledRunIds });
+  });
+
+  router.post("/cli/pm/tick", requireCliToken, async (c) => {
+    if (!triggerPmTick) return c.text("PM scheduler not configured", 503);
+    if (tickInProgress) return c.json({ error: "PM tick already in progress" }, 409);
+    tickInProgress = true;
+    const triggeredAt = new Date().toISOString();
+    const t0 = Date.now();
+    const errors: string[] = [];
+    try {
+      await triggerPmTick();
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    } finally {
+      tickInProgress = false;
+    }
+    const completedAt = new Date().toISOString();
+    const durationMs = Date.now() - t0;
+    const actor = cliActor(c);
+    void logAuditEvent(
+      db as any,
+      pmManualTickInvokedEvent({ actor, durationMs, errors }),
+    );
+    return c.json({ triggeredAt, completedAt, errors });
   });
 
   return router;

@@ -158,11 +158,17 @@ Manual recovery procedure:
 - `message.content` — tool-using sessions (executor stages)
 - `message.message` — no-tool sessions (PM Agent Haiku calls with `allowedTools: []`)
 
-**Pre-stream stall protection (BEC-183)** — two layers:
+**Pre-stream stall protection (BEC-183 / BEC-249)** — two layers, both covering the triage stage:
 1. `firstMessageTimeoutMs` (default 5 min) in `consumeAgentStream` throws `StagePreStreamStalledError` if no message arrives. Covers SDK hangs (auth-retry loop, MCP init failure, never-resolving iterator).
-2. `WALL_CLOCK_STAGE_TIMEOUT_MS` in `executor.ts` — per-stage hard cap via `Promise.race` (implement: 60 min; others: 30 min).
+2. `WALL_CLOCK_STAGE_TIMEOUT_MS` in `executor.ts` — per-stage hard cap via `Promise.race` (implement: 60 min; others: 30 min). Timer is started **before** `resolveSessionOpts` is called (BEC-249 fix), so a hung Docker volume (`urateam-dogfood-agent-sessions`) can no longer stall the stage indefinitely.
 
 Both paths land in `stage_runs.status = 'failed'`. `StageStalledError` is for mid-stream silence (≥1 message, then no output for `progressTimeoutMs`, default 30 min). Exported from `executor/index.ts`.
+
+**Manual kill recipe for stuck runs**: if a run is stuck before the auto-recovery window fires —
+1. `ura stop <runId>` (cancel mode) — aborts via `AbortController` wired into `consumeAgentStream`. Use from dashboard or CLI.
+2. If unresponsive (pre-stream hang, signal never reaches the iterator): `ura halt` stops the container; restart will re-queue retriable runs.
+3. PM Agent auto-recovers stuck In Progress runs after `PM_AGENT_STUCK_RUN_AGE_MIN` minutes (default 120) via `recoverStuckInProgressIssues`.
+4. To clear a circuit-broken issue immediately: `ura circuit reset <issueId>` (cascade-deletes failed runs, resets breaker state, strips the Tier-5-added `needs-design` label).
 
 ### Linear SDK Lazy Relations
 
@@ -282,6 +288,7 @@ All gated by `isFeatureLicensed(<feature>)`. Routes 404 when unlicensed.
 | Org policy (4.6) | `org-policy` | — | `PipelineConfig.policy = { pathBlocklist, maxTokensPerIssue, overrideLabel, mandatoryReviewers }`. Cost gate checks token total once after all stages. Override: case-insensitive Linear-label check; **security note: relies on Linear label creation being restricted**. Reviewer gate fires on GitHub App path only at auto-merge — `gh` CLI fallback passes `--reviewer` at PR creation but can't poll approvals. **Team-membership cache** in `verifyApprovalsReceived` (TTL 15 min, keyed by `(org, team_slug)`) — prevents GitHub secondary rate-limit exhaustion. Audit: `policy.{path_blocked,cost_exceeded,override_used,reviewers_requested}`. |
 | Cost & ROI (4.5) | `cost-roi` | — | `cost_rollups_daily` rebuilt nightly via `recomputeCostRollups` in PM tick. **Uses `""` empty-string sentinel for `linear_team_id`** so composite UNIQUE fires correctly on both drivers. Half-open `[start, end)` day boundary (`lt`, not `lte`). Preset windows (7d/30d/90d/365d) use `aggregateHybrid` (rollups + live today). Custom ranges bypass rollups. **Rollups are immutable snapshots** — pricing changes don't backfill. `aggregateAll` caps at 10k runs → `summary.truncated = true`. Dashboard `/cost` + `/cost/export.csv`. |
 | Operator stop & halt | (base) | `deploy/STOP_AND_HALT.md` | `pipeline/control-signals.ts`. **Single-run** `requestStop(runId, mode)`: `"cancel"` aborts via `AbortController` wired into `consumeAgentStream`; `"graceful"` lets current stage finish then skips remaining. Both → `status: "cancelled"`. **Container halt** `haltAll()`: sets pause flag + cancels all `activeRuns` + `activeFeedbackRuns`. Reversible via `/pm resume` (in-flight cancellations stay cancelled). Three surfaces — dashboard (RBAC-gated), CLI (`ura stop`/`ura halt`/`ura retry`, auth via `URATEAM_CLI_TOKEN`), Slack (`/pm cancel`/`/pm stop`/`/pm halt`). Audit: `run.cancelled`, `system.halted`. **Single-process state**: signal map resets on restart. |
+| On-demand PM tick (BEC-253) | (base) | — | `ura tick` POSTs to `POST /cli/pm/tick` (dashboard); awaits the full tick before responding. Auth via `URATEAM_CLI_TOKEN`. 503 when PM Agent disabled; 409 when a tick is already in progress (mutex). Wired in `start.ts` via `triggerPmTick: () => pmScheduler.tick()`. Audit: `pm.manual_tick_invoked`. |
 
 ### Coordination (`packages/core/src/pm/coordination.ts`)
 DB-backed `active_work` table tracks files modified by in-flight runs. `upsertActiveWork` uses atomic `onConflictDoUpdate` (requires UNIQUE on `run_id`). `removeActiveWork` called in runner's `finally` block + `abort()`. `checkFileOverlap` compares candidate files against active runs.
