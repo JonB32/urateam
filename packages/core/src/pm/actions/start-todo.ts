@@ -1,5 +1,5 @@
 import type { AnyDb } from "../../db/client.js";
-import { getActiveAndRecentIssueIds, buildFailureCountGetter } from "./db-queries.js";
+import { getActiveAndRecentIssueIds, batchCountConsecutiveFailures } from "./db-queries.js";
 import { resolvePipeline } from "../../pipeline/router.js";
 import { mapIssueToSchema } from "../../executor/prompt/schema-mapper.js";
 import type { PipelineConfig, RepoConfig } from "../../types.js";
@@ -36,6 +36,13 @@ export interface StartTodoInput {
    * round-trip for all candidates via the required `db` field).
    */
   getFailureCount?: (issueId: string) => Promise<number>;
+  /**
+   * BEC-236 — issue IDs the half-open probe selected this tick. Issues in
+   * this Set bypass the consecutive-failures circuit-breaker skip, allowing
+   * exactly one probe run per cooldown window. When undefined, breaker
+   * behavior is unchanged from BEC-161/181.
+   */
+  probeOverrideIds?: Set<string>;
 }
 
 export interface StartTodoResult {
@@ -121,20 +128,27 @@ export async function startTodoIssues(
   const toProcess = filteredOrphaned.slice(0, maxPerTick);
   const results: StartTodoResult[] = [];
 
-  // BEC-181: pre-fetch failure counts for all candidates in one DB round-trip.
-  const getFailureCount = await buildFailureCountGetter(
-    db,
-    toProcess.map((i: any) => i.identifier as string),
-    input.maxConsecutiveFailures,
-    input.getFailureCount,
-  );
+  // BEC-181: pre-fetch failure counts for all candidates in one DB round-trip
+  // to avoid an N+1 query pattern (one query per candidate in the loop below).
+  // Uses getFailureCount when provided (test-injectable stub); otherwise falls
+  // back to batchCountConsecutiveFailures for a single DB round-trip.
+  let prefetchedFailureCounts: Map<string, number> | null = null;
+  if (input.maxConsecutiveFailures !== undefined && !input.getFailureCount) {
+    const candidateIds = toProcess.map((i: any) => i.identifier as string);
+    prefetchedFailureCounts = await batchCountConsecutiveFailures(db, candidateIds);
+  }
 
   for (const issue of toProcess) {
     // BEC-161: circuit breaker — fire FIRST, before any Linear SDK round-trips
     // (issue.team / issue.project / issue.labels each cost an API call).
     if (input.maxConsecutiveFailures !== undefined) {
-      const failureCount = await getFailureCount(issue.identifier);
-      if (failureCount >= input.maxConsecutiveFailures) {
+      const failureCount = input.getFailureCount
+        ? await input.getFailureCount(issue.identifier)
+        : (prefetchedFailureCounts!.get(issue.identifier) ?? 0);
+      if (
+        failureCount >= input.maxConsecutiveFailures &&
+        !input.probeOverrideIds?.has(issue.identifier)
+      ) {
         log.warn(
           { identifier: issue.identifier, failureCount, threshold: input.maxConsecutiveFailures },
           "circuit-breaker engaged — skipping start",

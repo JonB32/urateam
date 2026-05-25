@@ -1,4 +1,5 @@
 import type { LinearClient } from "@linear/sdk";
+import { getLinearClient, resolveWorkflowStatesByTeam } from "../util/linear.js";
 
 /**
  * Creates a lazy-initialized Linear client singleton.
@@ -10,36 +11,28 @@ import type { LinearClient } from "@linear/sdk";
  *   const linear = await getClient(); // null if apiKey is undefined
  *
  * @param apiKey Linear API key. When undefined/empty, `getClient()` returns null.
+ *
+ * @deprecated Prefer `getLinearClient(apiKey)` from `util/linear.ts` directly.
+ *   This wrapper is retained for backwards compatibility with existing callers.
  */
 export function createLazyLinearClient(apiKey: string | undefined): {
   getClient: () => Promise<LinearClient | null>;
 } {
-  let _client: LinearClient | null = null;
   return {
-    async getClient() {
-      if (!_client && apiKey) {
-        const { LinearClient: LC } = await import("@linear/sdk");
-        _client = new LC({ apiKey });
-      }
-      return _client;
-    },
+    getClient: () => getLinearClient(apiKey),
   };
 }
 
+/**
+ * Fetches workflow states for the given teams and builds a
+ * `${teamId}:${stateName}` → stateId map.
+ *
+ * Delegates to `resolveWorkflowStatesByTeam` from `util/linear.ts`, which
+ * parallelizes all `state.team` relation fetches via Promise.all.
+ */
 export async function resolveWorkflowStates(
   linearClient: Pick<LinearClient, "workflowStates">,
   teamIds: string[],
 ): Promise<Map<string, string>> {
-  const allStates = await linearClient.workflowStates({
-    filter: { team: { id: { in: teamIds } } },
-    first: 100,
-  });
-  const nodes = allStates.nodes ?? [];
-  const teams = await Promise.all(nodes.map((s: any) => s.team));
-  const stateMap = new Map<string, string>();
-  for (let i = 0; i < nodes.length; i++) {
-    const teamId = teams[i]?.id;
-    if (teamId) stateMap.set(`${teamId}:${nodes[i].name}`, nodes[i].id);
-  }
-  return stateMap;
+  return resolveWorkflowStatesByTeam(linearClient, teamIds);
 }

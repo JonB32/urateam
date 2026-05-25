@@ -3,6 +3,7 @@ import { pipelineRuns } from "../../db/schema.js";
 import { eq, inArray } from "drizzle-orm";
 import { getActiveAndRecentIssueIds } from "./db-queries.js";
 import { resolveWorkflowStates } from "../linear-helpers.js";
+import { resolveIssueRelations } from "../../util/linear.js";
 import { createLogger } from "../../logger.js";
 import { logAuditEventUnchecked, pmRecoveredLongRunningEvent } from "../../audit/index.js";
 import type { LinearClient } from "@linear/sdk";
@@ -181,9 +182,14 @@ export async function recoverStuckInProgressIssues(
 
   const results: StuckIssueResult[] = [];
 
-  for (const issue of toProcess) {
-    // Linear SDK lazy relations — must await team and state
-    const team = await issue.team;
+  // Pre-fetch all issue relations in parallel before entering the loop.
+  // Each issue's team/state/labels are independent, so a single Promise.all
+  // reduces wall-clock time from O(N × RTT) to O(RTT) for the batch.
+  const allIssueRelations = await Promise.all(toProcess.map((i) => resolveIssueRelations(i)));
+
+  for (let issueIdx = 0; issueIdx < toProcess.length; issueIdx++) {
+    const issue = toProcess[issueIdx]!;
+    const { team, state: issueStateRelation } = allIssueRelations[issueIdx]!;
     const teamId = team?.id;
     const lastRunStatus = lastRunStatusMap.get(issue.identifier) ?? null;
     const lastRunPrUrl = lastRunPrUrlMap.get(issue.identifier) ?? null;
@@ -220,8 +226,7 @@ export async function recoverStuckInProgressIssues(
       continue;
     }
 
-    const state = await issue.state;
-    const previousStateName: string = state?.name ?? "In Progress";
+    const previousStateName: string = issueStateRelation?.name ?? "In Progress";
 
     try {
       // BEC-184: For long-running zombie runs, mark the pipeline_runs row as

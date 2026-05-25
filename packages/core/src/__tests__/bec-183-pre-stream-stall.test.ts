@@ -7,17 +7,50 @@
  *  3. Mid-stream stall (after ≥1 message) still throws StageStalledError (regression guard)
  *  4. executor.ts source contains wall-clock stage timeout (WALL_CLOCK_STAGE_TIMEOUT_MS)
  *     and passes firstMessageTimeoutMs to consumeAgentStream
+ *  5. (BEC-249) executeStage({ stage:"triage" }) triggers StagePreStreamStalledError when
+ *     the SDK never yields — confirms stall protection fires for the triage stage end-to-end.
  *
  * Run with:
  *   cd packages/core && npx vitest run src/__tests__/bec-183-pre-stream-stall.test.ts
  */
-import { describe, it, expect } from "vitest";
+
+// ---------------------------------------------------------------------------
+// Module mocks — must be declared before any imports that use them (hoisted by Vitest).
+// Required for the Section 5 executeStage integration test.
+// ---------------------------------------------------------------------------
+
+vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
+  query: vi.fn(),
+}));
+
+vi.mock("../executor/auth-check.js", () => ({
+  isClaudeAuthValid: vi.fn().mockResolvedValue(true),
+  resolveClaudeAuth: vi.fn().mockReturnValue({ method: "api-key" }),
+}));
+
+vi.mock("../executor/session-resolver.js", () => ({
+  resolveSessionOpts: vi.fn().mockResolvedValue({}),
+}));
+
+vi.mock("../executor/extract-handoff.js", () => ({
+  extractHandoff: vi.fn().mockResolvedValue({
+    artifact: null,
+    structured: false,
+    decisions: null,
+  }),
+}));
+
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as agentStreamModule from "../executor/agent-stream.js";
 import {
   consumeAgentStream,
   StageStalledError,
   StagePreStreamStalledError,
 } from "../executor/agent-stream.js";
+import { executeStage } from "../executor/executor.js";
+import { createDb, type Db } from "../db/client.js";
+import { pipelineRuns } from "../db/schema.js";
+import type { SanitizedIssue, RepoConfig } from "../types.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -180,4 +213,87 @@ describe("BEC-183 fix 4 — executor.ts wall-clock stage timeout", () => {
     // implement key explicitly named
     expect(executorSrc).toContain("implement");
   });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 5 — BEC-249: triage stage stall protection fires via executeStage
+// ---------------------------------------------------------------------------
+
+const bec249Issue: SanitizedIssue = {
+  id: "BEC-249",
+  slug: "triage-stall-fix",
+  title: "Triage stall fix test",
+  description: "Verify stall guards fire for the triage stage.",
+  acceptanceCriteria: ["Stall protection fires for the triage stage."],
+  labels: ["needs-design"],
+  priority: 2,
+};
+
+const bec249RepoConfig: RepoConfig = {
+  url: "https://github.com/test-org/test-repo",
+  defaultBranch: "main",
+  testCommand: "echo ok",
+  buildCommand: "echo ok",
+};
+
+describe("BEC-249 fix 5 — triage stage stall protection fires via executeStage", () => {
+  let db: Db;
+
+  beforeEach(async () => {
+    db = await createDb({ connectionString: ":memory:" });
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  it(
+    "executeStage({ stage:'triage' }) returns status:'failed' with StagePreStreamStalledError when SDK never yields its first message",
+    async () => {
+      // SDK mock: query() returns an iterator that never yields any message.
+      // This is the BEC-249 scenario: triage stage, resumed session, volume
+      // stall bypassed (resolveSessionOpts resolves immediately), but the
+      // agent SDK itself hangs before producing any output.
+      const { query } = await import("@anthropic-ai/claude-agent-sdk");
+      (query as ReturnType<typeof vi.fn>).mockImplementation(
+        () => (async function* () { await new Promise<never>(() => {}); })(),
+      );
+
+      // Seed a pipeline_runs row (required by executeStage's DB writes)
+      await (db as any).insert(pipelineRuns).values({
+        id: "run-bec249-ac",
+        issueId: bec249Issue.id,
+        issueTitle: bec249Issue.title,
+        pipelineKey: "needs-design",
+        repoUrl: bec249RepoConfig.url,
+        branch: "agent/run-bec249-ac",
+        status: "running",
+      });
+
+      const stagePromise = executeStage({
+        runId: "run-bec249-ac",
+        issueId: bec249Issue.id,
+        stage: "triage",
+        sanitizedIssue: bec249Issue,
+        repoConfig: bec249RepoConfig,
+        workdir: "/tmp/bec249-ac",
+        db,
+        agentSessionId: null,
+      });
+
+      // Advance well past DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS (30 min).
+      // Depending on how quickly the async setup runs relative to fake-clock
+      // advancement, either firstMessageTimeoutMs (5 min) or stageTimeoutPromise
+      // (30 min) fires first — both throw StagePreStreamStalledError.
+      await vi.advanceTimersByTimeAsync(35 * 60_000);
+
+      const result = await stagePromise;
+
+      expect(result.status).toBe("failed");
+      expect(result.errorMessage).toMatch(/pre-stream stall/i);
+    },
+    10_000,
+  );
 });

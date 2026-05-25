@@ -36,4 +36,10 @@ export class CompositeNotifier implements Notifier {
       this.notifiers.filter(n => n.onDailyTokenSummary).map(n => n.onDailyTokenSummary!(summary)),
     );
   }
+
+  async onPRMerged(run: PipelineRun): Promise<void> {
+    await Promise.allSettled(
+      this.notifiers.map(n => n.onPRMerged?.(run)),
+    );
+  }
 }

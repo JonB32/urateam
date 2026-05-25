@@ -10,19 +10,9 @@ import { createLogger } from "../logger.js";
 import { logAuditEventUnchecked } from "../audit/writer.js";
 import { reviewModelLowOutputRatioEvent } from "../audit/events.js";
 import { getModelHealthScores, flagLowYieldModels } from "../executor/review/model-health.js";
+import { parseIntOr, parseFloatOr, parseCsv } from "../util/env.js";
 
 const log = createLogger({ component: "ReviewProvidersRunner" });
-
-function parseFloatOr(envValue: string | undefined, fallback: number): number {
-  if (!envValue) return fallback;
-  const n = parseFloat(envValue);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-}
-function parseIntOr(envValue: string | undefined, fallback: number): number {
-  if (!envValue) return fallback;
-  const n = parseInt(envValue, 10);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-}
 
 export interface RunReviewProvidersOpts {
   env: NodeJS.ProcessEnv;
@@ -37,7 +27,7 @@ export interface RunReviewProvidersResult {
 }
 
 /**
- * Runs all enabled review providers in sequence and persists their per-model
+ * Runs all enabled review providers in parallel and persists their per-model
  * results to `review_model_runs` when a stage_run row id is provided.
  *
  * Provider failures are caught and recorded as advisory `failed` runs rather
@@ -63,13 +53,10 @@ export async function runReviewProviders(
   // emit a warn + audit event for models below threshold; operator removes
   // from REVIEW_MODELS manually. Auto-suspend deliberately scoped out
   // (transient outage feedback-loop risk).
-  const modelIds = (opts.env.REVIEW_MODELS ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const healthThreshold = parseFloatOr(process.env.REVIEW_MODELS_MIN_OUTPUT_RATIO, 0.05);
-  const healthLookbackHours = parseIntOr(process.env.REVIEW_MODELS_HEALTH_LOOKBACK_HOURS, 168);
-  const healthMinRuns = parseIntOr(process.env.REVIEW_MODELS_MIN_RUNS, 5);
+  const modelIds = parseCsv(opts.env.REVIEW_MODELS ?? "");
+  const healthThreshold = parseFloatOr(opts.env.REVIEW_MODELS_MIN_OUTPUT_RATIO, 0.05);
+  const healthLookbackHours = parseIntOr(opts.env.REVIEW_MODELS_HEALTH_LOOKBACK_HOURS, 168);
+  const healthMinRuns = parseIntOr(opts.env.REVIEW_MODELS_MIN_RUNS, 5);
 
   try {
     const scores = await getModelHealthScores(opts.db, {
@@ -100,11 +87,14 @@ export async function runReviewProviders(
     log.warn({ err }, "model-health probe failed — skipping flagging this tick");
   }
 
-  for (const p of providers) {
-    try {
-      const runs = await p.runReview(ctx);
-      allRuns.push(...runs);
-    } catch (err) {
+  const settled = await Promise.allSettled(providers.map((p) => p.runReview(ctx)));
+  for (let i = 0; i < settled.length; i++) {
+    const result = settled[i];
+    const p = providers[i];
+    if (result.status === "fulfilled") {
+      allRuns.push(...result.value);
+    } else {
+      const err = result.reason;
       log.warn(
         { providerId: p.id, err: err instanceof Error ? err.message : String(err) },
         "review provider threw — recording as advisory failure",

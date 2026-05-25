@@ -1,56 +1,109 @@
 import { Command } from "commander";
 import { join } from "node:path";
 import { homedir } from "node:os";
+
+const DEFAULT_PM_AGENT_CRON_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
 import { preflightClaudeAuth } from "../lib/preflight-claude-auth.js";
 import { preflightDirs } from "../lib/preflight-dirs.js";
 import { buildRepoConfigsFromEnv, requireRepoConfigs } from "../lib/build-repo-configs.js";
+import {
+  resolveUserLevelHome,
+  userLevelConfigPath,
+  readUserLevelConfig,
+} from "../lib/user-level-config.js";
+import { loadEnvConfig } from "../lib/load-env-config.js";
+
+/**
+ * User-level: also load `~/.urateam/.env` (or `$URATEAM_HOME/.env`) so secrets
+ * load regardless of cwd. Node's `loadEnvFile()` in `index.ts` already loads
+ * `<cwd>/.env` — that covers the project-level case where operators run
+ * `ura start` from the project root. For user-level installs the operator
+ * shouldn't need to `cd ~/.urateam` first; this is the fallback.
+ *
+ * Existing env vars win (loadEnvFile never overrides), so the cwd-side `.env`
+ * is still authoritative when both are present.
+ */
+function loadUserLevelEnv(): void {
+  const home = resolveUserLevelHome();
+  const path = join(home, ".env");
+  try {
+    process.loadEnvFile(path);
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "ENOENT") {
+      console.warn(
+        `warning: failed to load ${path}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+}
+
+/**
+ * Call fn once at startup (awaited or fire-and-forget), then schedule it on a
+ * repeating interval. The interval is unref'd so it doesn't prevent process exit.
+ * Returns the handle so callers can clearInterval on shutdown.
+ */
+async function scheduleRepeatedly(
+  fn: () => Promise<void>,
+  intervalMs: number,
+  immediate: "await" | "void" = "void",
+): Promise<ReturnType<typeof setInterval>> {
+  if (immediate === "await") {
+    await fn();
+  } else {
+    void fn();
+  }
+  const handle = setInterval(() => void fn(), intervalMs);
+  handle.unref();
+  return handle;
+}
 
 export const startCommand = new Command("start")
   .description("Start production server (webhook + dashboard)")
   .option("--port <port>", "Webhook server port", "3000")
   .option("--dashboard-port <port>", "Dashboard port", "3001")
+  .option(
+    "--tunnel <mode>",
+    "Auto-launch a Cloudflare tunnel: 'none' (default), 'cloudflare-quick' (free, ephemeral URL), or 'cloudflare-token' (requires CLOUDFLARE_TUNNEL_TOKEN + URATEAM_PUBLIC_URL)",
+    "none",
+  )
   .action(async (options) => {
     try {
+    loadUserLevelEnv();
+    // Boot-time env validation — runs first, reports all errors at once.
+    const env = loadEnvConfig("start");
+
+
     const { createApp, defaultConfigs, applyDeepReviewPassesOverride, applyAutoMergeOverride, cleanupWorktrees, runAgentBranchSweep, addLogStream, initSlackAlertManager, createSlackAlertStream, validateReviewModels } = await import("@urateam/core");
 
     // --- Slack error alerts (opt-in) ---
     if (
-      process.env.SLACK_ERROR_ALERTS === "true" &&
-      process.env.SLACK_BOT_TOKEN &&
-      process.env.PM_AGENT_SLACK_CHANNEL_ID
+      env.SLACK_ERROR_ALERTS &&
+      env.SLACK_BOT_TOKEN &&
+      env.PM_AGENT_SLACK_CHANNEL_ID
     ) {
       const manager = initSlackAlertManager(
-        process.env.SLACK_BOT_TOKEN,
-        process.env.PM_AGENT_SLACK_CHANNEL_ID,
+        env.SLACK_BOT_TOKEN,
+        env.PM_AGENT_SLACK_CHANNEL_ID,
       );
       addLogStream(createSlackAlertStream(manager));
-      console.log(`Slack error alerts: enabled (channel ${process.env.PM_AGENT_SLACK_CHANNEL_ID})`);
+      console.log(`Slack error alerts: enabled (channel ${env.PM_AGENT_SLACK_CHANNEL_ID})`);
     }
     const { createDashboard } = await import("@urateam/dashboard");
     const { serve } = await import("@hono/node-server");
 
-    // --- Validate required env vars ---
-    if (!process.env.LINEAR_WEBHOOK_SECRET) {
-      console.error("LINEAR_WEBHOOK_SECRET is required");
-      process.exit(1);
-    }
-
-    // --- Build config from env vars ---
-    const dashboardUser = process.env.DASHBOARD_USER;
-    const dashboardPass = process.env.DASHBOARD_PASSWORD;
-    if (!dashboardUser || !dashboardPass) {
-      console.error(
-        "DASHBOARD_USER and DASHBOARD_PASSWORD are required. " +
-          "The dashboard exposes sensitive operational data and must not be publicly accessible. " +
-          "Set both environment variables and restart.",
-      );
-      process.exit(1);
-    }
-    const dashboardAuth = { username: dashboardUser, password: dashboardPass };
+    // Dashboard auth is validated by loadEnvConfig("start") — safe to assert non-null.
+    const dashboardAuth = {
+      username: env.DASHBOARD_USER!,
+      password: env.DASHBOARD_PASSWORD!,
+    };
 
     // Build repoConfigs from env: REPO_TEAM_ID, REPO_URL, REPO_DEFAULT_BRANCH, etc.
-    const repoConfigs = buildRepoConfigsFromEnv();
+    // Pass process.env explicitly — loadEnvConfig() has already validated all vars.
+    const repoConfigs = buildRepoConfigsFromEnv(process.env);
 
     // Fail fast if no repoConfigs could be built. Same guard as `ura dev` —
     // without it the webhook server starts looking healthy and silently
@@ -59,72 +112,46 @@ export const startCommand = new Command("start")
 
     // GitHub App config (optional)
     const { buildGitHubConfigFromEnv } = await import("@urateam/core");
-    const github = buildGitHubConfigFromEnv();
+    const github = buildGitHubConfigFromEnv(process.env);
 
     // PM Agent Slack interface (optional — requires signing secret)
-    const slackSigningSecret = process.env.SLACK_SIGNING_SECRET;
-    const pmSlack = (slackSigningSecret && process.env.SLACK_BOT_TOKEN && process.env.PM_AGENT_SLACK_CHANNEL_ID)
-      ? {
-          signingSecret: slackSigningSecret,
-          botToken: process.env.SLACK_BOT_TOKEN,
-          channelId: process.env.PM_AGENT_SLACK_CHANNEL_ID,
-          teamIds: (process.env.PM_AGENT_TEAM_IDS ?? "").split(",").filter(Boolean),
-        }
-      : undefined;
+    const slackSigningSecret = env.SLACK_SIGNING_SECRET;
+    let pmSlack: import("@urateam/core").PmSlackInterfaceConfig | undefined =
+      (slackSigningSecret && env.SLACK_BOT_TOKEN && env.PM_AGENT_SLACK_CHANNEL_ID)
+        ? {
+            signingSecret: slackSigningSecret,
+            botToken: env.SLACK_BOT_TOKEN,
+            channelId: env.PM_AGENT_SLACK_CHANNEL_ID,
+            teamIds: (env.PM_AGENT_TEAM_IDS ?? "").split(",").filter(Boolean),
+          }
+        : undefined;
 
     // --- PM Agent config (built up-front so createApp can thread it into the webhook) ---
     // The webhook-side budget gate in webhook/handler.ts needs config.pmConfig to
     // activate the 100% hard-stop. If we only built this inside the PM_AGENT_ENABLED
     // branch below, the gate would be inert in production.
-    const pmAgentEnabled = process.env.PM_AGENT_ENABLED === "true";
     let pmConfig: import("@urateam/core").PmAgentConfig | undefined;
-    if (pmAgentEnabled) {
+    if (env.PM_AGENT_ENABLED) {
       const { PmAgentConfigSchema } = await import("@urateam/core");
-      const slackBotToken = process.env.SLACK_BOT_TOKEN;
-      if (!slackBotToken) {
-        console.error("SLACK_BOT_TOKEN is required when PM_AGENT_ENABLED=true");
-        process.exit(1);
-      }
-      const dailyBudgetStr = process.env.PM_AGENT_DAILY_TOKEN_BUDGET;
-      if (!dailyBudgetStr) {
-        console.error("PM_AGENT_DAILY_TOKEN_BUDGET is required when PM_AGENT_ENABLED=true");
-        process.exit(1);
-      }
-      const slackChannelId = process.env.PM_AGENT_SLACK_CHANNEL_ID;
-      if (!slackChannelId) {
-        console.error("PM_AGENT_SLACK_CHANNEL_ID is required when PM_AGENT_ENABLED=true");
-        process.exit(1);
-      }
-      const teamIds = (process.env.PM_AGENT_TEAM_IDS ?? "").split(",").filter(Boolean);
-      if (teamIds.length === 0) {
-        console.error("PM_AGENT_TEAM_IDS is required when PM_AGENT_ENABLED=true");
-        process.exit(1);
-      }
+      // All conditional requirements already validated by loadEnvConfig — safe to assert.
       pmConfig = PmAgentConfigSchema.parse({
         enabled: true,
-        cronIntervalMs: parseInt(process.env.PM_AGENT_CRON_INTERVAL_MS ?? "1800000", 10),
-        maxInFlight: parseInt(process.env.PM_AGENT_MAX_IN_FLIGHT ?? "3", 10),
-        dailyTokenBudget: parseInt(dailyBudgetStr, 10),
-        slackChannelId,
-        teamIds,
-        // BEC-150: opt-in label-match filter for the promote step. Default false
-        // for back-compat; set true to prevent unactionable Backlog items from
-        // being promoted to Todo.
-        requirePipelineLabelForPromote:
-          process.env.PM_AGENT_REQUIRE_PIPELINE_LABEL_FOR_PROMOTE === "true",
-        // BEC-161: skip promote/start-todo for issues with N+ consecutive
-        // failed runs. Default 3; set 0 to disable.
-        maxConsecutiveFailures: parseInt(
-          process.env.PM_AGENT_MAX_CONSECUTIVE_FAILURES ?? "3",
-          10,
-        ),
+        // Use EnvConfig values (defaults already applied); no ?? fallbacks needed.
+        cronIntervalMs: env.PM_AGENT_CRON_INTERVAL_MS,
+        maxInFlight: env.PM_AGENT_MAX_IN_FLIGHT,
+        dailyTokenBudget: env.PM_AGENT_DAILY_TOKEN_BUDGET,
+        slackChannelId: env.PM_AGENT_SLACK_CHANNEL_ID,
+        teamIds: (env.PM_AGENT_TEAM_IDS ?? "").split(",").filter(Boolean),
+        requirePipelineLabelForPromote: env.PM_AGENT_REQUIRE_PIPELINE_LABEL_FOR_PROMOTE,
+        maxConsecutiveFailures: env.PM_AGENT_MAX_CONSECUTIVE_FAILURES,
       });
     }
 
     // --- Release Manager config (BEC-135 — Pro tier) ---
+    // GitHub App credential check moved to loadEnvConfig — no longer deferred.
     let rmConfig: import("@urateam/core").ReleaseManagerConfig | undefined;
     let rmRepoUrl: string | undefined;
-    if (process.env.RELEASE_MANAGER_ENABLED === "true") {
+    if (env.RELEASE_MANAGER_ENABLED) {
       const { ReleaseManagerConfigSchema, isFeatureLicensed } = await import("@urateam/core");
 
       if (!isFeatureLicensed("release-manager")) {
@@ -144,53 +171,38 @@ export const startCommand = new Command("start")
       }
 
       const triggers: Record<string, unknown> = {};
-      if (process.env.RELEASE_MANAGER_TRIGGER_MERGED_PRS_SINCE) {
-        triggers.mergedPRsSince = parseInt(process.env.RELEASE_MANAGER_TRIGGER_MERGED_PRS_SINCE, 10);
+      if (env.RELEASE_MANAGER_TRIGGER_MERGED_PRS_SINCE !== undefined) {
+        triggers.mergedPRsSince = env.RELEASE_MANAGER_TRIGGER_MERGED_PRS_SINCE;
       }
-      if (process.env.RELEASE_MANAGER_TRIGGER_TIME_SINCE_LAST_HOURS) {
-        triggers.timeSinceLastHours = parseInt(process.env.RELEASE_MANAGER_TRIGGER_TIME_SINCE_LAST_HOURS, 10);
+      if (env.RELEASE_MANAGER_TRIGGER_TIME_SINCE_LAST_HOURS !== undefined) {
+        triggers.timeSinceLastHours = env.RELEASE_MANAGER_TRIGGER_TIME_SINCE_LAST_HOURS;
       }
-      if (process.env.RELEASE_MANAGER_TRIGGER_CI_GREEN_FOR_MINUTES) {
-        triggers.ciGreenForMinutes = parseInt(process.env.RELEASE_MANAGER_TRIGGER_CI_GREEN_FOR_MINUTES, 10);
+      if (env.RELEASE_MANAGER_TRIGGER_CI_GREEN_FOR_MINUTES !== undefined) {
+        triggers.ciGreenForMinutes = env.RELEASE_MANAGER_TRIGGER_CI_GREEN_FOR_MINUTES;
       }
-      if (process.env.RELEASE_MANAGER_TRIGGER_REQUIRE_SLACK_APPROVAL === "true") {
+      if (env.RELEASE_MANAGER_TRIGGER_REQUIRE_SLACK_APPROVAL) {
         triggers.requireSlackApproval = true;
       }
 
-      if (process.env.RELEASE_MANAGER_TRIGGER_QA_WORKFLOW) {
-        const qaWorkflow = process.env.RELEASE_MANAGER_TRIGGER_QA_WORKFLOW;
-        const qaTeamId = process.env.RELEASE_MANAGER_TRIGGER_QA_LINEAR_TEAM_ID;
-        const qaTimeoutMin = process.env.RELEASE_MANAGER_TRIGGER_QA_TIMEOUT_MINUTES;
-
-        if (!qaTeamId) {
-          console.error(
-            "RELEASE_MANAGER_TRIGGER_QA_WORKFLOW set but RELEASE_MANAGER_TRIGGER_QA_LINEAR_TEAM_ID is missing. " +
-            "Configure linearTeamId for filing gap issues.",
-          );
-          process.exit(1);
-        }
-        if (!process.env.LINEAR_API_KEY) {
-          console.error(
-            "qaCheck requires LINEAR_API_KEY (used to file gap issues). Set it and restart.",
-          );
-          process.exit(1);
-        }
-
+      if (env.RELEASE_MANAGER_TRIGGER_QA_WORKFLOW) {
+        // Conditional requirements already validated by loadEnvConfig.
         triggers.qaCheck = {
-          workflow: qaWorkflow,
-          linearTeamId: qaTeamId,
-          ...(qaTimeoutMin ? { timeoutMinutes: parseInt(qaTimeoutMin, 10) } : {}),
+          workflow: env.RELEASE_MANAGER_TRIGGER_QA_WORKFLOW,
+          linearTeamId: env.RELEASE_MANAGER_TRIGGER_QA_LINEAR_TEAM_ID!,
+          ...(env.RELEASE_MANAGER_TRIGGER_QA_TIMEOUT_MINUTES
+            ? { timeoutMinutes: env.RELEASE_MANAGER_TRIGGER_QA_TIMEOUT_MINUTES }
+            : {}),
         };
       }
 
       try {
         rmConfig = ReleaseManagerConfigSchema.parse({
           enabled: true,
-          schedule: process.env.RELEASE_MANAGER_SCHEDULE ?? "*/30 * * * *",
+          schedule: env.RELEASE_MANAGER_SCHEDULE,
           triggers,
-          versionBump: process.env.RELEASE_MANAGER_VERSION_BUMP ?? "patch",
-          slackChannel: process.env.RELEASE_MANAGER_SLACK_CHANNEL,
-          branch: process.env.RELEASE_MANAGER_BRANCH ?? "main",
+          versionBump: env.RELEASE_MANAGER_VERSION_BUMP,
+          slackChannel: env.RELEASE_MANAGER_SLACK_CHANNEL,
+          branch: env.RELEASE_MANAGER_BRANCH,
         });
       } catch (err) {
         console.error("Release Manager config invalid:", (err as Error).message);
@@ -210,14 +222,14 @@ export const startCommand = new Command("start")
     const pipelineConfigs = applyAutoMergeOverride(
       applyDeepReviewPassesOverride(
         defaultConfigs,
-        process.env.URATEAM_DEEP_REVIEW_PASSES,
+        env.URATEAM_DEEP_REVIEW_PASSES,
       ),
-      process.env.URATEAM_AUTO_MERGE,
+      env.URATEAM_AUTO_MERGE,
     );
 
     // --- Resolve and validate workspace directories ---
-    const agentRunDir = process.env.AGENT_RUN_DIR ?? join(homedir(), "data", "runs");
-    const repoCloneDir = process.env.REPO_CLONE_DIR ?? join(homedir(), "work", "repos");
+    const agentRunDir = env.AGENT_RUN_DIR ?? join(homedir(), "data", "runs");
+    const repoCloneDir = env.REPO_CLONE_DIR ?? join(homedir(), "work", "repos");
 
     // Run three independent I/O checks in parallel so startup is faster:
     //   • validateReviewModels (BEC-171) — checks REVIEW_MODELS against OpenRouter catalog
@@ -230,27 +242,27 @@ export const startCommand = new Command("start")
     ]);
 
     const config = {
-      webhookSecret: process.env.LINEAR_WEBHOOK_SECRET,
-      linearApiKey: process.env.LINEAR_API_KEY ?? "",
+      webhookSecret: env.LINEAR_WEBHOOK_SECRET!,
+      linearApiKey: env.LINEAR_API_KEY,
       pipelineConfigs,
       repoConfigs,
-      databaseUrl: process.env.DATABASE_URL,
-      slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
-      discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL,
-      concurrency: parseInt(process.env.MAX_CONCURRENT_RUNS ?? "3", 10),
+      databaseUrl: env.DATABASE_URL,
+      slackWebhookUrl: env.SLACK_WEBHOOK_URL,
+      discordWebhookUrl: env.DISCORD_WEBHOOK_URL,
+      concurrency: env.MAX_CONCURRENT_RUNS,
       agentRunDir,
       repoCloneDir,
       github,
       dashboardAuth,
       pmSlack,
       pmConfig,
-      githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET,
+      githubWebhookSecret: env.GITHUB_WEBHOOK_SECRET,
     };
 
     // --- SSO (Enterprise, opt-in via URATEAM_SSO_ENABLED=true) ---
     // Validate SSO env vars BEFORE opening the DB / starting the runner so a
     // misconfigured deployment fails fast without leaking resources.
-    const ssoBootstrap = await bootstrapSsoFromEnv();
+    const ssoBootstrap = await bootstrapSsoFromEnv(process.env);
 
     // --- Start servers ---
     const { app, runner, db } = await createApp(config);
@@ -267,8 +279,26 @@ export const startCommand = new Command("start")
 
     // --- Recover runs interrupted by a previous restart ---
     await runner.recoverStuckRuns();
-    const port = parseInt(process.env.PORT ?? options.port, 10);
-    const dashboardPort = parseInt(process.env.DASHBOARD_PORT ?? options.dashboardPort, 10);
+    const port = env.PORT;
+    const dashboardPort = env.DASHBOARD_PORT;
+
+    // --- PM Agent scheduler (create before dashboard so triggerPmTick can be wired in) ---
+    // The scheduler object is created here; the initial tick + interval are started after
+    // the servers come up. The dashboard callback captures the scheduler by reference.
+    let pmScheduler: { tick(): Promise<void> } | undefined;
+    if (env.PM_AGENT_ENABLED && pmConfig) {
+      const { createPmScheduler } = await import("@urateam/core");
+      pmScheduler = createPmScheduler({
+        config: pmConfig,
+        db,
+        linearApiKey: config.linearApiKey,
+        slackBotToken: env.SLACK_BOT_TOKEN!,
+        repoCloneDir: config.repoCloneDir,
+        runner,
+        pipelineConfigs: config.pipelineConfigs,
+        repoConfigs: config.repoConfigs,
+      });
+    }
 
     const dashboardApp = createDashboard({
       db,
@@ -277,6 +307,13 @@ export const startCommand = new Command("start")
       auth: dashboardAuth,
       sso: ssoBootstrap?.sso,
       workos: ssoBootstrap?.workos,
+      runner: {
+        resume: runner.resume.bind(runner),
+        start: runner.start.bind(runner) as (...args: any[]) => Promise<void>,
+        requestStop: runner.requestStop.bind(runner),
+        haltAll: runner.haltAll.bind(runner),
+      },
+      triggerPmTick: pmScheduler ? () => pmScheduler!.tick() : undefined,
     });
     if (ssoBootstrap) {
       console.log(`SSO: enabled (WorkOS client ${ssoBootstrap.sso.workosClientId})`);
@@ -292,39 +329,211 @@ export const startCommand = new Command("start")
     const webhookServer = serve({ fetch: app.fetch, port });
     const dashServer = serve({ fetch: dashboardApp.fetch, port: dashboardPort });
 
-    // --- Worktree cleanup cron ---
-    // agentRunDir is already resolved above (before preflightClaudeAuth).
-    const _parsedTtl = parseInt(process.env.WORKTREE_TTL_HOURS ?? "24", 10);
-    const worktreeTtlHours = Number.isFinite(_parsedTtl) && _parsedTtl > 0 ? _parsedTtl : 24;
+    // --- Optional tunnel (cloudflared) ---
+    // Brings a public URL up via cloudflared when `--tunnel <mode>` is set.
+    // "none" (default) is a no-op. The TunnelManager supervises the child
+    // with exponential-backoff restart; failures are logged but don't crash
+    // the daemon — the daemon stays up on the local ports so operators can
+    // still SSH in and debug.
+    let tunnelManager: import("../lib/tunnel.js").TunnelManager | undefined;
+    if (options.tunnel && options.tunnel !== "none") {
+      const mode = options.tunnel as "cloudflare-quick" | "cloudflare-token";
+      if (mode !== "cloudflare-quick" && mode !== "cloudflare-token") {
+        console.error(
+          `--tunnel: unknown mode '${options.tunnel}'. Allowed: none, cloudflare-quick, cloudflare-token`,
+        );
+        process.exit(1);
+      }
+      const { TunnelManager, CloudflaredMissingError } = await import(
+        "../lib/tunnel.js"
+      );
+      const token = process.env.CLOUDFLARE_TUNNEL_TOKEN;
+      const publicUrl = process.env.URATEAM_PUBLIC_URL;
+      tunnelManager = new TunnelManager({
+        mode,
+        localPort: port,
+        token,
+        publicUrl,
+      });
+      try {
+        const result = await tunnelManager.start();
+        process.env.URATEAM_PUBLIC_URL = result.publicUrl;
+        console.log(`Tunnel:    ${result.publicUrl} (${mode})`);
+        // Attach a runtime error handler BEFORE any subsequent restart can
+        // exhaust the cap. EventEmitter throws if "error" emits without a
+        // listener; without this, a flapping cloudflared would crash the
+        // daemon when the restart cap is hit.
+        tunnelManager.on("error", (err: Error) => {
+          console.error(
+            `Tunnel: supervisor gave up (${err.message}); daemon continues on local ports`,
+          );
+        });
+        try {
+          const { logAuditEvent, tunnelStartedEvent } = await import(
+            "@urateam/core"
+          );
+          void logAuditEvent(
+            db,
+            tunnelStartedEvent({
+              provider: mode,
+              publicUrl: result.publicUrl,
+              restartCount: result.restartCount,
+            }),
+          );
+        } catch {
+          // audit must never crash startup
+        }
+      } catch (err) {
+        if (err instanceof CloudflaredMissingError) {
+          console.error(err.message);
+        } else {
+          console.error(
+            `Tunnel: failed to start (${(err as Error).message}); daemon will run on local ports only`,
+          );
+        }
+        tunnelManager = undefined;
+      }
+    }
 
-    async function runCleanup() {
+    // --- Optional user-level config hot-reload ---
+    // Watches ~/.urateam/config.json (or $URATEAM_HOME/config.json) and
+    // applies safe changes without a daemon restart. Activates only when
+    // we're in user-level mode (no REPO_* env vars AND config.json exists);
+    // project-level (sidecar) installs are env-var driven and don't need
+    // hot-reload. Unsafe field changes (url, path, defaultBranch) log a
+    // "restart required" warning. Removals with in-flight pipeline runs
+    // are deferred to the next reload to avoid mid-flight interruption.
+    let configWatcher: import("../lib/config-watcher.js").ConfigWatcher | undefined;
+    const userLevelMode =
+      !process.env.REPO_TEAM_ID &&
+      !process.env.REPO_URL &&
+      readUserLevelConfig() !== null;
+    if (userLevelMode) {
+      const { ConfigWatcher, hashConfig } = await import(
+        "../lib/config-watcher.js"
+      );
+      const initial = readUserLevelConfig()!;
+      configWatcher = new ConfigWatcher(initial, {
+        path: userLevelConfigPath(),
+      });
+
+      const deriveKeyFromUrl = (url: string): string => {
+        const stripped = url.replace(/\.git$/, "");
+        const last =
+          stripped.split(/[/:]/).filter(Boolean).pop() ?? "repo";
+        return last.replace(/[^A-Za-z0-9._-]/g, "-");
+      };
+
+      configWatcher.on("applied", async (diff: import("../lib/config-watcher.js").ConfigDiff) => {
+        for (const r of diff.added) {
+          const key = r.teamId ?? deriveKeyFromUrl(r.url);
+          config.repoConfigs[key] = {
+            url: r.url,
+            defaultBranch: r.defaultBranch,
+            testCommand: r.testCommand,
+            buildCommand: r.buildCommand,
+            ...(r.labelPattern && { labelPattern: r.labelPattern }),
+          };
+          console.log(`config: + ${r.url} (live)`);
+        }
+        for (const m of diff.modifiedSafe) {
+          // Look up the OLD entry using the previous teamId / URL slug —
+          // not the new ones — so we find the entry even when teamId
+          // itself changed.
+          const oldKey = m.prev.teamId ?? deriveKeyFromUrl(m.prev.url);
+          const existing = config.repoConfigs[oldKey];
+          if (existing) {
+            if (m.fields.includes("testCommand")) {
+              existing.testCommand = m.repo.testCommand;
+            }
+            if (m.fields.includes("buildCommand")) {
+              existing.buildCommand = m.repo.buildCommand;
+            }
+            if (m.fields.includes("labelPattern")) {
+              existing.labelPattern = m.repo.labelPattern;
+            }
+            if (m.fields.includes("teamId")) {
+              // The map-key changes when teamId changes — re-key the entry
+              // under the new key so webhook routing keeps working.
+              const newKey =
+                m.repo.teamId ?? deriveKeyFromUrl(m.repo.url);
+              if (newKey !== oldKey) {
+                delete config.repoConfigs[oldKey];
+                config.repoConfigs[newKey] = existing;
+              }
+            }
+            console.log(
+              `config: ~ ${m.repo.url} (${m.fields.join(",")}) — applied live`,
+            );
+          }
+        }
+        for (const m of diff.modifiedUnsafe) {
+          console.warn(
+            `config: ! ${m.repo.url} unsafe field change (${m.fields.join(",")}) — restart required to apply`,
+          );
+        }
+        // Removal: delete the entry from the live repoConfigs immediately.
+        // In-flight pipeline runs hold their own snapshot of the runner state
+        // and continue uninterrupted — removing the entry only stops the
+        // webhook/PM router from sending NEW work to the repo. Operators
+        // who need to forcibly stop in-flight runs should use `ura stop`
+        // or `ura halt`.
+        for (const r of diff.removed) {
+          const key = r.teamId ?? deriveKeyFromUrl(r.url);
+          delete config.repoConfigs[key];
+          console.log(`config: - ${r.url} (live; in-flight runs continue)`);
+        }
+        try {
+          const { logAuditEvent, configReloadedEvent } = await import(
+            "@urateam/core"
+          );
+          void logAuditEvent(
+            db,
+            configReloadedEvent({
+              added: diff.added.map((r) => r.url),
+              removed: diff.removed.map((r) => r.url),
+              modifiedSafe: diff.modifiedSafe.map((m) => m.repo.url),
+              modifiedUnsafe: diff.modifiedUnsafe.map((m) => m.repo.url),
+              sha256: hashConfig(configWatcher!.getCurrent()),
+            }),
+          );
+        } catch {
+          // audit must never crash the watcher loop
+        }
+      });
+
+      configWatcher.on("error", (err) => {
+        console.warn(
+          `config-watcher: ${err.message}; keeping previous in-memory config`,
+        );
+      });
+
+      configWatcher.start();
+      console.log(`Config:    watching ${userLevelConfigPath()} (live reload)`);
+    }
+
+    // --- Worktree cleanup cron ---
+    const worktreeTtlHours = env.WORKTREE_TTL_HOURS;
+
+    const cleanupInterval = await scheduleRepeatedly(async () => {
       const removed = await cleanupWorktrees(agentRunDir, worktreeTtlHours);
       if (removed.length > 0) {
         console.log(`Cleanup: removed ${removed.length} stale worktree(s)`);
       }
-    }
-    await runCleanup();
-    const cleanupInterval = setInterval(runCleanup, 60 * 60 * 1000);
-    cleanupInterval.unref();
+    }, 60 * 60 * 1000, "await");
 
     // --- Stale agent-branch sweep cron (BEC-174) ---
     // Sweeps `agent/*` branches on origin whose tip commit is older than
     // PM_AGENT_AGENT_BRANCH_TTL_DAYS (default 7) AND that have no open PR.
     // Skips branches with open PRs to preserve active human review.
-    const _parsedAgentBranchTtl = parseInt(
-      process.env.PM_AGENT_AGENT_BRANCH_TTL_DAYS ?? "7",
-      10,
-    );
-    const agentBranchTtlDays =
-      Number.isFinite(_parsedAgentBranchTtl) && _parsedAgentBranchTtl > 0
-        ? _parsedAgentBranchTtl
-        : 7;
+    const agentBranchTtlDays = env.PM_AGENT_AGENT_BRANCH_TTL_DAYS;
 
-    const repoUrls = Object.values(config.repoConfigs).map(
-      (r) => (r as { url: string }).url,
-    );
-
-    async function runBranchSweepTick() {
+    // Compute repoUrls per-tick so hot-reloaded additions/removals are
+    // picked up by the branch sweep without requiring a daemon restart.
+    const branchSweepInterval = await scheduleRepeatedly(async () => {
+      const repoUrls = Object.values(config.repoConfigs).map(
+        (r) => (r as { url: string }).url,
+      );
       try {
         await runAgentBranchSweep({
           db,
@@ -335,61 +544,39 @@ export const startCommand = new Command("start")
       } catch (err) {
         console.error("Branch sweep tick failed:", (err as Error).message);
       }
-    }
-    void runBranchSweepTick();
-    const branchSweepInterval = setInterval(
-      () => void runBranchSweepTick(),
-      60 * 60 * 1000,
-    );
-    branchSweepInterval.unref();
+    }, 60 * 60 * 1000, "void");
 
-    // --- PM Agent (opt-in) ---
+    // --- PM Agent tick schedule (scheduler already created above, before createDashboard) ---
     let pmInterval: ReturnType<typeof setInterval> | undefined;
     let rmScheduler: import("@urateam/core").ReleaseManagerScheduler | undefined;
-    if (pmAgentEnabled && pmConfig) {
-      const { createPmScheduler } = await import("@urateam/core");
-      const slackBotToken = process.env.SLACK_BOT_TOKEN!;
-
-      const pmScheduler = createPmScheduler({
-        config: pmConfig,
-        db,
-        linearApiKey: config.linearApiKey,
-        slackBotToken,
-        repoCloneDir: config.repoCloneDir,
-        runner,
-        pipelineConfigs: config.pipelineConfigs,
-        repoConfigs: config.repoConfigs,
-      });
-
-      pmScheduler.tick().catch((err) => console.error("PM Agent initial tick failed:", err));
+    if (env.PM_AGENT_ENABLED && pmScheduler && pmConfig) {
+      const capturedScheduler = pmScheduler;
+      capturedScheduler.tick().catch((err: unknown) => console.error("PM Agent initial tick failed:", err));
       pmInterval = setInterval(
-        () => pmScheduler.tick().catch((err) => console.error("PM Agent tick failed:", err)),
+        () => capturedScheduler.tick().catch((err: unknown) => console.error("PM Agent tick failed:", err)),
         pmConfig.cronIntervalMs,
       );
       pmInterval.unref();
 
       console.log(`PM Agent: enabled (every ${pmConfig.cronIntervalMs / 60000}min, max ${pmConfig.maxInFlight} in-flight)`);
-      if (process.env.PM_AGENT_PAUSED === "true") {
+      if (env.PM_AGENT_PAUSED) {
         console.log(`PM Agent: PM_AGENT_PAUSED=true — promote/start-todo/recover-stuck will be skipped on every tick until the env var is cleared and the container restarted`);
       }
     }
 
     // --- Release Manager (BEC-135 — Pro tier, opt-in) ---
     if (rmConfig && rmRepoUrl) {
-      if (!github) {
-        console.error(
-          "RELEASE_MANAGER_ENABLED=true requires GITHUB_APP_ID + GITHUB_PRIVATE_KEY_PATH so the agent can create tags/releases.",
-        );
-        process.exit(1);
-      }
+      // GitHub App credentials already verified at boot by loadEnvConfig.
       const { createGitHubClient, createReleaseManagerScheduler, isFeatureLicensed,
         handleReleaseSubcommand, parseReleaseSubcommand } = await import("@urateam/core");
-      const rmOctokit = await createGitHubClient(github);
+      const [rmOctokit, linearSdk] = await Promise.all([
+        createGitHubClient(github!),
+        rmConfig.triggers.qaCheck ? import("@linear/sdk") : Promise.resolve(null),
+      ]);
 
       let linearClient: import("@linear/sdk").LinearClient | undefined;
-      if (rmConfig.triggers.qaCheck) {
-        const { LinearClient } = await import("@linear/sdk");
-        linearClient = new LinearClient({ apiKey: process.env.LINEAR_API_KEY! });
+      if (rmConfig.triggers.qaCheck && linearSdk) {
+        linearClient = new linearSdk.LinearClient({ apiKey: env.LINEAR_API_KEY });
       }
 
       rmScheduler = createReleaseManagerScheduler({
@@ -399,20 +586,22 @@ export const startCommand = new Command("start")
         repoUrl: rmRepoUrl,
         isLicensed: () => isFeatureLicensed("release-manager"),
         linear: linearClient,
-        slack: process.env.SLACK_BOT_TOKEN
+        slack: env.SLACK_BOT_TOKEN
           ? {
               postMessage: async (channel, text) => {
                 const { postSlackMessage } = await import("@urateam/core");
-                const r = await postSlackMessage(process.env.SLACK_BOT_TOKEN!, { channel, text });
-                return r !== null && (r as any).ok !== false;
+                // postSlackMessage returns Promise<any> — no cast needed
+                const r = await postSlackMessage(env.SLACK_BOT_TOKEN!, { channel, text });
+                return r !== null && r.ok !== false;
               },
             }
           : undefined,
       });
 
       // Plumb a release-handler closure through pmSlack so /release routes here.
+      // releaseHandler is now a typed optional field on PmSlackInterfaceConfig.
       if (pmSlack) {
-        (pmSlack as any).releaseHandler = async ({ text, userId }: { text: string; userId: string }) => {
+        pmSlack.releaseHandler = async ({ text, userId }) => {
           const cmd = parseReleaseSubcommand(text);
           const pauseDurationHours = rmConfig!.triggers.timeSinceLastHours ?? 24;
           return handleReleaseSubcommand({
@@ -422,6 +611,8 @@ export const startCommand = new Command("start")
             branch: rmConfig!.branch,
             slackUserId: userId,
             pauseDurationHours,
+            octokit: rmOctokit,
+            config: rmConfig!,
             onSkip: (_reason) => {
               rmScheduler!.pauseUntil(new Date(Date.now() + pauseDurationHours * 3600 * 1000));
             },
@@ -436,12 +627,45 @@ export const startCommand = new Command("start")
     }
 
     // --- Graceful shutdown ---
-    function shutdown() {
+    async function shutdown() {
       console.log("Shutting down...");
       clearInterval(cleanupInterval);
       clearInterval(branchSweepInterval);
       if (pmInterval) clearInterval(pmInterval);
       rmScheduler?.stop();
+      configWatcher?.stop();
+      // Stop tunnel before closing HTTP servers so cloudflared sees clean
+      // disconnects instead of a half-open socket dance. Emit `tunnel.stopped`
+      // for observability of intentional shutdowns.
+      if (tunnelManager) {
+        // Capture restartCount BEFORE stop() — the count reflects how many
+        // times cloudflared crashed during the daemon's life, which is the
+        // metric operators want to see for "did this tunnel flap?".
+        const restartCount = tunnelManager.getRestartCount();
+        try {
+          await tunnelManager.stop();
+          try {
+            const { logAuditEvent, tunnelStoppedEvent } = await import(
+              "@urateam/core"
+            );
+            void logAuditEvent(
+              db,
+              tunnelStoppedEvent({
+                provider: options.tunnel as
+                  | "cloudflare-quick"
+                  | "cloudflare-token",
+                restartCount,
+                exitCode: null,
+                signal: "SIGTERM",
+              }),
+            );
+          } catch {
+            // audit must never crash shutdown
+          }
+        } catch (err) {
+          console.error(`Tunnel shutdown error: ${(err as Error).message}`);
+        }
+      }
       let closed = 0;
       const onClose = () => { if (++closed === 2) process.exit(0); };
       dashServer.close(onClose);

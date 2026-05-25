@@ -11,6 +11,20 @@
  *   - SQLite ALTER TABLE does not support IF NOT EXISTS, so duplicate-column errors are
  *     caught and treated as a no-op (idempotent re-run safety).
  *   - Postgres migrations use DO $$ IF NOT EXISTS $$ guards for native idempotency.
+ *
+ * Numbering policy (enforced as of BEC-149):
+ *   - Every migration file must have a unique NNN_ numeric prefix.
+ *   - When adding a new migration, use max(existing prefix) + 1.
+ *   - Never reuse or duplicate a prefix number — the migrator sorts files alphabetically
+ *     so duplicate prefixes produce non-deterministic ordering.
+ *
+ * Tombstone files (BEC-149 rename history):
+ *   - Files listed as keys in SQLITE_MIGRATION_RENAMES / POSTGRES_MIGRATION_RENAMES are
+ *     "tombstones": their content has moved to the canonical new name.
+ *   - Tombstones are SKIPPED during migration processing (no SQL is run, nothing recorded).
+ *   - Before running any migration, the migrator renames schema_migrations rows from the
+ *     old name to the new name so existing deployments automatically adopt the canonical
+ *     numbering without re-running the migration content.
  */
 
 import { readdirSync, readFileSync } from "node:fs";
@@ -52,8 +66,56 @@ const CREATE_SCHEMA_MIGRATIONS_POSTGRES = `
 `;
 
 /**
+ * BEC-149: Rename map for SQLite migrations.
+ *
+ * Keys are the old (duplicate-prefix) migration names that were renumbered.
+ * Values are the canonical new names.
+ *
+ * On startup the migrator updates schema_migrations rows from old → new so that
+ * existing deployments recognise the renamed files without re-running them.
+ * The old files are kept as tombstones (comment-only) and are SKIPPED by the
+ * migration runner; only the canonical-named files are processed.
+ */
+export const SQLITE_MIGRATION_RENAMES: Record<string, string> = {
+  "007_sso": "008_sso",
+  "008_review_model_runs": "009_review_model_runs",
+  "009_release_manager": "010_release_manager",
+  "010_qa_run_columns": "011_qa_run_columns",
+  "011_qa_gap_issues": "012_qa_gap_issues",
+  // BEC-149 follow-on: 3 migrations landed on main after the initial rename
+  // map was written and re-introduced prefix collisions (012_qa_gap_issues
+  // vs 012_stage_runs_cache_tokens, 013_missing_indexes vs 013_triage_results).
+  // Renumbering them keeps prefix-unique invariant intact.
+  "012_stage_runs_cache_tokens": "013_stage_runs_cache_tokens",
+  "013_missing_indexes": "014_missing_indexes",
+  "013_triage_results": "015_triage_results",
+};
+
+/**
+ * BEC-149: Rename map for Postgres migrations.
+ *
+ * Same semantics as SQLITE_MIGRATION_RENAMES above.
+ */
+export const POSTGRES_MIGRATION_RENAMES: Record<string, string> = {
+  "008_sso": "009_sso",
+  "009_review_model_runs": "010_review_model_runs",
+  "010_release_manager": "011_release_manager",
+  "011_qa_run_columns": "012_qa_run_columns",
+  "012_qa_gap_issues": "013_qa_gap_issues",
+  // BEC-149 follow-on: 3 migrations landed on main after the initial rename
+  // map was written and re-introduced prefix collisions on 013.
+  "013_stage_runs_cache_tokens": "014_stage_runs_cache_tokens",
+  "014_missing_indexes": "015_missing_indexes",
+  "015_triage_results": "016_triage_results",
+};
+
+/**
  * Read all .sql migration files for a driver from the migrations subdirectory,
  * sorted by filename (ascending, so NNN prefix determines order).
+ *
+ * Tombstone files (those whose names appear as keys in the driver's rename map)
+ * are included in the returned list so callers can distinguish them; the migration
+ * runners skip them automatically.
  */
 export function loadMigrationFiles(driver: "sqlite" | "postgres"): Migration[] {
   const dir = join(__dirname, "migrations", driver);
@@ -72,6 +134,47 @@ export function loadMigrationFiles(driver: "sqlite" | "postgres"): Migration[] {
   }));
 }
 
+/**
+ * Return the active (non-tombstone) migrations for a driver.
+ * These are the migrations that the runner will actually process.
+ */
+export function loadActiveMigrationFiles(
+  driver: "sqlite" | "postgres"
+): Migration[] {
+  const renames =
+    driver === "sqlite" ? SQLITE_MIGRATION_RENAMES : POSTGRES_MIGRATION_RENAMES;
+  return loadMigrationFiles(driver).filter((m) => !(m.name in renames));
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a MigrationStatus array from the active migrations list and the
+ * applied-name → timestamp map that each driver-specific status function
+ * constructs. Shared between SQLite and Postgres implementations to avoid
+ * duplication.
+ */
+function buildMigrationStatus(
+  migrations: Migration[],
+  appliedMap: Map<string, Date>
+): MigrationStatus[] {
+  // Include any applied migrations that no longer have a file (e.g., squashed)
+  const allNames = new Set([
+    ...migrations.map((m) => m.name),
+    ...appliedMap.keys(),
+  ]);
+
+  return Array.from(allNames)
+    .sort()
+    .map((name) => ({
+      name,
+      applied: appliedMap.has(name),
+      appliedAt: appliedMap.get(name),
+    }));
+}
+
 // ---------------------------------------------------------------------------
 // SQLite
 // ---------------------------------------------------------------------------
@@ -84,7 +187,17 @@ export function runMigrationsSqlite(db: Database.Database): void {
   // Ensure tracking table exists
   db.exec(CREATE_SCHEMA_MIGRATIONS_SQLITE);
 
-  const migrations = loadMigrationFiles("sqlite");
+  // BEC-149: Rename old migration entries to their canonical names so that
+  // existing deployments don't re-run migrations under the new filenames.
+  const renameStmt = db.prepare(
+    "UPDATE schema_migrations SET name = ? WHERE name = ?"
+  );
+  for (const [oldName, newName] of Object.entries(SQLITE_MIGRATION_RENAMES)) {
+    renameStmt.run(newName, oldName);
+  }
+
+  // Only process active (non-tombstone) migrations
+  const migrations = loadActiveMigrationFiles("sqlite");
   const getApplied = db.prepare(
     "SELECT name FROM schema_migrations WHERE name = ?"
   );
@@ -148,7 +261,8 @@ export function runMigrationsSqlite(db: Database.Database): void {
 }
 
 /**
- * Return the status of every migration file for SQLite.
+ * Return the status of every active migration file for SQLite.
+ * Tombstone files (renamed migrations) are excluded from the status list.
  */
 export function getMigrationStatusSqlite(
   db: Database.Database
@@ -156,25 +270,13 @@ export function getMigrationStatusSqlite(
   // Ensure tracking table exists before querying
   db.exec(CREATE_SCHEMA_MIGRATIONS_SQLITE);
 
-  const migrations = loadMigrationFiles("sqlite");
+  const migrations = loadActiveMigrationFiles("sqlite");
   const rows = db
     .prepare("SELECT name, applied_at FROM schema_migrations")
     .all() as Array<{ name: string; applied_at: number }>;
   const appliedMap = new Map(rows.map((r) => [r.name, new Date(r.applied_at * 1000)]));
 
-  // Include any applied migrations that no longer have a file (e.g., squashed)
-  const allNames = new Set([
-    ...migrations.map((m) => m.name),
-    ...appliedMap.keys(),
-  ]);
-
-  return Array.from(allNames)
-    .sort()
-    .map((name) => ({
-      name,
-      applied: appliedMap.has(name),
-      appliedAt: appliedMap.get(name),
-    }));
+  return buildMigrationStatus(migrations, appliedMap);
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +291,17 @@ export async function runMigrationsPostgres(client: Sql): Promise<void> {
   // Ensure tracking table exists
   await client.unsafe(CREATE_SCHEMA_MIGRATIONS_POSTGRES);
 
-  const migrations = loadMigrationFiles("postgres");
+  // BEC-149: Rename old migration entries to their canonical names so that
+  // existing deployments don't re-run migrations under the new filenames.
+  // All renames are independent, so run them in parallel for faster startup.
+  await Promise.all(
+    Object.entries(POSTGRES_MIGRATION_RENAMES).map(([oldName, newName]) =>
+      client`UPDATE schema_migrations SET name = ${newName} WHERE name = ${oldName}`
+    )
+  );
+
+  // Only process active (non-tombstone) migrations
+  const migrations = loadActiveMigrationFiles("postgres");
 
   for (const migration of migrations) {
     const existing = await client`
@@ -214,7 +326,8 @@ export async function runMigrationsPostgres(client: Sql): Promise<void> {
 }
 
 /**
- * Return the status of every migration file for Postgres.
+ * Return the status of every active migration file for Postgres.
+ * Tombstone files (renamed migrations) are excluded from the status list.
  */
 export async function getMigrationStatusPostgres(
   client: Sql
@@ -222,23 +335,12 @@ export async function getMigrationStatusPostgres(
   // Ensure tracking table exists before querying
   await client.unsafe(CREATE_SCHEMA_MIGRATIONS_POSTGRES);
 
-  const migrations = loadMigrationFiles("postgres");
+  const migrations = loadActiveMigrationFiles("postgres");
   const rows = await client<
     Array<{ name: string; applied_at: Date }>
   >`SELECT name, applied_at FROM schema_migrations`;
 
   const appliedMap = new Map(rows.map((r) => [r.name, r.applied_at]));
 
-  const allNames = new Set([
-    ...migrations.map((m) => m.name),
-    ...appliedMap.keys(),
-  ]);
-
-  return Array.from(allNames)
-    .sort()
-    .map((name) => ({
-      name,
-      applied: appliedMap.has(name),
-      appliedAt: appliedMap.get(name),
-    }));
+  return buildMigrationStatus(migrations, appliedMap);
 }

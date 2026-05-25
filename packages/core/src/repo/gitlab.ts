@@ -71,7 +71,7 @@ export async function createMR(
     // Mandatory reviewers (enterprise feature 4.6) are not wired through to
     // GitLab's assignee/reviewer API in v1 — log informatively and ignore.
     const { createLogger } = await import("../logger.js");
-    createLogger({ module: "repo/gitlab" }).info(
+    createLogger({ component: "repo/gitlab" }).info(
       { reviewers: options.reviewers, teamReviewers: options.teamReviewers },
       "GitLab path does not request reviewers via API; configured reviewers are not applied",
     );
@@ -120,6 +120,55 @@ export async function createMR(
 
   const data = (await response.json()) as { web_url: string };
   return data.web_url;
+}
+
+/**
+ * Trigger merge when all CI pipelines succeed (`merge_when_pipeline_succeeds`).
+ *
+ * Equivalent to clicking "Merge when pipeline succeeds" in the GitLab UI.
+ * Returns true when the API accepted the request, false on failure.
+ *
+ * @param config - GitLab authentication config (token + optional host).
+ * @param projectPath - GitLab namespace+project path, e.g. "myorg/myrepo".
+ * @param mrIid - The merge request IID (internal ID shown in the URL, e.g. 42).
+ */
+export async function mergeMRWhenPipelineSucceeds(
+  config: GitLabConfig,
+  projectPath: string,
+  mrIid: number,
+): Promise<boolean> {
+  const host = config.host ?? "https://gitlab.com";
+  const encodedPath = encodeURIComponent(projectPath);
+  const apiUrl = `${host}/api/v4/projects/${encodedPath}/merge_requests/${mrIid}/merge`;
+
+  try {
+    const response = await fetch(apiUrl, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "PRIVATE-TOKEN": config.token,
+      },
+      body: JSON.stringify({ merge_when_pipeline_succeeds: true }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "<no body>");
+      const { createLogger } = await import("../logger.js");
+      createLogger({ module: "repo/gitlab" }).error(
+        { status: response.status, body: text, mrIid },
+        "GitLab merge_when_pipeline_succeeds API error",
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
+    const { createLogger } = await import("../logger.js");
+    createLogger({ module: "repo/gitlab" }).error(
+      { err, mrIid },
+      "GitLab mergeMRWhenPipelineSucceeds request failed",
+    );
+    return false;
+  }
 }
 
 /**

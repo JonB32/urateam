@@ -1,5 +1,13 @@
 import type { SsoConfig, WorkosClient } from "@urateam/core";
 
+// Local helper to avoid a static @urateam/core import that would break vi.mock hoisting in tests.
+// The authoritative implementation lives in packages/core/src/util/env.ts (BEC-188).
+function parsePosIntOr(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 export interface SsoBootstrapResult {
   sso: SsoConfig;
   workos: WorkosClient;
@@ -74,9 +82,7 @@ export async function bootstrapSsoFromEnv(
       workosClientId: required.URATEAM_WORKOS_CLIENT_ID,
       redirectUri: required.URATEAM_WORKOS_REDIRECT_URI,
       allowedDomain: trimEnv(env.URATEAM_SSO_ALLOWED_DOMAIN),
-      sessionDurationHours: env.URATEAM_SSO_SESSION_HOURS
-        ? parseInt(env.URATEAM_SSO_SESSION_HOURS, 10)
-        : 24,
+      sessionDurationHours: parsePosIntOr(env.URATEAM_SSO_SESSION_HOURS, 24),
       cookieName: env.URATEAM_SSO_COOKIE_NAME || "urateam_session",
       cookieSecure: env.URATEAM_SSO_COOKIE_SECURE !== "false",
       stateSigningSecret: required.URATEAM_SSO_STATE_SECRET,

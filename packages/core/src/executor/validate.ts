@@ -9,7 +9,27 @@ const log = createLogger({ component: "Validator" });
 export interface ValidationResult {
   valid: boolean;
   issues: string[];
+  /** Set when validation was short-circuited (e.g. resumed-session stage). */
+  skipped?: boolean;
+  /** Human-readable explanation when `skipped === true`. */
+  reason?: string;
 }
+
+/**
+ * BEC-227 — agent session continuity. Tells the validator how the current
+ * stage relates to the run-level agent session so it can decide whether
+ * cross-stage validation is meaningful:
+ * - `"fallback"`     — no agent session at all (flag off, no JSONL, etc.).
+ *                       Validate as before; same agent state may NOT carry over.
+ * - `"first-resumed"` — first resumable stage of this run. The session was
+ *                       just created (or an earlier run's session is about
+ *                       to be resumed). Validate as before — paranoia check.
+ * - `"resumed"`      — every later resumable stage. The validator's job
+ *                       (cross-checking artifact claims against the worktree)
+ *                       is redundant because the next agent IS the prior
+ *                       agent with full context. Short-circuit.
+ */
+export type ValidateRunMode = "first-resumed" | "resumed" | "fallback";
 
 const VALIDATE_MODEL = "claude-haiku-4-5-20251001";
 
@@ -99,7 +119,27 @@ export async function validateHandoff(
   _issue: SanitizedIssue,
   _repoConfig: RepoConfig,
   workdir: string,
+  runMode: ValidateRunMode = "fallback",
 ): Promise<ValidationResult> {
+  // BEC-227 — first short-circuit: when the run is reusing an agent session
+  // and this is NOT the first resumable stage, validation is redundant. The
+  // next stage's agent literally inherits the prior stage's context, so
+  // cross-checking the handoff artifact against the worktree adds no signal
+  // beyond what the agent itself already sees. The first resumed stage still
+  // runs as a paranoia check (caller passes `"first-resumed"`).
+  if (runMode === "resumed") {
+    log.debug(
+      { stage, runMode },
+      "handoff validation skipped — resumed-session stage (agent already has prior context)",
+    );
+    return {
+      valid: true,
+      issues: [],
+      skipped: true,
+      reason: `skipped: resumed-session stage "${stage}" (BEC-227 — agent already has prior context)`,
+    };
+  }
+
   // Unstructured handoffs are already flagged by handoffIsStructured === false.
   // Pass them through — blocking here would cause retries that produce the same
   // unstructured output. The validator only gates structured handoffs where it

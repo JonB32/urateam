@@ -7,6 +7,8 @@ const log = createLogger({ component: "rbac" });
 export const PERMISSION_MATRIX = {
   "runs.view":         ["admin", "operator", "viewer"],
   "runs.retry":        ["admin", "operator"],
+  "runs.stop":         ["admin", "operator"],
+  "system.halt":       ["admin", "operator"],
   "tokens.view":       ["admin", "operator", "viewer"],
   "audit.view":        ["admin", "operator"],
   "audit.export":      ["admin", "operator"],

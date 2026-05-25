@@ -1,12 +1,22 @@
+import { existsSync } from "node:fs";
 import type { ConflictCheckResult } from "./types.js";
 import { parseJsonObject } from "../executor/agent-stream.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger({ component: "PmAgent:conflict" });
 
+/** Max file path length passed to Claude in conflict-prediction prompts. */
+const MAX_FILE_PATH_LENGTH = 500;
+
+function parseGitLines(output: string): string[] {
+  return output.split("\n").map((f) => f.trim()).filter(Boolean);
+}
+
 export interface ActiveRun {
   issueId: string;
   branch: string;
+  /** Local worktree path for this run. Used as fallback when the branch has not yet been pushed to origin. */
+  worktreePath?: string;
 }
 
 export interface GetActiveFileMapsInput {
@@ -14,12 +24,14 @@ export interface GetActiveFileMapsInput {
   defaultBranch: string;
   repoDir: string;
   execGit: (args: string[], cwd: string) => Promise<string>;
+  /** Injected for testability; defaults to `fs.existsSync`. */
+  pathExists?: (p: string) => boolean;
 }
 
 export async function getActiveFileMaps(
   input: GetActiveFileMapsInput,
 ): Promise<Map<string, Set<string>>> {
-  const { activeRuns, defaultBranch, repoDir, execGit } = input;
+  const { activeRuns, defaultBranch, repoDir, execGit, pathExists = existsSync } = input;
   const fileMaps = new Map<string, Set<string>>();
 
   if (activeRuns.length === 0) return fileMaps;
@@ -31,23 +43,90 @@ export async function getActiveFileMaps(
   }
 
   for (const run of activeRuns) {
+    // Deterministically check whether the branch exists on origin before diffing.
+    // This avoids conflating "branch not yet pushed" with genuine git failures.
+    let branchOnOrigin = false;
     try {
-      const output = await execGit(
-        ["diff", "--name-only", `origin/${defaultBranch}..origin/${run.branch}`],
-        repoDir,
-      );
-      const files = output
-        .split("\n")
-        .map((f) => f.trim())
-        .filter(Boolean);
-      fileMaps.set(run.issueId, new Set(files));
-    } catch (err) {
-      log.warn({ issueId: run.issueId, branch: run.branch, err }, "git diff failed, treating as empty");
-      fileMaps.set(run.issueId, new Set());
+      await execGit(["rev-parse", "--verify", "--quiet", `origin/${run.branch}`], repoDir);
+      branchOnOrigin = true;
+    } catch {
+      // Branch not on origin yet — expected for in-flight runs that haven't pushed.
+    }
+
+    if (branchOnOrigin) {
+      // Branch already pushed — use the standard origin-diff path.
+      try {
+        const output = await execGit(
+          ["diff", "--name-only", `origin/${defaultBranch}..origin/${run.branch}`],
+          repoDir,
+        );
+        fileMaps.set(run.issueId, new Set(parseGitLines(output)));
+      } catch (err) {
+        log.warn({ issueId: run.issueId, branch: run.branch, err }, "git diff failed, treating as empty");
+        fileMaps.set(run.issueId, new Set());
+      }
+    } else {
+      // Branch not yet on origin — read in-progress files from the local worktree.
+      // This is the normal state for runs that are still executing stages.
+      log.debug({ issueId: run.issueId, branch: run.branch }, "branch not yet on origin, reading worktree for conflict detection");
+      fileMaps.set(run.issueId, await getWorktreeFiles(run, defaultBranch, execGit, pathExists));
     }
   }
 
   return fileMaps;
+}
+
+async function getWorktreeFiles(
+  run: ActiveRun,
+  defaultBranch: string,
+  execGit: (args: string[], cwd: string) => Promise<string>,
+  pathExists: (p: string) => boolean,
+): Promise<Set<string>> {
+  if (!run.worktreePath) return new Set();
+
+  if (!pathExists(run.worktreePath)) {
+    log.debug(
+      { issueId: run.issueId, worktreePath: run.worktreePath },
+      "worktree not yet created (or already cleaned up), skipping conflict-detection for this run",
+    );
+    return new Set();
+  }
+
+  const files = new Set<string>();
+
+  // Run both git operations in parallel — they are independent reads.
+  const [diffResult, statusResult] = await Promise.allSettled([
+    execGit(["diff", "--name-only", `origin/${defaultBranch}...HEAD`], run.worktreePath),
+    execGit(["status", "--porcelain"], run.worktreePath),
+  ]);
+
+  if (diffResult.status === "fulfilled") {
+    for (const f of parseGitLines(diffResult.value)) {
+      files.add(f);
+    }
+  } else {
+    log.warn(
+      { issueId: run.issueId, worktreePath: run.worktreePath, err: diffResult.reason },
+      "worktree diff failed, skipping committed files; if error shows 'spawn git ENOENT', verify git is installed and in PATH",
+    );
+  }
+
+  if (statusResult.status === "fulfilled") {
+    for (const line of statusResult.value.split("\n")) {
+      if (line.length < 4) continue; // min: 2 status chars + 1 space + 1 filename char
+      const path = line.slice(3).trim();
+      // Renamed files appear as "old -> new"; take the destination name.
+      const parts = path.split(" -> ");
+      files.add(parts[parts.length - 1]);
+    }
+  } else {
+    log.warn(
+      { issueId: run.issueId, worktreePath: run.worktreePath, err: statusResult.reason },
+      "worktree status failed, skipping uncommitted files; if error shows 'spawn git ENOENT', verify git is installed and in PATH",
+    );
+  }
+
+  return files;
 }
 
 export interface PredictConflictInput {
@@ -73,7 +152,7 @@ export async function predictConflict(
 
   const safeDescription = sanitize ? sanitize(candidateDescription) : candidateDescription;
   const safeFiles = allActiveFiles.map((f) =>
-    f.replace(/[^\w/.@_-]/g, "").slice(0, 500),
+    f.replace(/[^\w/.@_-]/g, "").slice(0, MAX_FILE_PATH_LENGTH),
   );
 
   const prompt =

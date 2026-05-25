@@ -1,4 +1,85 @@
 /**
+ * Tier 2 — project-convention checklist injected into the review prompt.
+ *
+ * Each entry names a `category` string the review agent must use verbatim in
+ * its `ReviewFinding` output. The pipeline runner already treats blocking
+ * findings as a draft-PR trigger (and the review-fix loop re-runs implement
+ * to address them), so adding categories here automatically picks up the
+ * existing gate machinery — no runner-side changes needed.
+ *
+ * The 9 categories mirror the operator brief; their names are also the
+ * `category` strings used by Tiers 1a/1b/1c's deterministic gates so the
+ * review-stage agent's findings classify into the same buckets as the gate
+ * findings (operators see one consistent vocabulary across both surfaces).
+ */
+export const PROJECT_CONVENTION_CHECKLIST = `## Project Convention Checklist
+
+For each item below, scan the diff and emit a blocking \`ReviewFinding\` with the
+exact \`category\` string shown when the convention is violated. The autonomous
+pipeline has historically shipped PRs that fail one or more of these checks;
+your job is to catch every regression deterministically.
+
+### category: "scratch-files"
+Any new file matching \`*.bak\`, \`*_REPORT.md\`, \`FINAL_*.md\`, \`TESTING_*.md\`,
+\`TEST_*.md\`, \`*_CHECKLIST.md\`, repo-root \`commit-*.sh\`, \`run-*.sh\`, \`*.tmp\`,
+\`*.log\`, OR any new \`*.md\` at the repo root that isn't one of:
+CLAUDE.md, README.md, CHANGELOG.md, CONTRIBUTING.md, SECURITY.md,
+CODE_OF_CONDUCT.md, LICENSE.md, AUTHORS.md.
+
+### category: "db-ddl-drift"
+If \`packages/core/src/db/migrations/{sqlite,postgres}/*.sql\` are added or
+modified, verify ALL THREE required sites are updated (CLAUDE.md "DB schema
+changes" is the authority):
+1. \`MIGRATION_COLUMNS\` array in \`db/client.ts\` — generates the ALTER TABLE
+   statements for existing installs on startup.
+2. \`getCreateTablesDDL()\` in \`db/client.ts\` — the CREATE TABLE template for
+   fresh installs.
+3. The Drizzle schema in \`db/schema.ts\` — keeps ORM types in sync.
+Mismatch in any of the three ships a release that's broken on fresh installs,
+broken on existing installs, or both.
+
+### category: "audit-bypass-undocumented"
+If \`logAuditEventUnchecked\` is added to a new file, verify the file appears
+in the allow-list in \`__tests__/audit-immutability.test.ts\` AND in CLAUDE.md's
+enumeration of bypass call sites.
+
+### category: "credential-in-interface"
+Flag any public interface field named \`*Token\`, \`*Secret\`, \`*Key\`,
+\`*Credential\`, \`*Password\`, \`*Auth\` — credentials should never leave
+\`process.env\`. (PR #251 BEC-207 had a raw OAuth token field "for logging";
+catch this class deterministically.)
+
+### category: "spec-vs-impl"
+JSDoc that references a config/option/env/deps/options field by name; verify
+that field exists in the relevant type/schema. Tier 1c's deterministic gate
+runs the same check; the review-stage backup catches anything the gate's
+heuristic misses (e.g., \`@param\` annotation styles).
+
+### category: "convention-execfile"
+Flag any new use of \`child_process.exec\` or the global \`exec()\` — CLAUDE.md
+mandates \`execFile\` (no shell parsing) for all subprocess invocations.
+
+### category: "convention-console"
+Flag any \`console.log\` / \`console.error\` / etc. — structured logging via
+\`createLogger\` from \`logger.js\` only. Console calls won't reach the audit
+log or operator dashboards.
+
+### category: "convention-throw"
+Flag bare \`throw\` statements in ANY pipeline failure path — not only
+\`pipeline/runner.ts\`, but also \`executor/executor.ts\`, every module under
+\`pm/actions/\`, feedback-pipeline / RALPH / review-fix paths, and any other
+module that owns a pipeline-stage execution. Use \`failPipeline()\` so the
+error classification (transient vs permanent) and DB state stay consistent.
+Exception: re-throwing after \`failPipeline()\` to exit a push-queue / lock
+callback is allowed and documented in CLAUDE.md.
+
+### category: "convention-as-any"
+Flag new \`as any\` casts outside the documented \`AnyDb\` / db-cast pattern
+in CLAUDE.md. If you reach for \`as any\`, either the code or the types are
+wrong — fix the underlying issue.
+`;
+
+/**
  * Security review checklist used by the review stage agent.
  */
 export const SECURITY_REVIEW_CHECKLIST = `## Security Review Checklist
@@ -69,7 +150,11 @@ export const REVIEW_OUTPUT_FORMAT = `Emit your final output as a single \`\`\`js
 
 Rules:
 - \`severity\` must be one of: \`"blocking"\`, \`"warning"\`, \`"suggestion"\`
-- \`category\` can be any of: \`"SQL Injection"\`, \`"XSS"\`, \`"Command Injection"\`, \`"Path Traversal"\`, \`"Auth"\`, \`"Data Exposure"\`, \`"Dependency"\`, \`"incomplete-implementation"\`, \`"dead-code"\`, \`"missing-documentation"\`, \`"Other"\`
+- \`category\` can be any of:
+  - Security: \`"SQL Injection"\`, \`"XSS"\`, \`"Command Injection"\`, \`"Path Traversal"\`, \`"Auth"\`, \`"Data Exposure"\`, \`"Dependency"\`
+  - Quality: \`"incomplete-implementation"\`, \`"dead-code"\`, \`"missing-documentation"\`
+  - Tier 2 project conventions (use these exact strings): \`"scratch-files"\`, \`"db-ddl-drift"\`, \`"audit-bypass-undocumented"\`, \`"credential-in-interface"\`, \`"spec-vs-impl"\`, \`"convention-execfile"\`, \`"convention-console"\`, \`"convention-throw"\`, \`"convention-as-any"\`
+  - Fallback: \`"Other"\`
 - If there are NO findings, emit an empty array: \`"reviewFindings": []\`
 - ALL fields (\`summary\`, \`filesChanged\`, \`approach\`, \`context\`, \`tokenBudget\`) are REQUIRED — even when there are no findings
 - \`summary\` must be prose (NOT JSON). Write 1–2 sentences describing what was reviewed and the verdict.

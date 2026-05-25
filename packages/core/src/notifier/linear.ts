@@ -3,6 +3,43 @@ import { createLogger } from "../logger.js";
 
 const log = createLogger({ component: "LinearNotifier" });
 
+/**
+ * Simple bounded TTL cache.  Entries expire after `ttlMs` milliseconds.
+ * When the map reaches `maxSize`, the oldest inserted entry is evicted
+ * (insertion-order eviction via Map's guaranteed iteration order).
+ */
+class TTLCache<K, V> {
+  private entries = new Map<K, { value: V; expiresAt: number }>();
+
+  constructor(
+    private readonly ttlMs: number,
+    private readonly maxSize: number,
+  ) {}
+
+  get(key: K): V | undefined {
+    const entry = this.entries.get(key);
+    if (!entry) return undefined;
+    if (Date.now() > entry.expiresAt) {
+      this.entries.delete(key);
+      return undefined;
+    }
+    return entry.value;
+  }
+
+  has(key: K): boolean {
+    return this.get(key) !== undefined;
+  }
+
+  set(key: K, value: V): void {
+    if (this.entries.size >= this.maxSize && !this.entries.has(key)) {
+      // Evict the oldest entry (first in insertion order)
+      const firstKey = this.entries.keys().next().value;
+      if (firstKey !== undefined) this.entries.delete(firstKey);
+    }
+    this.entries.set(key, { value, expiresAt: Date.now() + this.ttlMs });
+  }
+}
+
 export const LINEAR_STATES = {
   IN_PROGRESS: "In Progress",
   IN_REVIEW: "In Review",
@@ -16,8 +53,11 @@ export interface LinearNotifierConfig {
 
 export class LinearNotifier implements Notifier {
   private apiKey: string;
-  private stateCache = new Map<string, string>();
-  private issueIdCache = new Map<string, { id: string; teamId?: string }>();
+  // Bounded TTL caches: 15-min expiry, max 500/1000 entries.
+  // Prevents unbounded memory growth in long-running services processing
+  // hundreds of teams and issues.
+  private stateCache = new TTLCache<string, string>(15 * 60 * 1000, 500);
+  private issueIdCache = new TTLCache<string, { id: string; teamId?: string }>(15 * 60 * 1000, 1000);
   private clientPromise: Promise<any> | null = null;
 
   constructor(config: LinearNotifierConfig) {
@@ -100,6 +140,17 @@ export class LinearNotifier implements Notifier {
         `Please review and merge manually.`
       ),
       this.transitionState(run.issueId, LINEAR_STATES.IN_REVIEW),
+    ]);
+  }
+
+  async onPRMerged(run: PipelineRun): Promise<void> {
+    await Promise.all([
+      this.postComment(run.issueId,
+        `🤖 **Agent Run #${run.id.slice(0, 8)}** — PR Merged ✅\n\n` +
+        (run.prUrl ? `**PR**: ${run.prUrl}\n\n` : "") +
+        `The pull request has been merged.`
+      ),
+      this.transitionState(run.issueId, LINEAR_STATES.DONE),
     ]);
   }
 

@@ -252,6 +252,7 @@ describe("BEC-113 CONFIRMED FIXED: scheduler integration", () => {
       linearApiKey: "",
       slackBotToken: "",
       actions: mockActions as any,
+      authMonitor: { tick: async () => {} },
     });
 
     await scheduler.tick();
