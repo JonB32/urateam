@@ -30,7 +30,7 @@ const ESCALATION_PIPELINE_LABEL = "needs-design";
 const log = createLogger({ component: "PmAgent:promote" });
 
 export interface PromoteInput {
-  linearClient: Pick<LinearClient, "issues" | "workflowStates" | "updateIssue" | "createComment">;
+  linearClient: Pick<LinearClient, "issues" | "workflowStates" | "updateIssue" | "createComment" | "issueLabels">;
   teamIds: string[];
   slotsAvailable: number;
   checkConflict: (description: string) => Promise<ConflictCheckResult>;

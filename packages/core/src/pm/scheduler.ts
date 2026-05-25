@@ -381,9 +381,12 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           // `completed` run landed). Recovery deletes the state row and
           // strips the Tier-5-added `needs-design` label.
           try {
-            await sweepRecoveredCircuitBreakers(db, await getLinearClient(), {
-              maxConsecutiveFailures: breakerThreshold,
-            });
+            const sweepClient = await getLinearClient();
+            if (sweepClient) {
+              await sweepRecoveredCircuitBreakers(db, sweepClient, {
+                maxConsecutiveFailures: breakerThreshold,
+              });
+            }
           } catch (err) {
             captureTickError(tick, "sweepRecovered", err, "sweepRecoveredCircuitBreakers failed");
           }
