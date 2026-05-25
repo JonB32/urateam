@@ -39,7 +39,7 @@ export function defaultProjectsRoot(env: NodeJS.ProcessEnv = process.env): strin
  * urateam looked for the JSONL at the wrong path. Verified on the dogfood
  * instance against real SDK-written transcripts (BEC-231 soak observation).
  */
-export function encodeCwd(cwd: string): string {
+function encodeCwd(cwd: string): string {
   return cwd.replace(/[\/\\]/g, "-");
 }
 
