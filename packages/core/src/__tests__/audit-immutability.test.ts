@@ -42,7 +42,7 @@ describe("audit_events immutability", () => {
     }
 
     const offenders = matches
-      .map((line) => line.split(":")[0]!)
+      .map((line) => line.split(":")[0])
       .filter((file) => !allowed.some((a) => file.endsWith(a) || file === a));
 
     expect(
@@ -88,7 +88,7 @@ describe("audit_events immutability", () => {
       "packages/core/src/pm/actions/select-probe-candidates.ts",
       "packages/core/src/pm/actions/recover-circuit-breaker.ts",
       "packages/cli/src/commands/circuit.ts",
-      "packages/core/src/audit/events.ts",
+      "packages/core/src/audit/policy-release-events.ts",
       "packages/core/src/repo/agent-branch-sweep-runner.ts",
       "packages/core/src/qa/github.ts",
       "packages/core/src/qa/gap.ts",
@@ -116,7 +116,7 @@ describe("audit_events immutability", () => {
     }
 
     const offenders = matches
-      .map((line) => line.split(":")[0]!)
+      .map((line) => line.split(":")[0])
       .filter((file) => !allowed.some((a) => file.endsWith(a) || file === a));
 
     expect(

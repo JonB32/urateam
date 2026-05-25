@@ -172,6 +172,9 @@ export async function maybePostChangeSummary(
 
   let triggeringComments: ReviewFeedbackComment[] = [];
   if (run.feedbackContext) {
+    // Retaining explicit try/catch (not parseJsonOr) to preserve the structured
+    // error log with the actual parse error message — useful for diagnosing
+    // malformed feedbackContext payloads in production.
     try {
       const parsed = JSON.parse(run.feedbackContext) as unknown;
       if (Array.isArray(parsed)) triggeringComments = parsed as ReviewFeedbackComment[];

@@ -27,7 +27,7 @@ export interface RunReviewProvidersResult {
 }
 
 /**
- * Runs all enabled review providers in sequence and persists their per-model
+ * Runs all enabled review providers in parallel and persists their per-model
  * results to `review_model_runs` when a stage_run row id is provided.
  *
  * Provider failures are caught and recorded as advisory `failed` runs rather

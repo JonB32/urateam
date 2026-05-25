@@ -62,11 +62,22 @@ Hourly GitHub Action (`.github/workflows/gh-linear-sync.yml`) syncs open GH issu
 
 ## Active Codebase Constraints
 
-Things shipping soon — **don't compound them**:
-- `AnyDb = any` in `db/client.ts` cascades into ~50 `as any` casts. **Don't add new `(this.db as AnyDb)` casts** (BEC-190 will fix).
-- `linearClient: any` in `pm/actions/*` and `pm/linear-helpers.ts`. **Use `LinearClient` from `@linear/sdk`** in new code there.
-- Missing indexes on `pipeline_runs` + `pm_approvals`. **Don't add new hot-path queries** scanning these tables until BEC-187 ships.
-- New code in `pm/actions/*` must use `resolveIssueRelations(issue)` from `util/linear.ts` (concurrent fetch of team/state/labels). Sequential `await issue.team` / `await issue.state` patterns were removed in BEC-189.
+## Codebase Optimization Pass — In Flight (BEC-187 → BEC-207)
+
+A codebase-wide analysis (2026-05-11) surfaced a set of foundational improvements that are tracked in Linear and should land before substantial new feature work. Contributors touching the affected areas should coordinate with these tickets to avoid merge conflicts:
+
+- **Foundation (P1 Urgent)**: BEC-187 (DB indexes), BEC-188 (`util/env.ts` + `util/json.ts`), BEC-189 (`util/linear.ts` + Promise.all relations). ~~BEC-190~~ landed.
+- **Cleanup (P2 High)**: BEC-191 (dead code), BEC-192 (resume-payload zod), BEC-193 (Octokit memoization + parseRepoUrl hoist).
+- **File splits (P2 High, sequential)**: BEC-194 (`create-urateam/index.ts`), BEC-195 (`pm/slack-interface.ts`), BEC-196 (`release-manager/scheduler.ts`), BEC-197 (`audit/events.ts`), BEC-199 (extract feedback-pipeline from `runner.ts`).
+- **Infrastructure (P2 High)**: BEC-198 (env-validation module + `deploy/ENV_VARS.md`), BEC-200 (test gaps in runner retry-strategies + policyErr + status webhook + paused-tick).
+- **Competitive response (P2/P3)**: BEC-201 (multi-AI for implement stage), BEC-207 (`CLAUDE_CODE_OAUTH_TOKEN`), BEC-203 (Sentry + CloudWatch integrations), BEC-205 (one-command bootstrap), BEC-206 (GitLab parity + Bitbucket).
+- **Strategic / needs-design**: BEC-202 (managed-runtime tier), BEC-204 (IDE/CLI agent surface).
+
+Known limitations being addressed (don't compound these):
+- `AnyDb` in `db/client.ts` is a structural escape-hatch type (not bare `any`) with explicit `select/insert/update/delete/transaction` methods and a `[K:string]:any` index signature. Both `SqliteDb` and `PgDb` are structurally assignable to it. Use `(db as AnyDb).method(...)` when you need to call Drizzle methods across the SQLite/Postgres union — the index signature makes this sound. Don't use bare `as any` for DB access.
+- `linearClient` parameters in `pm/actions/*` use `Pick<LinearClient, "method1" | "method2" | ...>` (not the full `LinearClient` class) — this keeps partial `vi.fn()` test mocks compatible while enforcing the real SDK boundary. When adding new code to a PM action file, add only the methods your code actually calls to the existing `Pick` union in that file's Input interface.
+- 5 missing indexes on `pipeline_runs` + `pm_approvals` — landing in BEC-187. Don't add new hot-path queries that scan these tables until BEC-187 ships.
+- Sequential `await issue.team` / `await issue.state` patterns in `pm/actions/*`. New code in these files should use `Promise.all` (or wait for BEC-189's `resolveIssueRelations` helper).
 
 ## Key Patterns
 
@@ -277,6 +288,9 @@ budget check → **recover retriable runs** → recover stuck In Progress → **
 - Do **not** reuse branch names across concurrent runs (`-B` resets the ref to HEAD)
 
 **Recovering from contaminated branches**: cherry-pick from contaminated branch onto correct branch, force-push-with-lease both branches, then `git rebase -i --onto <parent> <stray> HEAD` on the contaminated side.
+
+### Audit log module layout
+- Module: `packages/core/src/audit/` — `events.ts` (backward-compat re-export barrel; all factories importable from this path), `internal.ts` (shared `base()` helper), `pm-events.ts` (PM agent, run, budget, license factories), `dashboard-events.ts` (SSO login/logout/denied, RBAC manual-action factories via private `dashboardManualActionEvent` helper, config-loaded), `policy-release-events.ts` (policy gates, release lifecycle, Slack, QA, review fanout, pipeline tier events, claude-auth-expired), `writer.ts` (`logAuditEvent`, fire-and-forget; license-gated), `reader.ts` (`listAuditEvents` with cursor pagination), `projection.ts`, `retention.ts` (`pruneAuditLog` — sole authorized mutation), `csv.ts` (`streamAuditCsv` async iterator)
 
 ### Enterprise Features
 
