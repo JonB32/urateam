@@ -23,6 +23,422 @@ notes call out when a change affects only a single package.
   - **CloudWatch integration** (`packages/core/src/integrations/cloudwatch.ts`): `POST /webhooks/cloudwatch` handler processes AWS SNS messages. Auto-confirms `SubscriptionConfirmation` by fetching `SubscribeURL`. Verifies `Notification` messages via RSA-SHA1/SHA256 using the cert at `SigningCertURL` (must be `*.amazonaws.com`; cert is cached). Parses CloudWatch alarm state changes, extracts alarm name, metric values, state change details, and generates a CloudWatch Logs Insights link. Only `ALARM` state transitions create tickets. Idempotent: queries Linear for existing `[CW:<alarm-name>]`-prefixed ticket within the window.
   - Both handlers are mounted in `createApp()` when `sentryIntegration` / `cloudwatchIntegration` is set in `ServerConfig`.
   - Setup docs: `deploy/SENTRY_INTEGRATION_SETUP.md`, `deploy/CLOUDWATCH_INTEGRATION_SETUP.md`.
+### Added (BEC-206)
+- **Complete GitLab parity**: `repo/gitlab.ts:addMRComment()` is now wired into all comment-posting code paths in `runner.ts`. The `repoConfig.provider !== "gitlab"` short-circuit guards on cost-summary and change-summary comments have been removed. GitLab users now receive per-PR cost summaries (opt-in via `URATEAM_PR_COST_SUMMARY=true`) and change-summary comments on review-feedback runs, identical to GitHub.
+- **GitLab automerge** (`merge_when_pipeline_succeeds`): `runner.ts` now calls the new `mergeMRWhenPipelineSucceeds()` function when `autoMerge: true` and `repoConfig.provider === "gitlab"`. The GitLab API queues the MR for merge once all CI pipelines succeed.
+- **`webhook/gitlab-handler.ts`**: New Hono handler at `/webhooks/gitlab`. Validates the `X-Gitlab-Token` shared-secret header (timing-safe comparison). MR comment (`Note Hook` with `noteable_type: "MergeRequest"`) events trigger `review-feedback` pipeline runs identically to the GitHub handler. MR merged events mark the pipeline run as merged and fire `Notifier.onPRMerged()`.
+- **New `repo/bitbucket.ts`** module: `buildBitbucketAuthenticatedUrl()`, `createBitbucketPR()`, `addBitbucketPRComment()`, `mergeBitbucketPR()`, `parseBitbucketUrl()`, plus thin wrappers `cloneBitbucketRepo()` / `pushBitbucketCode()` (mirroring `repo/gitlab.ts`). Supports OAuth access tokens (Bearer) and App Passwords (Basic auth). Configurable `apiBaseUrl` for Bitbucket Data Center.
+- **`webhook/bitbucket-handler.ts`**: New Hono handler at `/webhooks/bitbucket`. Validates `X-Hub-Signature-256` HMAC-SHA256 (same scheme as GitHub). `pullrequest:comment_created` events trigger review-feedback runs; `pullrequest:fulfilled` events mark pipeline runs as merged.
+- **Bitbucket wired into `runner.ts`**: clone, PR creation, cost-summary/change-summary comment posting, and automerge (via Bitbucket merge API) all route through `repo/bitbucket.ts` when `repoConfig.provider === "bitbucket"`.
+- **`feedback-pipeline.ts` updated**: Bitbucket clone URLs are now authenticated via `buildBitbucketAuthenticatedUrl()` when `bitbucketConfig` is configured.
+- **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
+- **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
+
+## [0.1.78] — 2026-05-25
+
+Bumps:
+- `@urateam/core`: 0.1.63 → 0.1.64
+- `@urateam/cli`: 0.1.65 → 0.1.66
+- `@urateam/dashboard`: 0.1.63 → 0.1.64
+- `create-urateam`: 0.1.66 → 0.1.67
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.77] — 2026-05-25
+
+Bumps:
+- `@urateam/core`: 0.1.62 → 0.1.63
+- `@urateam/cli`: 0.1.64 → 0.1.65
+- `@urateam/dashboard`: 0.1.62 → 0.1.63
+- `create-urateam`: 0.1.65 → 0.1.66
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.76] — 2026-05-24
+
+Bumps:
+- `@urateam/core`: 0.1.61 → 0.1.62
+- `@urateam/cli`: 0.1.63 → 0.1.64
+- `@urateam/dashboard`: 0.1.61 → 0.1.62
+- `create-urateam`: 0.1.64 → 0.1.65
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.75] — 2026-05-24
+
+Bumps:
+- `@urateam/core`: 0.1.60 → 0.1.61
+- `@urateam/cli`: 0.1.62 → 0.1.63
+- `@urateam/dashboard`: 0.1.60 → 0.1.61
+- `create-urateam`: 0.1.63 → 0.1.64
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.74] — 2026-05-24
+
+Bumps:
+- `@urateam/core`: 0.1.59 → 0.1.60
+- `@urateam/cli`: 0.1.61 → 0.1.62
+- `@urateam/dashboard`: 0.1.59 → 0.1.60
+- `create-urateam`: 0.1.62 → 0.1.63
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.73] — 2026-05-24
+
+Bumps:
+- `@urateam/core`: 0.1.58 → 0.1.59
+- `@urateam/cli`: 0.1.60 → 0.1.61
+- `@urateam/dashboard`: 0.1.58 → 0.1.59
+- `create-urateam`: 0.1.61 → 0.1.62
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.72] — 2026-05-23
+
+Bumps:
+- `@urateam/core`: 0.1.57 → 0.1.58
+- `@urateam/cli`: 0.1.59 → 0.1.60
+- `@urateam/dashboard`: 0.1.57 → 0.1.58
+- `create-urateam`: 0.1.60 → 0.1.61
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.71] — 2026-05-23
+
+Bumps:
+- `@urateam/core`: 0.1.56 → 0.1.57
+- `@urateam/cli`: 0.1.58 → 0.1.59
+- `@urateam/dashboard`: 0.1.56 → 0.1.57
+- `create-urateam`: 0.1.59 → 0.1.60
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.70] — 2026-05-22
+
+Bumps:
+- `@urateam/core`: 0.1.55 → 0.1.56
+- `@urateam/cli`: 0.1.57 → 0.1.58
+- `@urateam/dashboard`: 0.1.55 → 0.1.56
+- `create-urateam`: 0.1.58 → 0.1.59
+
+### Added
+- **BEC-227 Phase 4 — surgical review-fix + decision artifact** (#357). Implement agent emits a `<decisions>` block parsed to the new `pipeline_run_decisions` table; the review-fix loop resumes the per-run SDK session with a focused findings-plus-decisions prompt instead of re-running the full implement template. New audit event `pipeline.surgical_review_fix` (canonical count → 57).
+- **`auth-monitor` now detects `CLAUDE_CODE_OAUTH_TOKEN` expiry** (#362, BEC-237). The monitor previously skipped all env-var auth paths; it now probes whenever an OAuth token is set (only a bare `ANTHROPIC_API_KEY` static key is skipped), so `claude.auth_expired` fires with an `authMethod` discriminator.
+- **Slack `reactions:read` scope probe** (#361, BEC-238). `PmSlackNotifier.probeReactionsScope()` runs once at startup and logs an error if the scope is missing; per-tick `missing_scope` warnings are deduped.
+
+### Fixed
+- **Dashboard rate limiter counted all requests, not just failed auth** — normal HTMX traversal tripped "Too Many Requests" within a couple of clicks. Now counts only HTTP 401 responses per IP.
+- **`ura retry` silently no-op'd for `retriable` runs** (#353, BEC-229) — `runner.resume` now accepts both `paused` and `retriable`, and the dashboard retry route passes `issueId` (not the run PK).
+- **Push-queue rebase recovery** (#356, BEC-233) — aborts an in-progress rebase before the conflict-resolution implement pass, so the worktree HEAD is on the branch ref before auto-commits land.
+- **QA retry counter false escalation** (#335, BEC-146) — clears prior failure rows on dispatch reset so a successful dispatch genuinely resets the counter.
+- **Resume-payload validation** (#332, BEC-192) — replaces hand-rolled property checks with a Zod schema; pre-BEC-192 paused runs degrade gracefully.
+- **Linear stuck in "In Review" after manual PR merge** (#333, BEC-186) — `pull_request.closed` + `merged:true` now transitions the issue to Done.
+- **PM conflict detection blind to in-flight runs** (#363, BEC-239) — falls back to the run's worktree when its branch is not yet pushed.
+- **pnpm provisioned in the dogfood image** (BEC-240) — agents no longer fall back to `npm` and break the pnpm-workspace toolchain.
+- **QA Agent collectState partial-index query** (#338, BEC-145) and **migration prefix renumbering** (#334, BEC-149).
+
+### Chore
+- **`resolveSessionOpts` helper** (#342, BEC-228) extracted from `executor.ts` + `deep-review.ts`, reconciled with the BEC-231 on-disk session-shape logic.
+
+## [0.1.69] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.54 → 0.1.55
+- `@urateam/cli`: 0.1.56 → 0.1.57
+- `@urateam/dashboard`: 0.1.54 → 0.1.55
+- `create-urateam`: 0.1.57 → 0.1.58
+
+### Fixed
+- **Dogfood container: install `bash` + set `SHELL=/bin/bash`** (#351, BEC-234): two-line Dockerfile change. The Alpine base image ships only `/bin/sh` (busybox) and leaves `SHELL` empty. The Claude Agent SDK's "no suitable shell" check uses `process.env.SHELL` to decide whether to run Bash tool calls, and refuses to invoke any when it's empty. Effect: **every Bash tool call across every pipeline run silently failed** — agents ran on Read/Edit/Grep only, couldn't run tests, builds, git inspection, or any shell-mediated work. Discovered by auditing the BEC-231 run `Mvl1OtDQKbrHQMgGkwenS` JSONL transcript: 11/11 Bash attempts errored with "No suitable shell found ...", including `npx vitest`, `git status`, `git log`, `pnpm build`. The agent compensated with inspection-only verification (no real test execution), almost certainly contributing to several historical "Reached maximum number of turns" failures on the currently-circuit-broken issues. After this lands, the next pipeline run's transcript should show successful Bash tool results.
+
+## [0.1.68] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.53 → 0.1.54
+- `@urateam/cli`: 0.1.55 → 0.1.56
+- `@urateam/dashboard`: 0.1.53 → 0.1.54
+- `create-urateam`: 0.1.56 → 0.1.57
+
+### Changed
+- **Agent session continuity: Phase 3 — default ON** (#349, BEC-227): the Phase 2 dogfood soak verified session resume works end-to-end (with the BEC-231 lazy-creation fix in v0.1.66 and the BEC-232 path-encoding fix in v0.1.67). Observable signal from BEC-232's run: 1 `agent_session_created` + 3 `agent_session_resumed` events across implement/review/implement stages, `priorMessageCount: 35` on the first resume — full continuity, no synthetic handoff blob. This release flips the default from opt-in to opt-out. The new env var is `URATEAM_DISABLE_AGENT_SESSION_RESUME=true` (strict equality, matching BEC-218 precedent). The Phase-1/2 var `URATEAM_ENABLE_AGENT_SESSION_RESUME` is ignored — operators with it set in their `.env` see no behavior change since the new default is on; operators who want the legacy handoff path can set `URATEAM_DISABLE_AGENT_SESSION_RESUME=true`.
+
+## [0.1.67] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.52 → 0.1.53
+- `@urateam/cli`: 0.1.54 → 0.1.55
+- `@urateam/dashboard`: 0.1.52 → 0.1.53
+- `create-urateam`: 0.1.55 → 0.1.56
+
+### Fixed
+- **Agent session continuity: encodeCwd path encoding** (#346, BEC-232): one-line fix to `session-store.ts:encodeCwd()`. The Claude Agent SDK writes JSONL transcripts to a directory whose name is the cwd with ALL path separators (including the leading `/`) replaced with `-` — producing a LEADING-DASH directory like `-home-ura-data-runs-<run>-worktree`. The previous urateam implementation stripped the leading `/` before replacing, producing `home-...` (no leading dash). `transcriptExists()` therefore looked at the wrong path and returned false for every absolute cwd, making the BEC-231 lazy-creation fix (v0.1.66) effectively moot — every BEC-227 session-resume attempt fell back to legacy handoff despite the JSONLs being correctly written by the SDK. Verified on the dogfood instance with 268KB transcript files present at the leading-dash paths. Combined with v0.1.66, this completes the BEC-227 session-resume wiring; post-deploy the next pipeline run should produce ≥1 `pipeline.agent_session_resumed` audit event.
+
+## [0.1.66] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.51 → 0.1.52
+- `@urateam/cli`: 0.1.53 → 0.1.54
+- `@urateam/dashboard`: 0.1.51 → 0.1.52
+- `create-urateam`: 0.1.54 → 0.1.55
+
+### Fixed
+- **Agent session continuity: lazy session creation** (#343, BEC-231): the BEC-227 Phase 1 implementation used an in-memory `hasInitiatedSession` flag that flipped after the first resumable stage's CALL, regardless of whether the SDK actually wrote any JSONL message. When stage 1 failed before any SDK message (the auth 401 hit during Phase 2 soak, MCP init failure, pre-stream stall, container SIGTERM), every subsequent stage tried `query({ resume: sessionId })`, found the JSONL absent, and dropped to legacy fresh-session-no-opts. The session was lost for the run's lifetime — confirmed on BEC-228 with **1** `agent_session_created`, **8** `agent_session_missing_fallback`, **0** `agent_session_resumed` events. Fix: `executeStage()` now derives the session shape from `transcriptExists()` on every entry (JSONL present → `resume:`; JSONL absent → `sessionId:` to create or retry creation). The `isFirstResumableStage` field stays on `ExecuteStageContext` for backwards compat but its value is now ignored. The `missing_fallback` audit event is no longer emitted from the executor; the new logic always picks the correct shape based on on-disk state. New `session-lazy-creation.test.ts` covers both directions (false flag + missing JSONL → create; true flag + present JSONL → resume).
+
+## [0.1.65] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.50 → 0.1.51
+- `@urateam/cli`: 0.1.52 → 0.1.53
+- `@urateam/dashboard`: 0.1.50 → 0.1.51
+- `create-urateam`: 0.1.53 → 0.1.54
+
+### Added
+- **Agent session continuity — Phase 1** (#339, BEC-227): Claude Agent SDK session resume across pipeline stages, gated behind `URATEAM_ENABLE_AGENT_SESSION_RESUME=true` (default off). When enabled, each pipeline run mints one `agent_session_id = randomUUID()` and threads it through every `executeStage()` call. The first resumable stage creates the SDK session; subsequent stages resume it. Implement #2 in RALPH iteration 2 now sees implement #1's full transcript (tool use, edits, reasoning) instead of a synthetic handoff blob.
+  - New `agent_session_id` column on `pipeline_runs` (nullable; null = legacy / flag-off)
+  - New `isResumable(stage, model)` policy module (`executor/session-policy.ts`) — validator + Haiku ralph-check + non-Claude OpenRouter fanout providers always run fresh
+  - New `transcriptPath` / `transcriptExists` helpers (`executor/session-store.ts`)
+  - New `urateam-dogfood-agent-sessions` Docker volume mounted at `/home/ura/.claude/projects` — without this, retriable resumes silently lose memory across container restarts
+  - Boot-time `checkSessionVolume()` warning when the projects dir is missing or not writeable
+  - Fallback path: if JSONL transcript file is absent, fall back to legacy handoff + emit `pipeline.agent_session_missing_fallback` audit event
+  - Validator (`validate.ts`) gains `runMode: "first-resumed" | "resumed" | "fallback"` — skips entirely on `"resumed"` since the next agent IS the prior agent
+  - RALPH iteration suppresses the `<previous-stage-context>` XML block on resumed re-implements
+  - Dashboard run-detail page displays the truncated session ID with a link to a new `GET /runs/:id/transcript` viewer (renders the SDK `getSessionMessages()` output)
+  - 4 new audit event types: `pipeline.agent_session_created`, `pipeline.agent_session_resumed`, `pipeline.agent_session_missing_fallback`, `system.session_volume_warning`. Canonical count 52 → 56.
+- **Cache booster** (Track C-1): `excludeDynamicSections: true` on the `claude_code` SDK `systemPrompt` preset — ON for every stage regardless of resume state. Strips per-session cwd/git-status from the cached prefix, lifting cache hit rate from ~95% toward 99%. Zero behavioral risk.
+
+### Changed
+- **`PM_AGENT_STUCK_RUN_AGE_MIN` default raised 60 → 120 minutes** (BEC-227 / BEC-184 tuning): real RALPH-iterated implementation work routinely takes 60-90 min, and the prior 60-min default produced false-positive reaps on healthy long runs (observed during BEC-192 v0.1.63 verification). The env var override is still respected.
+
+### Rollout note
+Phase 1 ships the code with the flag default `false`. Phase 2 is a dogfood soak (operator sets `URATEAM_ENABLE_AGENT_SESSION_RESUME=true` in `.env.dogfood`); Phase 3 flips the default in code; Phase 4 adds Track B (surgical review-fix) + Track D (decision artifact). See `docs/superpowers/specs/2026-05-19-agent-session-continuity-design.md` for the full rollout plan.
+
+## [0.1.64] — 2026-05-18
+
+Bumps:
+- `@urateam/core`: 0.1.49 → 0.1.50
+- `@urateam/cli`: 0.1.51 → 0.1.52
+- `@urateam/dashboard`: 0.1.49 → 0.1.50
+- `create-urateam`: 0.1.52 → 0.1.53
+
+### Fixed
+- **Retry handler crashed for non-resumable runs** (#329, BEC-226): both the dashboard retry button and the new `ura retry` CLI (BEC-221) crashed with HTTP 500 (`Cannot read properties of undefined (reading 'url')`) for any failed run without a `resumePayload`. `retryRun` called `runner.start(opts)` with a single bag-of-strings object, but `PipelineRunner.start()` takes 6 positional args — `repoConfig` ended up undefined, then `checkDuplicateBranch(repoConfig.url, ...)` exploded. The retry-route test mocked `runner.start` permissively (accepted any shape), so the divergence didn't surface in CI — only when called against the real implementation. Fix scope: error out cleanly with HTTP 422 when `resumePayload` is null; the resume path (with payload) is unchanged. Properly reconstructing positional args is follow-up work. Discovered when verifying the v0.1.63 deploy.
+## [0.1.63] — 2026-05-18
+
+Bumps:
+- `@urateam/core`: 0.1.48 → 0.1.49
+- `@urateam/cli`: 0.1.50 → 0.1.51
+- `@urateam/dashboard`: 0.1.48 → 0.1.49
+- `create-urateam`: 0.1.51 → 0.1.52
+
+### Fixed
+- **Slack PM digest no longer fails with `invalid_blocks`** (#327, BEC-225): the BEC-223 Circuit-Broken Issues section, when populated with ~10 issues × ~300 chars each (URL + 80-char title + 200-char error + timestamp), pushed the digest's single mrkdwn `section` block past Slack's 3000-char `text.text` limit. `postDigest` now uses the new `chunkLinesToSlackSectionBlocks(lines, maxChars=2900)` helper to emit one or more section blocks, each under the cap. Single lines longer than the cap pass through as-is — callers already truncate values via `truncateWithEllipsis`. Discovered during v0.1.62 production deploy on the dogfood instance.
+## [0.1.62] — 2026-05-18
+
+Bumps:
+- `@urateam/core`: 0.1.47 → 0.1.48
+- `@urateam/cli`: 0.1.49 → 0.1.50
+- `@urateam/dashboard`: 0.1.47 → 0.1.48
+- `create-urateam`: 0.1.50 → 0.1.51
+
+### Added
+- **Slack digest now lists circuit-broken issues** (#324, BEC-223): the PM tick digest gains a "Circuit-Broken Issues" section that fetches issues with ≥ `maxConsecutiveFailures` consecutive failed runs in the last 7 days. Last-error context is rendered (200-char truncation via new `util/strings.ts:truncateWithEllipsis` helper, shared with the 500-char promote escalation). Capped at 10 issues. The query is bounded (LIMIT 50 before slicing) and runs once per PM tick — documented as a BEC-187 exception until the `pipeline_runs(status, started_at)` index lands. `scheduler.ts` now uses `ACTIVE_STATUSES` constant + `inArray()` instead of raw SQL, and `parseStuckRunAgeMinutes` helper extracted at module scope.
+- **PR description footer now shows triage-quality metric** (#321, BEC-220): when triage v2 emitted an `affectedFiles` prediction, the auto-generated PR description gains a `## Triage Quality` section reporting predicted vs. actual file counts and intersection. Reads from `triage_results.v2_prediction` (BEC-217 DB-backed path); the in-memory `quality` object is used directly — no audit-log read-back. `getChangedFiles()` and `getAgentCommits()` are now parallelized via `Promise.all`. The Tier 6e audit event still fires (single emission, moved from post-push to pre-PR-creation to feed the footer).
+- **`ura retry <runId>` CLI command** (#320, BEC-221): operator-facing CLI to retry failed/retriable pipeline runs without dashboard access. Authenticates via `URATEAM_CLI_TOKEN` against the new `/cli/runs/:id/retry` dashboard endpoint. Audit event logged on success. Halt-all endpoints now batch the per-run `issueId` lookup via `inArray()` instead of N+1 queries. `requireRbac` middleware and `TERMINAL_RUN_STATUSES` constant extracted to remove duplication.
+- **`ura triage-quality` CLI** (#317, BEC-219): surfaces `pm.triage_quality_score` audit events as operator-facing stats. `readTriageQualityEvents` audit reader in `packages/core/src/audit/triage-quality-reader.ts` aggregates predicted/actual/intersection/miss-rate stats in a single pass over the event window. Supports `--days <n>` / `--json` flags.
+- **`URATEAM_DISABLE_TIER_6E` env var** (#316, BEC-218): operator escape hatch to skip the entire `pm.triage_quality_score` emission block (no DB read, no `getChangedFiles`, no DB write). Strict equality on `"true"`; read at call time so flipping the var takes effect on the next pipeline run without a daemon restart. Mirrors the `URATEAM_DISABLE_TRIAGE_V2` precedent.
+- **`REVIEW_MODELS_MAX_OUTPUT_TOKENS` env var** (#308, BEC-164): optional cap on `max_tokens` per OpenRouter fanout-model request. Unset = provider default (can be 65536 for gemini-2.5-pro). Non-integer or ≤0 values warn + treated as unset; values <256 emit a low-floor warning. `createFailedModelRun` helper extracted in `openrouter-fanout.ts`.
+
+### Removed
+- **Dead-code cleanup** (#309, BEC-191): deleted 3 unused exports (`createSandboxConfig`, `devcontainerExecCommand`, `addMRComment`), made 2 cost-aggregate helpers module-private (`normalizeTeamId`, `aggregateAll`; public API is `aggregateHybrid`), and de-exported 10 internal Zod sub-schemas (type aliases remain exported). `updateBucketMetrics`/`addRollupToBucket` helpers extracted in `cost/aggregate.ts`; `createLogger({ component: ... })` corrected in `gitlab.ts`.
+## [0.1.61] — 2026-05-17
+
+Bumps:
+- `@urateam/core`: 0.1.46 → 0.1.47
+- `@urateam/cli`: 0.1.48 → 0.1.49
+- `@urateam/dashboard`: 0.1.46 → 0.1.47
+- `create-urateam`: 0.1.49 → 0.1.50
+
+### Fixed
+- **Tier 6e triage prediction now reads from DB instead of description text** (#322): triage v2 appends `**Affected Files:**` (and other v2 sections) to the END of the Linear description, but `mapIssueToSchema` truncates descriptions at 4000 chars before they reach the runner. For any realistic issue the v2 section was getting sliced off and `pm.triage_quality_score` events reported `hasV2Prediction: false` every time (confirmed in the v0.1.60 soak: BEC-218 / BEC-219 / BEC-221 all produced 0-intersection events). The fix introduces a new `triage_results` table; triage v2 calls `upsertTriageResult` to persist the v2 prediction at classification time, and the runner Tier 6e hook calls `getTriageResult` to read it. `parseAffectedFilesFromDescription` is removed (3 days old, no external callers). DB-backed path is now the single source of truth; the description appender remains for human readability only.
+
+## [0.1.60] — 2026-05-14
+
+Bumps:
+- `@urateam/core`: 0.1.45 → 0.1.46
+- `@urateam/cli`: 0.1.47 → 0.1.48
+- `@urateam/dashboard`: 0.1.45 → 0.1.46
+- `create-urateam`: 0.1.48 → 0.1.49
+
+### Fixed
+- **Triage v2 affectedFiles bullet/backtick contamination** (#318): When Haiku occasionally echoed the surrounding markdown list style into the `affectedFiles` JSON array (e.g. `"* CLAUDE.md"`), the downstream `computeAffectedFilesPredictionQuality` string-equality compare produced `intersection=0` even when the prediction was accurate. The first real `pm.triage_quality_score` event from the v0.1.59 soak (BEC-218: predicted=5, actual=4, intersection=0) surfaced this. `parseTriageV2Extensions` (`pm/types.ts`) now strips leading `-`/`*`/`+`/`N.`/`N)` bullets and surrounding backticks from each entry before Zod validation, dropping entries that normalize to empty. `parseAffectedFilesFromDescription` (`pm/triage-prediction-quality.ts`) applies the same normalization as defense-in-depth so descriptions on disk from pre-fix runs still parse cleanly.
+
+## [0.1.59] — 2026-05-14
+
+Bumps:
+- `@urateam/core`: 0.1.44 → 0.1.45
+- `@urateam/cli`: 0.1.46 → 0.1.47
+- `@urateam/dashboard`: 0.1.44 → 0.1.45
+- `create-urateam`: 0.1.47 → 0.1.48
+
+### Added (Tier 6e, PR #314)
+
+- **New audit event `pm.triage_quality_score`** — emitted by `pipeline/runner.ts` after each successful push. Records how closely triage v2's `affectedFiles` prediction matched the actual changed files. Audit-event count: 51 → **52**.
+- **`pmTriageQualityScoreEvent(args)`** helper in `audit/events.ts`. Payload includes `runId`, `issueId`, `hasV2Prediction`, `predicted`, `actual`, `intersection`, plus `missed` and `unexpected` path lists (each capped at 50 entries to keep the audit row ≤ ~2 KB).
+- **`parseAffectedFilesFromDescription(description)`** in `pm/triage-prediction-quality.ts` — reads the `**Affected Files:**` section that `appendTriageSectionsToDescription` wrote, returns `undefined` when no section is present (v1 triage path).
+- Runner emission is **fail-open**: any error in parse, `getChangedFiles`, or audit write is logged at warn and swallowed. Telemetry can never block pipeline completion.
+
+### Notes
+
+- This release was **dogfooded end-to-end**: BEC-217 was filed in Linear and the dogfood agent itself classified, planned, implemented, tested, and opened the draft PR via the v2 triage pipeline. One regex edge case (`parseAffectedFilesFromDescription` empty-section path) was caught by the agent's own test, fixed by the operator, and merged. The full soak validates v0.1.58's `parseJsonObject` nested-JSON fix in production.
+## [0.1.58] — 2026-05-14
+
+Bumps:
+- `@urateam/core`: 0.1.43 → 0.1.44
+- `@urateam/cli`: 0.1.45 → 0.1.46
+- `@urateam/dashboard`: 0.1.43 → 0.1.44
+- `create-urateam`: 0.1.46 → 0.1.47
+
+### Fixed (PR #312)
+
+- **Critical**: `parseJsonObject` (`executor/agent-stream.ts`) used non-greedy regex `\{[\s\S]*?\}` which truncates at the first inner `}`. The v2 triage prompt (shipped in v0.1.57) asks Haiku for nested objects (`riskAssessment`, `examples`, `testStrategy`), so production triage-v2 was silently skipping every issue with nested fields. Replaced with a string-aware bracket-counting extractor that handles nested objects/arrays correctly. Affects all 3 callers: `triage.ts`, `conflict.ts`, `slack-interface.ts`.
+
+### Chore (PR #312)
+
+- Tightened `issue: any` callback cascade in `pm/actions/triage.ts:103` to `Issue` from `@linear/sdk` (now possible after the `linearClient: LinearClient` fix in v0.1.57).
+- Added a code comment explaining why `parsed.pipelineLabel` from the Haiku response is intentionally discarded (routing is authoritative from `forceNeedsDesign` / `hasBug` / `complexity`).
+
+### Tests
+
+- 8 new `parseJsonObject` regression tests (flat, nested, array-of-objects, surrounded-by-prose, brace-in-string, escaped-quote, no-match, malformed).
+- 1 new `triageNewIssues` integration test asserting `URATEAM_DISABLE_TRIAGE_V2=true` produces a description with only `**Acceptance Criteria:**` (no v2 sections leak through).
+- Full sweep: 1957 core tests pass.
+## [0.1.57] — 2026-05-14
+
+Bumps:
+- `@urateam/core`: 0.1.42 → 0.1.43
+- `@urateam/cli`: 0.1.44 → 0.1.45
+- `@urateam/dashboard`: 0.1.42 → 0.1.43
+- `create-urateam`: 0.1.45 → 0.1.46
+
+### Added (Triage v2 — Tier 6a + 6b, PR #310)
+
+- **Anthropic-best-practices v2 triage prompt** (`packages/core/src/pm/actions/triage-prompt.ts`): XML-delineated sections (`<role>`, `<output_format>`, `<examples>`, `<issue>`, `<reasoning>`), role + audience priming, 12 multishot examples (2 positive + 1 anti-example per pipeline label), scratchpad CoT, JSON prefill. Prefix budget < 15K chars.
+- **Five new optional `TriageResult` fields** (`packages/core/src/pm/types.ts`): `assumptions` (≤10), `examples` (≤3 `{scenario, expected}`), `affectedFiles` (≤20), `testStrategy` (`{unit?, integration?}`), `riskAssessment` (`{severity, areas≤5}`). Pre-zod truncation; malformed inner shapes dropped silently; severity-enum miss drops the entire `riskAssessment` block.
+- **Linear comment + description rendering** (`pm/actions/triage-render.ts`): `renderTriageComment` adds 5 new `### Headed` sections with `(none)` placeholders; `appendTriageSectionsToDescription` is idempotent (re-triage doesn't duplicate sections).
+- **Operator escape hatch**: `URATEAM_DISABLE_TRIAGE_V2=true` (strict equality on `"true"`) falls back to v1 prompt + schema. Read at call time — flipping takes effect on the next PM tick without daemon restart.
+- **Tier 6e foundation**: `pm/triage-prediction-quality.ts:computeAffectedFilesPredictionQuality` — pure function comparing triage's predicted `affectedFiles` against the actual diff. Returns `{hasV2Prediction, predicted, actual, intersection, missed, unexpected}`.
+
+### Chore
+
+- **`TriageInput.linearClient`** tightened from `any` to `LinearClient` (`@linear/sdk`) per the CLAUDE.md new-code convention.
+- **Spec-driven development discipline**: full spec-kit cycle (`/speckit-specify` → `/speckit-plan` → `/speckit-tasks` → TDD implementation) under `specs/001-triage-v2/`. Constitution v1.0.0 (7 principles) signed off in `plan.md`.
+
+### Tests
+
+- 57 new tests across `triage-v2-{schema,prompt,render,prediction,env-toggle}.test.ts`. Full sweep: 1948 core tests pass; `pnpm -w typecheck` clean.
+
+## [0.1.56] — 2026-05-13
+
+Bumps:
+- `@urateam/core`: 0.1.41 → 0.1.42
+- `@urateam/cli`: 0.1.43 → 0.1.44
+- `@urateam/dashboard`: 0.1.41 → 0.1.42
+- `create-urateam`: 0.1.44 → 0.1.45
+
+### Added (OSS+)
+- **`~/.urateam/config.json` hot-reload** ([#306](https://github.com/JonB32/urateam/pull/306)) — `ura start` now watches the user-level config file and applies changes from `ura repo add` / `ura repo remove` / hand-edits without a restart. Debounced (1s default). Safe fields (`labelPattern`, `testCommand`, `buildCommand`, `teamId`) apply in-place; unsafe fields (`url`, `path`, `defaultBranch`) log `restart required`. Removals delete the entry from the live `repoConfigs` immediately — in-flight pipeline runs hold their own snapshot of state and continue uninterrupted; only NEW work is blocked. Schema-validation failures keep the previous in-memory config and log a warning. `teamId` changes correctly re-key the entry under the new key (so webhook routing keeps working). New library: `packages/cli/src/lib/config-watcher.ts` (`ConfigWatcher`, `diffRepos`, `hashConfig`). Project-level (sidecar) installs are env-var driven and don't use hot-reload.
+
+### Audit log
+- One new event type: `config.reloaded`. Payload: `{ added, removed, modifiedSafe, modifiedUnsafe, sha256 }`. License-gated via `logAuditEvent`. CLAUDE.md count: 50 → 51.
+
+### Closed
+- This release completes the full deferred-list from the original user-level install PR (#296). All four follow-ups — `ura service install`, `ura self-auth-linear`, built-in tunnel manager, config.json hot-reload — are now shipped.
+
+## [0.1.55] — 2026-05-13
+
+Bumps:
+- `@urateam/core`: 0.1.40 → 0.1.41
+- `@urateam/cli`: 0.1.42 → 0.1.43
+- `@urateam/dashboard`: 0.1.40 → 0.1.41
+- `create-urateam`: 0.1.43 → 0.1.44
+
+### Added (OSS+)
+- **`ura start --tunnel <mode>`** ([#304](https://github.com/JonB32/urateam/pull/304)) — built-in Cloudflare tunnel manager. Three modes: `none` (default — daemon stays on local ports), `cloudflare-quick` (spawns `cloudflared tunnel --url http://localhost:<port>`, parses the `*.trycloudflare.com` URL from cloudflared's stderr — free, ephemeral), `cloudflare-token` (spawns `cloudflared tunnel --token <token> run` — requires `CLOUDFLARE_TUNNEL_TOKEN` + `URATEAM_PUBLIC_URL` env vars for a persistent named tunnel). New `TunnelManager` class in `packages/cli/src/lib/tunnel.ts` supervises cloudflared with exponential-backoff restart (1s → 30s capped, 10 attempts max) and graceful SIGTERM shutdown. On startup, the detected public URL is exported as `URATEAM_PUBLIC_URL` so OAuth callbacks and webhook handlers see it. When `cloudflared` isn't on `$PATH`, `CloudflaredMissingError` surfaces brew/apt/release-page install hints; tunnel failures never crash the daemon — it stays on local ports. Audit-event observability via `tunnel.started` and `tunnel.stopped`.
+
+### Audit log
+- Two new event types: `tunnel.started` (provider, publicUrl, restartCount), `tunnel.stopped` (provider, restartCount, exitCode, signal). CLAUDE.md count: 48 → 50.
+
+## [0.1.54] — 2026-05-13
+
+Bumps:
+- `@urateam/core`: 0.1.39 → 0.1.40
+- `@urateam/cli`: 0.1.41 → 0.1.42
+- `@urateam/dashboard`: 0.1.39 → 0.1.40
+- `create-urateam`: 0.1.42 → 0.1.43
+
+### Added (OSS+)
+- **`ura self-auth-linear`** ([#302](https://github.com/JonB32/urateam/pull/302)) — browser-based Linear OAuth flow. Spins up an ephemeral `127.0.0.1:9898` HTTP server (port configurable via `--port`), opens Linear's authorize URL in the operator's browser via `open` (macOS) / `xdg-open` (Linux) / printed-URL fallback, verifies the HMAC-signed `state` parameter (per-invocation 32-byte random secret; constant-time `timingSafeEqual`), exchanges the code at `https://api.linear.app/oauth/token`, fetches workspace metadata via Linear GraphQL, and writes `LINEAR_API_KEY=<access_token>` into `~/.urateam/.env` via the new atomic `upsertEnvFile()` helper (rename-after-write; preserves comments, blank lines, and unrelated keys). Flags: `--timeout-ms` (default 5min), `--scope` (default `read,write`), `--port` (default 9898). New library helpers: `lib/oauth-state.ts`, `lib/env-file.ts`, `lib/linear-oauth.ts` (DI-able orchestrator), `lib/linear-oauth-deps.ts` (default real-world fetch + browser-open shims). Token preservation: if Linear's GraphQL metadata endpoint hiccups after a successful token exchange, the success page still renders and the token is still written; workspace metadata falls back to a placeholder. Token NEVER appears in console output, the success-page HTML, or the audit payload.
+
+### Audit log
+- One new event type: `linear.oauth_completed`. Emitted opportunistically from the CLI when the daemon SQLite DB exists. Routed through license-gated `logAuditEvent` (Enterprise tier). Payload carries `workspaceId` + `workspaceName`, never the token. CLAUDE.md count: 47 → 48.
+
+## [0.1.53] — 2026-05-13
+
+Bumps:
+- `@urateam/core`: 0.1.38 → 0.1.39
+- `@urateam/cli`: 0.1.40 → 0.1.41
+- `@urateam/dashboard`: 0.1.38 → 0.1.39
+- `create-urateam`: 0.1.41 → 0.1.42
+
+### Added (OSS+)
+- **`ura service install` / `ura service uninstall`** ([#300](https://github.com/JonB32/urateam/pull/300)) — auto-generate and install a platform service unit so the user-level daemon auto-starts on login. Auto-detects platform: macOS → launchd plist at `~/Library/LaunchAgents/com.urateam.daemon.plist` + `launchctl load -w`; Linux → systemd-user unit at `~/.config/systemd/user/urateam.service` + `systemctl --user daemon-reload + enable --now`. Idempotent — refuses to overwrite an existing unit, prints "already exists" instead. `--dry-run` prints the unit content without writing. Other platforms fail with a clear pointer to the manual snippets in `deploy/USER_LEVEL_INSTALL.md`. Pure I/O-free unit-file generators live in `packages/cli/src/lib/service-unit.ts` (`renderLaunchdPlist`, `renderSystemdUserUnit`) and are snapshot-tested.
+
+### Audit log
+- Two new event types: `service.installed`, `service.uninstalled`. Emitted opportunistically from the CLI when the daemon SQLite DB exists. Routed through the license-gated `logAuditEvent` — Enterprise-tier `audit-log` deployments record them; OSS / Pro drop them silently. CLAUDE.md count: 45 → 47.
+
+## [0.1.52] — 2026-05-13
+
+Bumps:
+- `@urateam/core`: 0.1.37 → 0.1.38
+- `@urateam/cli`: 0.1.39 → 0.1.40
+- `@urateam/dashboard`: 0.1.37 → 0.1.38
+- `create-urateam`: 0.1.40 → 0.1.41
+
+### Added (OSS+)
+- **User-level install path (Cyrus-style)** ([#296](https://github.com/JonB32/urateam/pull/296)) — new minimum-effort onboarding for operators evaluating urateam on a single machine. Five new CLI commands: `ura init` (bootstraps `~/.urateam/{config.json,data/,repos/}`), `ura repo add <url>` (clones into `~/.urateam/repos/<slug>` and registers in `config.json` — options: `--branch`, `--test-command`, `--build-command`, `--team`, `--label-pattern`), `ura repo list`, `ura repo remove <slug> [--purge]` (with path-safety guard refusing to delete outside `URATEAM_HOME`), `ura uninstall --yes`. `ura start` now reads `~/.urateam/config.json` (or `$URATEAM_HOME/config.json`) as a fallback when no `REPO_*` env vars are set, and explicitly loads `~/.urateam/.env` regardless of cwd so secrets work without `cd ~/.urateam`. Project-level (sidecar / docker-compose) install is unchanged — env vars win when both are present. New schema lives in `packages/cli/src/lib/user-level-config.ts` (Zod, JSON file). Public API: `cloneRepo` is now re-exported from `@urateam/core`. Full operator doc: `deploy/USER_LEVEL_INSTALL.md`.
+
+## [0.1.51] — 2026-05-12
+
+Bumps:
+- `@urateam/core`: 0.1.36 → 0.1.37
+- `@urateam/cli`: 0.1.38 → 0.1.39
+- `@urateam/dashboard`: 0.1.36 → 0.1.37
+- `create-urateam`: 0.1.39 → 0.1.40
+
+### Added (OSS+)
+- **Tier 4: triage produces a real design doc + open-questions gate** ([#290](https://github.com/JonB32/urateam/pull/290)) — the PM Agent triage prompt is extended to produce `approachSummary` (3-5 line sanity-checkable plan), `openQuestions` (must-answer-before-implement), and `antiAcceptanceCriteria` (anti-scope). When `openQuestions.length > 0`, the ticket is forced to the `needs-design` pipeline label regardless of complexity — same routing mechanism as the observer-marker gate. Linear comment includes all three new sections when non-empty. `TriageResult` gains optional fields.
+- **Tier 5: escalation on consecutive failures** ([#291](https://github.com/JonB32/urateam/pull/291)) — when `promoteReadyIssues` trips the circuit breaker for an issue that does NOT already carry `needs-design`, escalate: add the label (preserving existing), post a Linear comment summarizing the last failed run's `errorMessage` (truncated 500 chars), invoke the operator-supplied `slackPostAlert` callback, and emit a `pm.escalated_to_needs_design` audit event. Idempotent — subsequent ticks find the label already in place and skip re-escalation. The existing `pm.skipped_circuit_breaker` event still fires for observability. New `getLastFailureError(db, issueId)` helper in `pm/actions/db-queries.ts`.
+
+### Audit log
+- New event type `pm.escalated_to_needs_design` (Tier 5). Total audit event count: 44 → 45.
+
+## [0.1.50] — 2026-05-12
+
+Bumps:
+- `@urateam/core`: 0.1.35 → 0.1.36
+- `@urateam/cli`: 0.1.37 → 0.1.38
+- `@urateam/dashboard`: 0.1.35 → 0.1.36
+- `create-urateam`: 0.1.38 → 0.1.39
+
+### Added (OSS+)
+- **Tier 3: auto-deep-review thresholds** ([#288](https://github.com/JonB32/urateam/pull/288)) — new `packages/core/src/pipeline/auto-deep-review.ts` promotes the deep-review fanout from opt-in to default-on for non-trivial PRs. After the review-fix loop, the runner computes diff metrics (`changedFiles`, `totalLines`, `newPublicExports`). If any trips `autoDeepReviewThresholds` (defaults `{ changedFiles: 5, totalLines: 200, newPublicExports: 2 }`) AND the `deep-review` license is active, `deepReviewPasses` is bumped to ≥1 (so the agentic Claude reviewer always activates; OpenRouter fanout is the optional additional layer). New `deepReviewFindingsAreBlocking` (default `true`) upgrades deep-review finding severity to blocking so it forces draft. Escape hatches: `URATEAM_DISABLE_AUTO_DEEP_REVIEW=true` (global) or per-pipeline thresholds set high. `countNewPublicExports` parses `+export (default ?)(async ?)(function|class|const|let|interface|type|enum|{|*) ...` lines under monorepo `packages/<pkg>/src/` AND repo-root `src/`, excluding `__tests__/`. **BC note:** operators with existing `deepReviewPasses: 1` will see warnings/suggestions become blocking unless they set `deepReviewFindingsAreBlocking: false`.
+
+### Audit log
+- New event type `pipeline.auto_deep_review_bumped` (Tier 3). Total audit event count: 43 → 44.
+
+## [0.1.49] — 2026-05-12
+
+Bumps:
+- `@urateam/core`: 0.1.34 → 0.1.35
+- `@urateam/cli`: 0.1.36 → 0.1.37
+- `@urateam/dashboard`: 0.1.34 → 0.1.35
+- `create-urateam`: 0.1.37 → 0.1.38
+
+### Added (OSS+)
+- **Tier 2: convention-checklist review prompt** ([#285](https://github.com/JonB32/urateam/pull/285)) — new `PROJECT_CONVENTION_CHECKLIST` in `packages/core/src/security/review-checklist.ts` injected into both the main review-stage prompt (`reviewTemplate`) and the OpenRouter fanout system prompt (`buildReviewPrompt`). The 9 categories (`scratch-files`, `db-ddl-drift`, `audit-bypass-undocumented`, `credential-in-interface`, `spec-vs-impl`, `convention-execfile`, `convention-console`, `convention-throw`, `convention-as-any`) mirror the deterministic-gate vocabulary from Tier 1, so operators see one consistent set of `category` strings whether the finding came from a deterministic gate or from the AI review. Review stage runs on Sonnet (not Haiku) per the existing `DEFAULT_AGENT_PROFILES.review.model`. Adds defense in depth against the Tier 1 failure modes the static checks can't catch (e.g., bare `throw` outside the runner, schema-change drift across all three required sites, credential-shaped fields in newly exported interfaces).
 
 ## [0.1.48] — 2026-05-12
 
@@ -95,7 +511,8 @@ Bumps:
 - **`deploy/CLAUDE_AUTH.md`** ([#248](https://github.com/JonB32/urateam/pull/248)) — new guide covering the three Claude auth paths (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` via `claude setup-token`, and the local CLI session) with a recommendation matrix. Surfaces the long-lived programmatic OAuth token flow that we weren't previously documenting.
 - **CLAUDE.md additions** — new Claude Authentication subsection + new "Codebase Optimization Pass — In Flight" section enumerating BEC-187..207 and listing known limitations contributors should not compound.
 
-<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+### Fixed (OSS+)
+- **BEC-186** — Linear issues whose PRs were manually merged (or merged via GitHub's auto-merge-when-ready) no longer stay stuck in "In Review" indefinitely. The GitHub webhook handler now handles `pull_request.closed` with `merged: true`, looks up the originating pipeline run by PR URL or branch, marks `pipeline_runs.auto_merged = true` in the DB, and calls `notifier.onPRMerged()` which transitions the Linear issue to Done and posts a brief "PR merged" comment. Idempotent: replayed webhooks or re-deliveries are no-ops (the DB `auto_merged` flag gates the notification). The `notifier` is wired into `createGitHubWebhookHandler` from `server.ts` so all deployments with `githubWebhookSecret` configured pick this up automatically.
 ## [0.1.44] — 2026-05-11
 
 Bumps:

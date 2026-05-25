@@ -12,7 +12,12 @@ import { resolveApprovals, type ResolveApprovalsInput, type ResolveApprovalsResu
 import { recoverRetriableRuns, type RecoverResult } from "./actions/recover.js";
 import { recoverStuckInProgressIssues, type StuckIssueResult } from "./actions/recover-stuck.js";
 import { startTodoIssues, type StartTodoInput, type StartTodoResult } from "./actions/start-todo.js";
+import { getCircuitBreakerProbeConfig } from "./actions/circuit-breaker-config.js";
+import { selectProbeCandidates } from "./actions/select-probe-candidates.js";
+import { sweepRecoveredCircuitBreakers } from "./actions/sweep-recovered-circuit-breakers.js";
+import { sweepOrphanStageRuns } from "./actions/sweep-orphan-stage-runs.js";
 import { getActiveFileMaps, predictConflict, type ActiveRun } from "./conflict.js";
+import { fetchCircuitBrokenIssues, ACTIVE_STATUSES } from "./actions/db-queries.js";
 import { PmSlackNotifier } from "./slack.js";
 import { isPmPaused } from "./slack-interface.js";
 import { isFeatureLicensed } from "../license.js";
@@ -22,14 +27,39 @@ import { pipelineRuns } from "../db/schema.js";
 import { makeCallClaude } from "./call-claude.js";
 import { sanitize } from "../executor/prompt/sanitizer.js";
 import { resolveWorkflowStates, createLazyLinearClient } from "./linear-helpers.js";
-import { sql } from "drizzle-orm";
+import { sql, inArray } from "drizzle-orm";
 import { createLogger } from "../logger.js";
-import { logAuditEventUnchecked, budgetRefusedEvent, pruneAuditLog } from "../audit/index.js";
+import { logAuditEventUnchecked, budgetRefusedEvent, pruneAuditLog, claudeAuthExpiredEvent } from "../audit/index.js";
 import { pruneExpiredSessions } from "../auth/index.js";
 import { recomputeCostRollups } from "../cost/index.js";
+import type { PipelineConfig, RepoConfig, SanitizedIssue } from "../types.js";
+import type { LinearIssue } from "../pipeline/runner.js";
 import { createAuthMonitor, type AuthMonitor } from "../executor/auth-monitor.js";
 
 const log = createLogger({ component: "PmAgent:scheduler" });
+
+function captureTickError(tick: TickResult, key: string, err: unknown, msg: string): void {
+  log.error({ err }, msg);
+  tick.errors.push(`${key}: ${(err as Error).message}`);
+}
+
+/**
+ * BEC-184 / BEC-227: parse the PM_AGENT_STUCK_RUN_AGE_MIN env var (default 120 min).
+ * Controls how long a 'running' run must be active before it's treated as a
+ * zombie and eligible for stuck-issue recovery.
+ *
+ * Default raised from 60 → 120 in BEC-227 — real RALPH-iterated implementation
+ * work routinely takes 60-90 min, and the prior 60-min default produced
+ * false-positive reaps on healthy long runs.
+ *
+ * Uses an isNaN guard so '0' doesn't silently fall back via a falsy `||`
+ * check; clamps to ≥1 min to prevent overly-aggressive recovery on
+ * mis-configured deployments.
+ */
+export function parseStuckRunAgeMinutes(envValue: string | undefined): number {
+  const parsed = parseInt(envValue ?? "", 10);
+  return isNaN(parsed) ? 120 : Math.max(1, parsed);
+}
 
 export interface PmSchedulerDeps {
   config: PmAgentConfig;
@@ -38,13 +68,17 @@ export interface PmSchedulerDeps {
   slackBotToken: string;
   repoCloneDir?: string;
   defaultBranch?: string;
+  /** Base directory where per-run worktrees are created. Defaults to $HOME/data/runs (matching runner default). */
+  agentRunDir?: string;
   runner?: {
     resume: (issueId: string) => Promise<void>;
-    start: (issue: any, pipelineKey: string, pipelineConfig: any, repoConfig: any, sanitizedIssue: any) => Promise<void>;
+    start: (issue: LinearIssue, pipelineKey: string, pipelineConfig: PipelineConfig, repoConfig: RepoConfig, sanitizedIssue: SanitizedIssue, linearTeamId?: string | null) => Promise<void>;
   };
-  pipelineConfigs?: Record<string, any>;
-  repoConfigs?: Record<string, any>;
+  pipelineConfigs?: Record<string, PipelineConfig>;
+  repoConfigs?: Record<string, RepoConfig>;
   actions?: Partial<PmSchedulerActions>;
+  /** Injectable auth monitor — defaults to the real createAuthMonitor. Used by tests to avoid slow real API calls. */
+  authMonitor?: AuthMonitor;
 }
 
 interface PmSchedulerActions {
@@ -58,7 +92,7 @@ interface PmSchedulerActions {
   promoteReadyIssues: (input: PromoteInput) => Promise<any[]>;
   deprioritizeStaleIssues: (input: DeprioritizeInput) => Promise<string[]>;
   cancelAbandonedIssues: (input: CancelInput) => Promise<string[]>;
-  postDigest: (tick: TickResult, maxInFlight: number) => Promise<void>;
+  postDigest: (tick: TickResult, maxInFlight: number, minConsecutiveFailures?: number) => Promise<void>;
   getActiveFileMaps: typeof getActiveFileMaps;
   predictConflict: typeof predictConflict;
 }
@@ -77,7 +111,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
   // BEC-207: AuthMonitor — periodic Claude session health-check (every 6h).
   // Alerts to the PM agent's Slack channel when SLACK_ERROR_ALERTS=true.
   // No-ops when CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY is set.
-  const authMonitor: AuthMonitor = createAuthMonitor({
+  const authMonitor: AuthMonitor = deps.authMonitor ?? createAuthMonitor({
     slackBotToken: deps.slackBotToken || undefined,
     slackErrorChannel:
       process.env.SLACK_ERROR_ALERTS === "true"
@@ -94,6 +128,13 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
       });
     }
     return slackNotifier;
+  }
+
+  // BEC-238: fire the reactions:read scope probe once at scheduler creation.
+  // Non-blocking — failure is caught inside probeReactionsScope and logged warn.
+  // Guard on slackBotToken so tests that pass an empty string skip the probe.
+  if (deps.slackBotToken && deps.config.slackChannelId) {
+    void getSlackNotifier().probeReactionsScope();
   }
 
   async function tryAcquireLock(): Promise<boolean> {
@@ -149,8 +190,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
             ? await actions.evaluateBudget({ db, config })
             : await evaluateBudget({ db, config });
         } catch (err) {
-          log.error({ err }, "budget evaluation failed");
-          tick.errors.push(`budget: ${(err as Error).message}`);
+          captureTickError(tick, "budget", err, "budget evaluation failed");
           evaluation = {
             scopes: [],
             worstTier: "ok",
@@ -256,36 +296,29 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
             log.warn({ exhausted: recoveryResult.exhausted }, "retriable runs exhausted max retries");
           }
         } catch (err) {
-          log.error({ err }, "recovery sweep failed");
-          tick.errors.push(`recover: ${(err as Error).message}`);
+          captureTickError(tick, "recover", err, "recovery sweep failed");
         }
 
         // Fetch workflow states once per tick to avoid redundant Linear API round-trips
         let stateMap = new Map<string, string>();
         if (!actions) {
           try {
-            stateMap = await resolveWorkflowStates(await getLinearClient(), config.teamIds);
+            stateMap = await resolveWorkflowStates((await getLinearClient())!, config.teamIds);
           } catch (err) {
-            log.error({ err }, "resolveWorkflowStates failed");
-            tick.errors.push(`resolveWorkflowStates: ${(err as Error).message}`);
+            captureTickError(tick, "resolveWorkflowStates", err, "resolveWorkflowStates failed");
           }
         }
 
         // --- Stuck In Progress issue recovery sweep ---
         if (config.stuckIssueRecovery !== false && !isPmPaused()) {
           try {
-            // BEC-184: read PM_AGENT_STUCK_RUN_AGE_MIN from env (default 60 min).
-            // Controls how long a 'running' run must be active before it's treated
-            // as a zombie and eligible for stuck-issue recovery.
-            // PM_AGENT_STUCK_RUN_AGE_MIN: use isNaN guard so '0' doesn't silently
-            // fall back to 60 via || falsy check; clamp to ≥1 min to prevent
-            // overly-aggressive recovery on mis-configured deployments.
-            const _parsedAge = parseInt(process.env.PM_AGENT_STUCK_RUN_AGE_MIN ?? "", 10);
-            const stuckRunAgeMinutes = isNaN(_parsedAge) ? 60 : Math.max(1, _parsedAge);
+            const stuckRunAgeMinutes = parseStuckRunAgeMinutes(
+              process.env.PM_AGENT_STUCK_RUN_AGE_MIN,
+            );
             const stuckResult = actions?.recoverStuckInProgressIssues
               ? await actions.recoverStuckInProgressIssues({} as any)
               : await recoverStuckInProgressIssues({
-                  linearClient: await getLinearClient(),
+                  linearClient: (await getLinearClient())!,
                   db,
                   teamIds: config.teamIds,
                   targetState: config.stuckIssueTargetState ?? "Backlog",
@@ -303,13 +336,61 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
               );
             }
           } catch (err) {
-            log.error({ err }, "stuck issue recovery sweep failed");
-            tick.errors.push(`recoverStuck: ${(err as Error).message}`);
+            captureTickError(tick, "recoverStuck", err, "stuck issue recovery sweep failed");
+          }
+        }
+
+        // BEC-250 — orphan stage_runs sweep: cancel stage_runs whose parent is
+        // terminal and delete any whose parent is missing. Runs every tick;
+        // idempotent and fail-open. Guarded by !actions so tests that inject
+        // mock actions with db:{} don't hit a real DB call.
+        if (!actions) {
+          try {
+            await sweepOrphanStageRuns(db);
+          } catch (err) {
+            log.warn({ err }, "orphan stage_runs sweep failed");
           }
         }
 
         // Compute available slots once for both startTodo and promote
         const slotsAvailable = config.maxInFlight - (tick.budgetGuard.activeCount ?? 0);
+
+        // BEC-236 — half-open circuit-breaker probe. Picks at most `cap` issues
+        // per tick that the breaker would normally skip; promote + startTodo
+        // receive this Set as probeOverrideIds and bypass the skip for them.
+        const probeConfig = getCircuitBreakerProbeConfig();
+        const breakerThreshold = config.maxConsecutiveFailures > 0
+          ? config.maxConsecutiveFailures
+          : 3;
+        let probeOverrideIds: Set<string> = new Set();
+        if (db && !probeConfig.disabled) {
+          try {
+            probeOverrideIds = await selectProbeCandidates(db, {
+              cap: probeConfig.maxProbesPerTick,
+              cooldownMs: probeConfig.cooldownMs,
+              maxConsecutiveFailures: breakerThreshold,
+              now: Date.now(),
+            });
+          } catch (err) {
+            captureTickError(tick, "probe", err, "selectProbeCandidates failed");
+          }
+
+          // BEC-236 — sweep recovered issues. The runner can't drive recovery
+          // itself (no `linearClient` in its scope), so each tick scans for
+          // state rows whose consecutive-failure count has dropped (= a
+          // `completed` run landed). Recovery deletes the state row and
+          // strips the Tier-5-added `needs-design` label.
+          try {
+            const sweepClient = await getLinearClient();
+            if (sweepClient) {
+              await sweepRecoveredCircuitBreakers(db, sweepClient, {
+                maxConsecutiveFailures: breakerThreshold,
+              });
+            }
+          } catch (err) {
+            captureTickError(tick, "sweepRecovered", err, "sweepRecoveredCircuitBreakers failed");
+          }
+        }
 
         // --- Start pipelines for orphaned Todo issues ---
         if (deps.runner?.start && deps.pipelineConfigs && deps.repoConfigs) {
@@ -318,7 +399,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
               const todoResults = actions?.startTodoIssues
                 ? await actions.startTodoIssues({} as any)
                 : await startTodoIssues({
-                    linearClient: await getLinearClient(),
+                    linearClient: (await getLinearClient())!,
                     db: deps.db as AnyDb,
                     teamIds: config.teamIds,
                     runner: deps.runner as any,
@@ -332,6 +413,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                     // BEC-181: omit getFailureCount so startTodoIssues uses the batch
                     // batchCountConsecutiveFailures path (single DB round-trip for all
                     // candidates) instead of per-issue N+1 queries.
+                    probeOverrideIds,
                   });
               const started = todoResults.filter((r) => r.started);
               if (started.length > 0) {
@@ -340,8 +422,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
               }
             }
           } catch (err) {
-            log.error({ err }, "startTodoIssues failed");
-            tick.errors.push(`startTodo: ${(err as Error).message}`);
+            captureTickError(tick, "startTodo", err, "startTodoIssues failed");
           }
         }
 
@@ -349,7 +430,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           tick.triaged = actions
             ? await actions.triageNewIssues({} as any)
             : await triageNewIssues({
-                linearClient: await getLinearClient(),
+                linearClient: (await getLinearClient())!,
                 teamIds: config.teamIds,
                 callClaude: callClaudeFn,
                 sanitize,
@@ -358,15 +439,14 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                 db,
               });
         } catch (err) {
-          log.error({ err }, "triage failed");
-          tick.errors.push(`triage: ${(err as Error).message}`);
+          captureTickError(tick, "triage", err, "triage failed");
         }
 
         try {
           const approvalResult = actions
             ? await actions.resolveApprovals({} as any)
             : await resolveApprovals({
-                linearClient: await getLinearClient(),
+                linearClient: (await getLinearClient())!,
                 slackNotifier: getSlackNotifier(),
                 db,
                 teamIds: config.teamIds,
@@ -375,8 +455,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           tick.approvalsResolved = approvalResult.resolved;
           tick.approvalsPending = approvalResult.stillPending;
         } catch (err) {
-          log.error({ err }, "resolve approvals failed");
-          tick.errors.push(`resolveApprovals: ${(err as Error).message}`);
+          captureTickError(tick, "resolveApprovals", err, "resolve approvals failed");
         }
 
         if (isPmPaused()) {
@@ -389,30 +468,34 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
             if (actions) {
               tick.promoted = await actions.promoteReadyIssues({} as any);
             } else {
-              const activeRuns = await getActiveRunsFromDb(db);
+              const agentRunDir = deps.agentRunDir ?? join(homedir(), "data", "runs");
               const baseDir = deps.repoCloneDir ?? join(homedir(), "work", "repos");
               const defaultBranch = deps.defaultBranch ?? "main";
+              const { readdir, stat } = await import("node:fs/promises");
 
-              // Find the first cloned repo directory (runner clones to <repoCloneDir>/<slug>/)
-              let repoDir = baseDir;
-              try {
-                const { readdir, stat } = await import("node:fs/promises");
-                const entries = await readdir(baseDir);
-                const candidates = await Promise.all(
-                  entries.map(async (entry) => {
-                    const candidate = `${baseDir}/${entry}`;
-                    try {
-                      const s = await stat(`${candidate}/.git`);
-                      if (s.isDirectory()) return candidate;
-                    } catch { /* not a git repo */ }
-                    return null;
-                  }),
-                );
-                const found = candidates.find((c) => c !== null);
-                if (found) repoDir = found;
-              } catch {
-                log.warn("could not scan repoCloneDir for git repos");
-              }
+              // Fetch active runs from DB and scan for the first cloned repo dir in parallel.
+              const [activeRuns, repoDir] = await Promise.all([
+                getActiveRunsFromDb(db, agentRunDir),
+                (async () => {
+                  try {
+                    const entries = await readdir(baseDir);
+                    const candidates = await Promise.all(
+                      entries.map(async (entry) => {
+                        const candidate = `${baseDir}/${entry}`;
+                        try {
+                          const s = await stat(`${candidate}/.git`);
+                          if (s.isDirectory()) return candidate;
+                        } catch { /* not a git repo */ }
+                        return null;
+                      }),
+                    );
+                    return candidates.find((c) => c !== null) ?? baseDir;
+                  } catch {
+                    log.warn("could not scan repoCloneDir for git repos");
+                    return baseDir;
+                  }
+                })(),
+              ]);
 
               const fileMaps = await getActiveFileMaps({
                 activeRuns,
@@ -428,7 +511,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                     ({ overlapRisk: "none" as const, likelyFiles: [] as string[], reasoning: "conflict detection requires license" });
 
               tick.promoted = await promoteReadyIssues({
-                linearClient: await getLinearClient(),
+                linearClient: (await getLinearClient())!,
                 teamIds: config.teamIds,
                 slotsAvailable,
                 checkConflict,
@@ -442,16 +525,16 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                 // BEC-181: omit getFailureCount so promoteReadyIssues uses the batch
                 // batchCountConsecutiveFailures path (single DB round-trip for all
                 // candidates) instead of per-issue N+1 queries.
+                probeOverrideIds,
               });
             }
           } catch (err) {
-            log.error({ err }, "promote failed");
-            tick.errors.push(`promote: ${(err as Error).message}`);
+            captureTickError(tick, "promote", err, "promote failed");
           }
         }
 
         if (!isPmPaused() && isFeatureLicensed("approval-workflows")) {
-          const linearClient = await getLinearClient();
+          const linearClient = (await getLinearClient())!;
           const slackNotifier = getSlackNotifier();
 
           const [depResult, cancelResult] = await Promise.allSettled([
@@ -479,15 +562,24 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           if (depResult.status === "fulfilled") {
             tick.deprioritizeRequested = depResult.value;
           } else {
-            log.error({ err: depResult.reason }, "deprioritize failed");
-            tick.errors.push(`deprioritize: ${(depResult.reason as Error).message}`);
+            captureTickError(tick, "deprioritize", depResult.reason, "deprioritize failed");
           }
 
           if (cancelResult.status === "fulfilled") {
             tick.cancelRequested = cancelResult.value;
           } else {
-            log.error({ err: cancelResult.reason }, "cancel failed");
-            tick.errors.push(`cancel: ${(cancelResult.reason as Error).message}`);
+            captureTickError(tick, "cancel", cancelResult.reason, "cancel failed");
+          }
+        }
+
+        // BEC-223: Populate circuit-broken issues for the digest before posting.
+        // Wrapped in try/catch — failure must not prevent the digest from posting.
+        const minFailures = config.maxConsecutiveFailures > 0 ? config.maxConsecutiveFailures : 3;
+        if (!actions) {
+          try {
+            tick.circuitBrokenIssues = await fetchCircuitBrokenIssues(db, minFailures);
+          } catch (err) {
+            log.warn({ err }, "failed to fetch circuit-broken issues for digest");
           }
         }
 
@@ -495,7 +587,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           if (actions) {
             await actions.postDigest(tick, config.maxInFlight);
           } else {
-            await getSlackNotifier().postDigest(tick, config.maxInFlight);
+            await getSlackNotifier().postDigest(tick, config.maxInFlight, minFailures);
           }
         } catch (err) {
           log.error({ err }, "digest failed");
@@ -557,21 +649,26 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
   };
 }
 
-async function getActiveRunsFromDb(db: AnyDb): Promise<ActiveRun[]> {
+async function getActiveRunsFromDb(db: AnyDb, agentRunDir: string): Promise<ActiveRun[]> {
   try {
     const rows = await db
       .select({
+        id: pipelineRuns.id,
         issueId: pipelineRuns.issueId,
         branch: pipelineRuns.branch,
       })
       .from(pipelineRuns)
       .where(
-        sql`${pipelineRuns.status} in ('queued', 'running')`,
+        inArray(pipelineRuns.status, [...ACTIVE_STATUSES]),
       );
 
     return rows
       .filter((r: any) => r.branch)
-      .map((r: any) => ({ issueId: r.issueId, branch: r.branch }));
+      .map((r: any) => ({
+        issueId: r.issueId,
+        branch: r.branch,
+        worktreePath: join(agentRunDir, r.id, "worktree"),
+      }));
   } catch {
     return [];
   }

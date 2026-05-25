@@ -15,12 +15,29 @@ export type PgDb = ReturnType<typeof drizzlePg> & { __driver: "postgres" };
 export type Db = SqliteDb | PgDb;
 
 /**
- * Escape-hatch type used when passing the Db union to Drizzle query
- * builders that expect a single concrete driver type. Both SQLite and
- * Postgres schemas have identical column structures, so the generated
- * SQL is correct for either driver at runtime.
+ * Escape-hatch type used when passing the Db union to Drizzle query builders
+ * that expect a single concrete driver type.
+ *
+ * At runtime this is always one of:
+ *   BetterSQLite3Database<typeof fullSchema>            (SqliteDb)
+ *   ReturnType<typeof drizzlePg> & { __driver: "postgres" }  (PgDb)
+ *
+ * Drizzle's SQLite and Postgres drivers have incompatible `select`/`insert`
+ * method signatures at the TypeScript level, so a bare `SqliteDb | PgDb`
+ * union does not allow direct method calls. This structural alias exposes
+ * the query-builder methods with `any` return types so callers can use
+ * `(db as AnyDb).select(...)` without per-site driver-narrowing, while the
+ * index signature preserves dynamic property access (e.g. `[DB_DRIVER_TAG]`).
+ * Both SqliteDb and PgDb are structurally assignable to this type.
  */
-export type AnyDb = any;
+export type AnyDb = {
+  select: (...args: any[]) => any;
+  insert: (...args: any[]) => any;
+  update: (...args: any[]) => any;
+  delete: (...args: any[]) => any;
+  transaction: (...args: any[]) => any;
+  [K: string]: any;
+};
 
 /**
  * Describes a column added by a migration (for existing deployments).
@@ -56,6 +73,8 @@ const MIGRATION_COLUMNS: MigrationColumn[] = [
   // BEC-94: auto-commit quality metric
   { table: "pipeline_runs", column: "auto_committed", sqliteType: "INTEGER", pgType: "BOOLEAN" },
   { table: "pipeline_runs", column: "linear_team_id", sqliteType: "TEXT", pgType: "TEXT" },
+  // BEC-227: agent session continuity — Claude Agent SDK session UUID for resumption
+  { table: "pipeline_runs", column: "agent_session_id", sqliteType: "TEXT", pgType: "TEXT" },
   // Feature 4.4: RBAC
   {
     table: "dashboard_users",
@@ -63,6 +82,8 @@ const MIGRATION_COLUMNS: MigrationColumn[] = [
     sqliteType: "TEXT NOT NULL DEFAULT 'viewer'",
     pgType: "TEXT NOT NULL DEFAULT 'viewer'",
   },
+  // BEC-209: implement-stage hang detection — tracks last progress timestamp
+  { table: "stage_runs", column: "last_progress_at", sqliteType: "INTEGER", pgType: "TIMESTAMPTZ" },
 ];
 
 /**
@@ -102,7 +123,8 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
     auto_merged ${bool},
     auto_merge_reason TEXT,
     auto_committed ${bool},
-    linear_team_id TEXT
+    linear_team_id TEXT,
+    agent_session_id TEXT
   );
 
   CREATE TABLE IF NOT EXISTS stage_runs (
@@ -115,6 +137,7 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
     input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
     turns INTEGER NOT NULL DEFAULT 0,
+    last_progress_at ${ts},
     handoff_artifact TEXT,
     error_message TEXT
   );
@@ -152,6 +175,16 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
   CREATE INDEX IF NOT EXISTS idx_pm_approvals_status ON pm_approvals(status);
   -- BEC-187: hot-path index — kept in sync with migration files.
   CREATE INDEX IF NOT EXISTS idx_pm_approvals_issue_id ON pm_approvals(issue_id);
+
+  CREATE TABLE IF NOT EXISTS pipeline_run_decisions (
+    id TEXT PRIMARY KEY,
+    pipeline_run_id TEXT NOT NULL REFERENCES pipeline_runs(id),
+    iteration INTEGER NOT NULL,
+    stage TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at ${ts} NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_pipeline_run_decisions_run ON pipeline_run_decisions(pipeline_run_id, iteration);
 
   CREATE TABLE IF NOT EXISTS active_work (
     id TEXT PRIMARY KEY,
@@ -255,6 +288,22 @@ export function getCreateTablesDDL(driver: "sqlite" | "postgres"): string {
 
   CREATE INDEX IF NOT EXISTS idx_review_model_runs_stage_run_id
     ON review_model_runs(stage_run_id);
+
+  CREATE TABLE IF NOT EXISTS triage_results (
+    issue_id TEXT PRIMARY KEY,
+    v2_prediction TEXT NOT NULL DEFAULT '{}',
+    triaged_at ${ts} NOT NULL DEFAULT (${now})
+  );
+
+  CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+    issue_id TEXT PRIMARY KEY,
+    escalated_at ${ts} NOT NULL DEFAULT (${now}),
+    last_probe_at ${ts},
+    probe_attempts INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_circuit_breaker_state_last_probe_at
+    ON circuit_breaker_state(last_probe_at);
 `;
 }
 
@@ -330,7 +379,7 @@ export async function createDb(options: CreateDbOptions): Promise<Db> {
 }
 
 /** Check if a Db instance is backed by Postgres. */
-export function isPostgres(db: Db): boolean {
+export function isPostgres(db: AnyDb): boolean {
   return (db as any)[DB_DRIVER_TAG] === "postgres";
 }
 
@@ -340,7 +389,7 @@ export function isPostgres(db: Db): boolean {
  * - SQLite:   `date(col, 'unixepoch')` — column is INTEGER epoch seconds
  * - Postgres: `to_char(col, 'YYYY-MM-DD')` — column is TIMESTAMPTZ
  */
-export function sqlDateGroup(db: Db, col: any): SQL<string> {
+export function sqlDateGroup(db: AnyDb, col: any): SQL<string> {
   return isPostgres(db)
     ? sql<string>`to_char(${col}, 'YYYY-MM-DD')`
     : sql<string>`date(${col}, 'unixepoch')`;
@@ -353,7 +402,7 @@ export function sqlDateGroup(db: Db, col: any): SQL<string> {
  * - SQLite:   `col >= unixepoch('now', '-N days')` — column is INTEGER epoch seconds
  * - Postgres: `col >= now() - interval 'N days'` — column is TIMESTAMPTZ
  */
-export function sqlDaysAgoFilter(db: Db, col: any, days: number): SQL {
+export function sqlDaysAgoFilter(db: AnyDb, col: any, days: number): SQL {
   return isPostgres(db)
     ? sql`${col} >= now() - interval '${sql.raw(String(days))} days'`
     : sql`${col} >= unixepoch('now', '-${sql.raw(String(days))} days')`;

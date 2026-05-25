@@ -5,6 +5,7 @@ import { createApp } from "./server.js";
 import { defaultConfigs } from "./pipeline/config.js";
 import { buildGitHubConfigFromEnv } from "./repo/github-from-env.js";
 import { cleanupWorktrees } from "./repo/git.js";
+import { parseIntOr } from "./util/env.js";
 
 // Build optional GitHub config from env vars
 const github = buildGitHubConfigFromEnv();
@@ -22,8 +23,7 @@ const dashboardAuth =
     ? { username: dashboardUser, password: dashboardPass }
     : undefined;
 
-const _parsedTtl = parseInt(process.env.WORKTREE_TTL_HOURS ?? "24", 10);
-const worktreeTtlHours = Number.isFinite(_parsedTtl) && _parsedTtl > 0 ? _parsedTtl : 24;
+const worktreeTtlHours = parseIntOr(process.env.WORKTREE_TTL_HOURS, 24);
 
 // Build repoConfigs from env vars (same pattern as CLI dev command)
 const repoConfigs: Record<string, import("./types.js").RepoConfig> = {};
@@ -44,7 +44,7 @@ const config = {
   databaseUrl: process.env.DATABASE_URL,
   slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
   discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL,
-  concurrency: parseInt(process.env.MAX_CONCURRENT_RUNS ?? "3", 10),
+  concurrency: parseIntOr(process.env.MAX_CONCURRENT_RUNS, 3),
   agentRunDir: process.env.AGENT_RUN_DIR ?? join(homedir(), "data", "runs"),
   repoCloneDir: process.env.REPO_CLONE_DIR ?? join(homedir(), "work", "repos"),
   github,
@@ -59,7 +59,7 @@ if (!config.webhookSecret) {
 
 async function main() {
   const { app, db, runner } = await createApp(config);
-  const port = parseInt(process.env.PORT ?? "3000", 10);
+  const port = parseIntOr(process.env.PORT, 3000);
 
   console.log(`Linear Agent Framework starting on port ${port}`);
   console.log(`Pipelines: ${Object.keys(config.pipelineConfigs).join(", ")}`);

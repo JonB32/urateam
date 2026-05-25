@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import { createWebhookHandler } from "./webhook/handler.js";
 import { createGitHubWebhookHandler } from "./webhook/github-handler.js";
+import { createGitLabWebhookHandler } from "./webhook/gitlab-handler.js";
+import { createBitbucketWebhookHandler } from "./webhook/bitbucket-handler.js";
 import { createDb } from "./db/client.js";
 import { PipelineRunner } from "./pipeline/runner.js";
 import { CompositeNotifier } from "./notifier/composite.js";
@@ -11,10 +13,18 @@ import type { PipelineConfig, RepoConfig, TriggerMap } from "./types.js";
 import type { PmAgentConfig } from "./pm/types.js";
 import type { GitHubConfig } from "./repo/github.js";
 import type { GitLabConfig } from "./repo/gitlab.js";
+import type { BitbucketConfig } from "./repo/bitbucket.js";
 import { isFeatureLicensed, checkLicense } from "./license.js";
 import { createLogger } from "./logger.js";
 import type { SentryIntegrationConfig } from "./integrations/sentry.js";
 import type { CloudWatchIntegrationConfig } from "./integrations/cloudwatch.js";
+import { checkSessionVolume } from "./pipeline/session-volume-check.js";
+import {
+  logAuditEvent,
+  systemSessionVolumeWarningEvent,
+} from "./audit/index.js";
+import { defaultProjectsRoot } from "./executor/session-store.js";
+import { isAgentSessionResumeEnabled } from "./executor/session-policy.js";
 
 const log = createLogger({ component: "server" });
 
@@ -27,6 +37,8 @@ export interface PmSlackInterfaceConfig {
   channelId: string;
   /** Team IDs for issue creation commands */
   teamIds?: string[];
+  /** BEC-135: optional handler for /release subcommands (Release Manager integration). */
+  releaseHandler?: (params: { text: string; userId: string }) => Promise<{ text: string; responseType: "ephemeral" | "in_channel" }>;
 }
 
 export interface ServerConfig {
@@ -43,6 +55,7 @@ export interface ServerConfig {
   repoCloneDir?: string;
   github?: GitHubConfig;
   gitlab?: GitLabConfig;
+  bitbucket?: BitbucketConfig;
   dashboardAuth?: { username: string; password: string };
   /** When provided, mounts Slack slash command + Events API endpoints for the PM Agent */
   pmSlack?: PmSlackInterfaceConfig;
@@ -52,6 +65,18 @@ export interface ServerConfig {
    * The secret here is the GitHub webhook secret (separate from the Linear webhook secret).
    */
   githubWebhookSecret?: string;
+  /**
+   * When provided, mounts the GitLab webhook handler at /webhooks/gitlab.
+   * Enables MR comment → review-feedback runs for GitLab repositories.
+   * Set this to the "Secret token" you configure in GitLab's webhook settings.
+   */
+  gitlabWebhookToken?: string;
+  /**
+   * When provided, mounts the Bitbucket webhook handler at /webhooks/bitbucket.
+   * Enables PR comment → review-feedback runs for Bitbucket repositories.
+   * Set this to the shared secret you configure in Bitbucket's webhook settings.
+   */
+  bitbucketWebhookSecret?: string;
   /**
    * PM Agent config. When provided, enables the 100% budget gate in the
    * webhook handler so new runs are refused when spend caps are exhausted.
@@ -91,6 +116,25 @@ export async function createApp(config: ServerConfig) {
     connectionString: config.databaseUrl ?? ":memory:",
   });
 
+  // BEC-227: session-volume sanity check. Verifies that `~/.claude/projects`
+  // (or `URATEAM_CLAUDE_PROJECTS_DIR`) is mounted and writeable so JSONL
+  // transcripts survive container restarts. Non-fatal — a failing check
+  // means resumes silently fall back to fresh sessions.
+  if (isAgentSessionResumeEnabled()) {
+    const projectsDir = defaultProjectsRoot();
+    const status = checkSessionVolume({ projectsDir });
+    if (!status.ok) {
+      log.warn(
+        { projectsDir, reason: status.reason },
+        "agent session projects dir failed volume check — resumes will fall back to fresh sessions",
+      );
+      void logAuditEvent(
+        db as any,
+        systemSessionVolumeWarningEvent({ projectsDir, reason: status.reason }),
+      );
+    }
+  }
+
   // Notifiers
   const notifiers = [
     new LinearNotifier({ apiKey: config.linearApiKey }),
@@ -108,6 +152,7 @@ export async function createApp(config: ServerConfig) {
     repoCloneDir: config.repoCloneDir,
     github: config.github,
     gitlab: config.gitlab,
+    bitbucket: config.bitbucket,
   });
 
   // Webhook handler
@@ -141,6 +186,37 @@ export async function createApp(config: ServerConfig) {
     app.route("/", githubWebhookApp);
   }
 
+  // GitLab webhook handler (optional — for MR comment → pipeline re-entry)
+  // Mount when a webhook token is configured. GitLab uses a plain shared secret
+  // in X-Gitlab-Token (not HMAC), so this also protects against unauthenticated access.
+  if (config.gitlabWebhookToken) {
+    const gitlabWebhookApp = createGitLabWebhookHandler({
+      webhookToken: config.gitlabWebhookToken,
+      runner,
+      pipelineConfigs: config.pipelineConfigs,
+      repoConfigs: config.repoConfigs,
+      db: db as any,
+      notifier,
+    });
+    app.route("/", gitlabWebhookApp);
+    log.info("GitLab webhook handler mounted at /webhooks/gitlab");
+  }
+
+  // Bitbucket webhook handler (optional — for PR comment → pipeline re-entry)
+  // Validates HMAC-SHA256 in X-Hub-Signature-256 (same scheme as GitHub).
+  if (config.bitbucketWebhookSecret) {
+    const bitbucketWebhookApp = createBitbucketWebhookHandler({
+      webhookSecret: config.bitbucketWebhookSecret,
+      runner,
+      pipelineConfigs: config.pipelineConfigs,
+      repoConfigs: config.repoConfigs,
+      db: db as any,
+      notifier,
+    });
+    app.route("/", bitbucketWebhookApp);
+    log.info("Bitbucket webhook handler mounted at /webhooks/bitbucket");
+  }
+
   // PM Agent Slack interface (optional, license-gated)
   if (config.pmSlack) {
     if (!isFeatureLicensed("slack-interface")) {
@@ -163,6 +239,7 @@ export async function createApp(config: ServerConfig) {
           haltAll: runner.haltAll.bind(runner),
         },
         db: db as any,
+        releaseHandler: config.pmSlack.releaseHandler,
       });
       app.route("/", slackRouter);
     }

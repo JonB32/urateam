@@ -341,4 +341,53 @@ describe("triageNewIssues", () => {
       expect(results[0].labels).toEqual(["needs-design"]);
     });
   });
+
+  describe("URATEAM_DISABLE_TRIAGE_V2 escape hatch", () => {
+    it("only appends **Acceptance Criteria:** to description (no v2 sections) when v2 is disabled", async () => {
+      vi.stubEnv("URATEAM_DISABLE_TRIAGE_V2", "true");
+      try {
+        const client = mockLinearClient([
+          {
+            id: "issue-v1d",
+            identifier: "BEC-V1D",
+            title: "Disable v2 path",
+            description: "",
+            labels: { nodes: [] },
+            team: { id: "team-1" },
+          },
+        ]);
+        // Even if Claude returns v2 fields, the disable path must drop them.
+        const callClaude = mockClaude(JSON.stringify({
+          priority: 2,
+          labels: ["feature"],
+          complexity: "small",
+          rationale: "Adds a thing",
+          acceptanceCriteria: ["Thing is added", "Thing has a test"],
+          assumptions: ["Should not appear in description"],
+          examples: [{ scenario: "X", expected: "Y" }],
+          affectedFiles: ["src/x.ts"],
+          testStrategy: { unit: "vitest" },
+          riskAssessment: { severity: "low", areas: ["api"] },
+        }));
+
+        await triageNewIssues({
+          linearClient: client as any,
+          teamIds: ["team-1"],
+          callClaude,
+          sanitize: (s: string) => s,
+          stateMap: defaultStateMap,
+        });
+
+        const updateCall = client.updateIssue.mock.calls[0]!;
+        const desc = (updateCall[1] as { description?: string }).description ?? "";
+        expect(desc).toContain("**Acceptance Criteria:**");
+        expect(desc).not.toContain("**Examples:**");
+        expect(desc).not.toContain("**Affected Files:**");
+        expect(desc).not.toContain("**Test Strategy:**");
+        expect(desc).not.toContain("**Risk Assessment:**");
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  });
 });

@@ -14,6 +14,12 @@ export interface RunInfo {
   totalInputTokens: number;
   totalOutputTokens: number;
   errorMessage: string | null;
+  /**
+   * BEC-227 — Claude Agent SDK session UUID. `null` means the run predates the
+   * session-continuity feature flag or used a legacy non-resumable path; a
+   * populated value links to the transcript view at `/runs/:id/transcript`.
+   */
+  agentSessionId?: string | null;
 }
 
 export interface StageInfo {
@@ -209,6 +215,11 @@ export function runDetailView(
       <div><dt>Completed</dt><dd title="${run.completedAt ? escapeHtml(formatTime(run.completedAt)) : ""}">${toRelativeTime(run.completedAt)}</dd></div>
       <div><dt>Tokens (total)</dt><dd>${(run.totalInputTokens + run.totalOutputTokens).toLocaleString()}</dd></div>
       <div><dt>Tokens in / out</dt><dd>${run.totalInputTokens.toLocaleString()} / ${run.totalOutputTokens.toLocaleString()}</dd></div>
+      ${
+        run.agentSessionId
+          ? `<div><dt>Agent session</dt><dd><a href="${basePath}/runs/${encodeURIComponent(run.id)}/transcript">${escapeHtml(run.agentSessionId.slice(0, 8))}…</a></dd></div>`
+          : ""
+      }
       ${run.errorMessage ? `<div style="grid-column:1/-1"><dt>Error</dt><dd style="color:var(--color-red)">${escapeHtml(run.errorMessage)}</dd></div>` : ""}
     </dl>
   </div>`;

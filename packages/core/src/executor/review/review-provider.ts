@@ -1,7 +1,9 @@
 import type { HandoffArtifact, ReviewFinding } from "../../types.js";
+import type { AnyDb } from "../../db/client.js";
 import { AgenticDeepReviewProvider } from "./agentic-deep-review.js";
 import { OpenRouterFanoutProvider } from "./openrouter-fanout.js";
 import { createLogger } from "../../logger.js";
+import { parsePosIntOr, parseOptPosInt, parseCsv } from "../../util/env.js";
 
 const log = createLogger({ component: "review.provider" });
 
@@ -14,6 +16,26 @@ export interface ReviewContext {
   handoff: HandoffArtifact;
   baseRef: string;
   prNumber: number | null;
+  /** Issue id — required (with `runId`) for BEC-227 agent-session audit
+   *  events emitted from the agentic deep-review provider. Optional for
+   *  backwards compatibility with existing test callers. */
+  issueId?: string;
+  /** BEC-227 — per-run SDK session UUID threaded into deep-review sub-agents
+   *  so they can resume the per-run transcript when the resolved review
+   *  model is in the resumable family. Null when the feature flag is off
+   *  (`URATEAM_ENABLE_AGENT_SESSION_RESUME` ≠ `"true"`). */
+  agentSessionId?: string | null;
+  /** BEC-227 — true only on the first resumable stage of the pipeline run.
+   *  Runner flips this once via `claimFirstResumableStage("review")`. */
+  isFirstResumableStage?: boolean;
+  /** BEC-227 — resolved review-stage model (after `stageModels` override).
+   *  When in the resumable family the agentic provider passes this through
+   *  to `runDeepReview` so its sub-agents inherit the session. Hardcoded
+   *  Haiku (the default) is non-resumable and skips the session path. */
+  reviewModel?: string;
+  /** BEC-227 — DB handle for emitting agent-session audit events. When
+   *  omitted, resume/fallback still happens but no events are written. */
+  db?: AnyDb;
 }
 
 export interface ReviewModelRun {
@@ -50,16 +72,11 @@ const SANE_OUTPUT_TOKENS_FLOOR = 256;
  *  this is a non-blocking best-effort check and must not delay boot. */
 const CATALOG_FETCH_TIMEOUT_MS = 10_000;
 
-/** Splits a comma-separated model list, trims whitespace, drops empty entries. */
-function parseModels(raw: string): string[] {
-  return raw.split(",").map((s) => s.trim()).filter(Boolean);
-}
-
 export function getEnabledProviders(env: NodeJS.ProcessEnv): ReviewProvider[] {
   const providers: ReviewProvider[] = [new AgenticDeepReviewProvider()];
 
   const rawModels = env.REVIEW_MODELS ?? "";
-  const models = parseModels(rawModels);
+  const models = parseCsv(rawModels);
   const apiKey = env.OPENROUTER_API_KEY ?? "";
   const fanoutDesired = models.length > 0;
   const keyPresent = apiKey.length > 0;
@@ -79,7 +96,7 @@ export function getEnabledProviders(env: NodeJS.ProcessEnv): ReviewProvider[] {
   // BEC-164: optional output-token cap. Unset = the model's provider default
   // applies (can be huge → 402s on limited-budget accounts). Invalid input
   // falls through to undefined so the cap stays unset.
-  const maxOutputTokens = parsePositiveIntOrUndefined(env.REVIEW_MODELS_MAX_OUTPUT_TOKENS);
+  const maxOutputTokens = parseOptPosInt(env.REVIEW_MODELS_MAX_OUTPUT_TOKENS);
   if (maxOutputTokens !== undefined && maxOutputTokens < SANE_OUTPUT_TOKENS_FLOOR) {
     log.warn(
       {
@@ -96,8 +113,8 @@ export function getEnabledProviders(env: NodeJS.ProcessEnv): ReviewProvider[] {
       apiKey,
       baseUrl: env.OPENROUTER_BASE_URL ?? DEFAULT_BASE_URL,
       models,
-      timeoutMs: parseIntOr(env.REVIEW_MODELS_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
-      maxInputTokens: parseIntOr(env.REVIEW_MODELS_MAX_INPUT_TOKENS, DEFAULT_MAX_INPUT_TOKENS),
+      timeoutMs: parsePosIntOr(env.REVIEW_MODELS_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
+      maxInputTokens: parsePosIntOr(env.REVIEW_MODELS_MAX_INPUT_TOKENS, DEFAULT_MAX_INPUT_TOKENS),
       maxOutputTokens,
     }),
   );
@@ -120,7 +137,7 @@ export function getEnabledProviders(env: NodeJS.ProcessEnv): ReviewProvider[] {
  */
 export async function validateReviewModels(env: NodeJS.ProcessEnv): Promise<void> {
   const rawModels = env.REVIEW_MODELS ?? "";
-  const models = parseModels(rawModels);
+  const models = parseCsv(rawModels);
   const apiKey = env.OPENROUTER_API_KEY ?? "";
 
   // Only run when both vars are configured — same symmetric requirement as
@@ -187,14 +204,3 @@ function levenshtein(a: string, b: string): number {
   return dp[n];
 }
 
-function parseIntOr(raw: string | undefined, fallback: number): number {
-  if (!raw) return fallback;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-function parsePositiveIntOrUndefined(raw: string | undefined): number | undefined {
-  if (!raw) return undefined;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : undefined;
-}

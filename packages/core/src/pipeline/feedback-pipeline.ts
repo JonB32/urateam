@@ -29,6 +29,7 @@ import {
   type GitHubConfig,
 } from "../repo/github.js";
 import { buildAuthenticatedUrl, type GitLabConfig } from "../repo/gitlab.js";
+import { buildBitbucketAuthenticatedUrl, type BitbucketConfig } from "../repo/bitbucket.js";
 import { parseRepoUrl } from "../repo/config.js";
 import type { ReviewFeedbackComment } from "../webhook/github-handler.js";
 import { detectTechStack } from "../repo/tech-stack.js";
@@ -152,6 +153,7 @@ export interface FeedbackPipelineContext {
   agentRunDir: string;
   githubConfig?: GitHubConfig;
   gitlabConfig?: GitLabConfig;
+  bitbucketConfig?: BitbucketConfig;
   pushQueue: WorkQueue;
   lockAdapter: LockAdapter;
   prLockTimeoutMs: number;
@@ -258,7 +260,9 @@ export async function executeFeedbackPipeline(
     const cloneUrl =
       repoConfig.provider === "gitlab" && ctx.gitlabConfig
         ? buildAuthenticatedUrl(repoConfig.url, ctx.gitlabConfig)
-        : repoConfig.url;
+        : repoConfig.provider === "bitbucket" && ctx.bitbucketConfig
+          ? buildBitbucketAuthenticatedUrl(repoConfig.url, ctx.bitbucketConfig)
+          : repoConfig.url;
     const logUrl = cloneUrl.replace(/:\/\/[^@]+@/, "://[redacted]@");
     runLog.info({ repoUrl: logUrl, repoDir }, "feedback: cloning/fetching repository");
     await cloneRepo(cloneUrl, repoDir);
