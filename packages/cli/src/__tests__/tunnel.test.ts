@@ -115,6 +115,9 @@ describe("TunnelManager — cloudflare-quick", () => {
       emitExit(127, null);
     }, 5);
     await expect(startPromise).rejects.toBeInstanceOf(CloudflaredMissingError);
+    // wireSupervisor schedules a restart timer on exit; stop() cancels it so
+    // it doesn't spawn a new child and produce an unhandled rejection later.
+    await mgr.stop();
   });
 });
 
@@ -155,7 +158,10 @@ describe("TunnelManager — restart-on-exit + graceful shutdown", () => {
   it("emits 'stopped' on child exit", async () => {
     const { child, emitStderr, emitExit } = makeFakeChild();
     const spawnMock = vi.fn(() => child as any);
-    const mgr = new TunnelManager(makeOpts({ spawn: spawnMock as any }));
+    // Use a long restart delay so the restart timer cannot fire before stop() is called.
+    const mgr = new TunnelManager(
+      makeOpts({ spawn: spawnMock as any, initialRestartDelayMs: 60_000 }),
+    );
     const startPromise = mgr.start();
     setTimeout(
       () => emitStderr("Your quick tunnel is up at https://abc.trycloudflare.com"),
@@ -168,6 +174,9 @@ describe("TunnelManager — restart-on-exit + graceful shutdown", () => {
     emitExit(1, null);
     const evt = await stopped;
     expect(evt.exitCode).toBe(1);
+    // Cancel the pending restart timer to avoid a dangling URL-detect timeout
+    // that would emit "error" with no listener after the test ends.
+    await mgr.stop();
   });
 
   it("restarts after a non-zero exit with exponential backoff", async () => {
