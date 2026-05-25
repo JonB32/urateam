@@ -6,6 +6,7 @@ import { resolvePipeline } from "../../pipeline/router.js";
 import { createLogger } from "../../logger.js";
 import { truncateWithEllipsis } from "../../util/strings.js";
 import type { AnyDb } from "../../db/client.js";
+import type { LinearClient } from "@linear/sdk";
 import {
   logAuditEventUnchecked,
   pmPromotedEvent,
@@ -29,7 +30,7 @@ const ESCALATION_PIPELINE_LABEL = "needs-design";
 const log = createLogger({ component: "PmAgent:promote" });
 
 export interface PromoteInput {
-  linearClient: any;
+  linearClient: Pick<LinearClient, "issues" | "workflowStates" | "updateIssue" | "createComment" | "issueLabels">;
   teamIds: string[];
   slotsAvailable: number;
   checkConflict: (description: string) => Promise<ConflictCheckResult>;
@@ -117,7 +118,6 @@ export async function promoteReadyIssues(input: PromoteInput): Promise<PromoteRe
       state: { name: { eq: "Backlog" } },
     },
     first: 20,
-    orderBy: "createdAt",
   });
 
   // Sort by priority client-side (1=urgent first, then by creation date)

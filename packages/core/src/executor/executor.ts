@@ -10,7 +10,7 @@ import type {
   MergeConflictContext,
   AgentProfile,
 } from "../types.js";
-import type { Db, AnyDb } from "../db/client.js";
+import type { AnyDb } from "../db/client.js";
 import { stageRuns, agentLogs } from "../db/schema.js";
 import { getAgentProfiles } from "./profiles.js";
 import { assemblePrompt } from "./prompt/assembler.js";
@@ -71,7 +71,7 @@ export interface ExecuteStageContext {
   repoConfig: RepoConfig;
   handoff?: HandoffArtifact;
   workdir: string;
-  db: Db;
+  db: AnyDb;
   techStack?: TechStackProfile;
   devcontainerSession?: DevcontainerSession;
   /** RALPH iteration context — appended to prompt when re-running implement. */

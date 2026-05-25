@@ -8,11 +8,12 @@ import type { BudgetEvaluation } from "../types.js";
 import { createLogger } from "../../logger.js";
 import { logAuditEventUnchecked, pmSkippedCircuitBreakerEvent } from "../../audit/index.js";
 import { selectRepoConfig } from "./select-repo-config.js";
+import type { LinearClient } from "@linear/sdk";
 
 const log = createLogger({ component: "PmAgent:startTodo" });
 
 export interface StartTodoInput {
-  linearClient: any;
+  linearClient: Pick<LinearClient, "issues">;
   db: AnyDb;
   teamIds: string[];
   runner: PipelineRunner;
@@ -139,11 +140,7 @@ export async function startTodoIssues(
 
   for (const issue of toProcess) {
     // BEC-161: circuit breaker — fire FIRST, before any Linear SDK round-trips
-    // (issue.team / issue.project / issue.labels each cost an API call). For a
-    // ticket that's been doom-looping, this saves three SDK calls per tick per
-    // candidate. issue.identifier is already on the result of the initial
-    // Todo-issues query, so no extra round-trip is needed for the count.
-    // getFailureCount presence is validated eagerly above, before this loop.
+    // (issue.team / issue.project / issue.labels each cost an API call).
     if (input.maxConsecutiveFailures !== undefined) {
       const failureCount = input.getFailureCount
         ? await input.getFailureCount(issue.identifier)
