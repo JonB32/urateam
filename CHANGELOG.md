@@ -28,6 +28,15 @@ notes call out when a change affects only a single package.
 - **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
 - **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
 
+## [0.1.77] — 2026-05-25
+
+Bumps:
+- `@urateam/core`: 0.1.62 → 0.1.63
+- `@urateam/cli`: 0.1.64 → 0.1.65
+- `@urateam/dashboard`: 0.1.62 → 0.1.63
+- `create-urateam`: 0.1.65 → 0.1.66
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
 ## [0.1.76] — 2026-05-24
 
 Bumps:
