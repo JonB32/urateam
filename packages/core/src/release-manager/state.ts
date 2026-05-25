@@ -8,6 +8,14 @@ import type { CollectedState } from "./types.js";
 
 const log = createLogger({ component: "ReleaseManager:state" });
 
+const VERSION_TAG_PATTERN = /^v?\d+\.\d+\.\d+$/;
+
+const CI_STATUS = {
+  GREEN: "green" as const,
+  NOT_GREEN: "not-green" as const,
+  UNAVAILABLE: "unavailable" as const,
+} as const;
+
 export interface CollectStateInput {
   octokit: Octokit;
   db: AnyDb;
@@ -26,17 +34,23 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
   const { octokit, db, repoUrl, branch, approvalTtlMs } = input;
   const { owner, repo } = parseRepoFromUrl(repoUrl);
 
-  // 1. HEAD SHA of the configured branch
-  const branchRes = await octokit.repos.getBranch({ owner, repo, branch });
+  // 1 & 2. HEAD SHA and latest tags — independent API calls, run in parallel.
+  const [branchRes, tagsResOrNull] = await Promise.all([
+    octokit.repos.getBranch({ owner, repo, branch }),
+    octokit.repos.listTags({ owner, repo, per_page: 30 }).catch((err: unknown) => {
+      log.warn({ err, repoUrl, branch }, "listTags failed — treating as no-tag");
+      return null;
+    }),
+  ]);
   const headSha: string = (branchRes as any).data.commit.sha;
 
-  // 2. Latest tag (matching v*.*.* convention).
+  // Latest tag (matching v*.*.* convention).
   let lastTag: string | null = null;
   let lastTagSha: string | null = null;
   let lastTagAt: Date | null = null;
   try {
-    const tagsRes = await octokit.repos.listTags({ owner, repo, per_page: 30 });
-    const candidate = (tagsRes as any).data.find((t: any) => /^v?\d+\.\d+\.\d+$/.test(t.name));
+    const tagsData = tagsResOrNull ? ((tagsResOrNull as any).data ?? []) : [];
+    const candidate = tagsData.find((t: any) => VERSION_TAG_PATTERN.test(t.name));
     if (candidate) {
       lastTag = candidate.name.startsWith("v") ? candidate.name : `v${candidate.name}`;
       lastTagSha = candidate.commit.sha;
@@ -46,7 +60,7 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
       lastTagAt = dateStr ? new Date(dateStr) : null;
     }
   } catch (err) {
-    log.warn({ err, repoUrl, branch }, "listTags failed — treating as no-tag");
+    log.warn({ err, repoUrl, branch }, "tag/commit fetch failed — treating as no-tag");
   }
 
   // 3. Manual-tag detection: did any release_decisions with kind="fire" or
@@ -97,7 +111,7 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
   }
 
   // 5. CI status for headSha — aggregate check_runs.
-  let ciStatus: "green" | "not-green" | "unavailable" = "unavailable";
+  let ciStatus: "green" | "not-green" | "unavailable" = CI_STATUS.UNAVAILABLE;
   let ciGreenSince: Date | null = null;
   try {
     const checks = await octokit.checks.listForRef({ owner, repo, ref: headSha, per_page: 100 });
@@ -107,14 +121,14 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
       completed_at: string | null;
     }>;
     if (runs.length === 0) {
-      ciStatus = "unavailable";
+      ciStatus = CI_STATUS.UNAVAILABLE;
     } else {
       const allCompleted = runs.every((r) => r.status === "completed");
       const allSuccess = runs.every((r) => r.conclusion === "success");
       if (!allCompleted) {
-        ciStatus = "not-green";
+        ciStatus = CI_STATUS.NOT_GREEN;
       } else if (allSuccess) {
-        ciStatus = "green";
+        ciStatus = CI_STATUS.GREEN;
         // ciGreenSince = latest completed_at across all runs
         const completedAts = runs
           .map((r) => (r.completed_at ? new Date(r.completed_at).getTime() : null))
@@ -123,12 +137,12 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
           ciGreenSince = new Date(Math.max(...completedAts));
         }
       } else {
-        ciStatus = "not-green";
+        ciStatus = CI_STATUS.NOT_GREEN;
       }
     }
   } catch (err) {
     log.warn({ err }, "checks.listForRef failed — ciStatus unavailable");
-    ciStatus = "unavailable";
+    ciStatus = CI_STATUS.UNAVAILABLE;
   }
 
   // 6. Fresh approval lookup. "Fresh" = consumed_at IS NULL AND approved_at within approvalTtlMs.

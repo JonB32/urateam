@@ -13,7 +13,8 @@ function tmpDbPath(): string {
   return `/tmp/laf-rm-sched-${id}.sqlite`;
 }
 
-function makeMockOctokit(over: any = {}) {
+function makeMockOctokit(over: { repos?: Record<string, any>; git?: Record<string, any>; checks?: Record<string, any>; [key: string]: any } = {}) {
+  const { repos: overRepos, git: overGit, checks: overChecks, ...restOver } = over;
   return {
     repos: {
       getBranch: vi.fn(async () => ({ data: { commit: { sha: "head_sha" } } })),
@@ -24,16 +25,19 @@ function makeMockOctokit(over: any = {}) {
       })),
       listCommits: vi.fn(async () => ({ data: [] })),
       createRelease: vi.fn(async () => ({ data: { html_url: "https://github.com/org/repo/releases/tag/v1.0.1" } })),
+      ...overRepos,
     },
     git: {
       createRef: vi.fn(async () => ({ data: {} })),
+      ...overGit,
     },
     checks: {
       listForRef: vi.fn(async () => ({
         data: { check_runs: [{ status: "completed", conclusion: "success", completed_at: "2026-05-01T11:00:00Z" }] },
       })),
+      ...overChecks,
     },
-    ...over,
+    ...restOver,
   } as any;
 }
 
@@ -463,45 +467,24 @@ describe("createReleaseManagerScheduler — qaCheck integration", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Build a mock octokit suitable for sweep tests.
- * - listTags returns the already-created `v1.0.1` tag (orphaned by the initial failure).
- * - compareCommits returns 0 commits (so the main-tick path skips with mergedPRsSince).
- * - git.getRef succeeds (tag exists).
- * - createRelease is configurable per test.
+ * Build a mock octokit for fire-pending sweep tests.
+ * Overrides makeMockOctokit defaults: listTags→v1.0.1, compareCommits→empty,
+ * createRelease throws by default, git.getRef succeeds by default.
  */
 function makeFirePendingOctokit(over: {
   createRelease?: (input: any) => Promise<any>;
   getRef?: (input: any) => Promise<any>;
 } = {}) {
-  return {
+  return makeMockOctokit({
     repos: {
-      getBranch: vi.fn(async () => ({ data: { commit: { sha: "head_sha" } } })),
-      listTags: vi.fn(async () => ({
-        data: [{ name: "v1.0.1", commit: { sha: "head_sha" } }],
-      })),
-      getCommit: vi.fn(async () => ({
-        data: { commit: { committer: { date: "2026-04-01T12:00:00Z" } } },
-      })),
+      listTags: vi.fn(async () => ({ data: [{ name: "v1.0.1", commit: { sha: "head_sha" } }] })),
       compareCommits: vi.fn(async () => ({ data: { commits: [] } })),
-      listCommits: vi.fn(async () => ({ data: [] })),
-      createRelease: vi.fn(over.createRelease ?? (async () => {
-        throw new Error("createRelease failed");
-      })),
+      createRelease: vi.fn(over.createRelease ?? (async () => { throw new Error("createRelease failed"); })),
     },
     git: {
-      createRef: vi.fn(async () => ({ data: {} })),
       getRef: vi.fn(over.getRef ?? (async () => ({ data: { object: { sha: "head_sha" } } }))),
     },
-    checks: {
-      listForRef: vi.fn(async () => ({
-        data: {
-          check_runs: [
-            { status: "completed", conclusion: "success", completed_at: "2026-05-01T11:00:00Z" },
-          ],
-        },
-      })),
-    },
-  } as any;
+  });
 }
 
 describe("createReleaseManagerScheduler — BEC-139 fire-pending retry sweep", () => {
@@ -538,27 +521,11 @@ describe("createReleaseManagerScheduler — BEC-139 fire-pending retry sweep", (
 
   it("AC1: release_create_failed path writes fire-pending row, not an immediate skip", async () => {
     // Tick where createRef succeeds but createRelease fails — must write fire-pending.
-    const octokit = {
+    const octokit = makeMockOctokit({
       repos: {
-        getBranch: vi.fn(async () => ({ data: { commit: { sha: "head_sha" } } })),
-        listTags: vi.fn(async () => ({ data: [{ name: "v1.0.0", commit: { sha: "old_sha" } }] })),
-        getCommit: vi.fn(async () => ({ data: { commit: { committer: { date: "2026-04-01T12:00:00Z" } } } })),
-        compareCommits: vi.fn(async () => ({
-          data: { commits: [{ commit: { message: "fix: a" } }, { commit: { message: "fix: b" } }] },
-        })),
-        listCommits: vi.fn(async () => ({ data: [] })),
         createRelease: vi.fn(async () => { throw new Error("GitHub 500"); }),
       },
-      git: {
-        createRef: vi.fn(async () => ({ data: {} })),
-        getRef: vi.fn(async () => ({ data: { object: { sha: "head_sha" } } })),
-      },
-      checks: {
-        listForRef: vi.fn(async () => ({
-          data: { check_runs: [{ status: "completed", conclusion: "success", completed_at: "2026-05-01T11:00:00Z" }] },
-        })),
-      },
-    } as any;
+    });
 
     const cfg = ReleaseManagerConfigSchema.parse({ enabled: true, triggers: { mergedPRsSince: 1 } });
     const sched = createReleaseManagerScheduler({ config: cfg, db, octokit, repoUrl, isLicensed: () => true, slack: undefined });

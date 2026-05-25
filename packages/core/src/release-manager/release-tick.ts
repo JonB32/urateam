@@ -60,6 +60,19 @@ const MAX_AUDITED_RUN_IDS = 10_000;
 /** Maximum createRelease attempts before a fire-pending row is exhausted. */
 const MAX_FIRE_PENDING_ATTEMPTS = 3;
 
+/** Sentinel attemptCount for permanent skips (e.g. qa_dispatch_error — misconfigured workflow). */
+const PERMANENT_SKIP_ATTEMPT_COUNT = 99;
+
+/** Generate a unique ID for release decision rows. */
+function generateReleaseDecisionId(): string {
+  return `rd_${randomUUID()}`;
+}
+
+/** Stamp attemptCount on a release decision row in-place. */
+async function updateReleaseDecisionAttemptCount(db: AnyDb, rowId: string, count: number): Promise<void> {
+  await (db as any).update(releaseDecisions).set({ attemptCount: count }).where(eq(releaseDecisions.id, rowId));
+}
+
 /**
  * Retry sweep for fire-pending rows.
  *
@@ -94,12 +107,16 @@ async function sweepFirePendingRows(ctx: TickContext): Promise<void> {
   if (pending.length === 0) return;
 
   const { owner, repo } = parseRepoFromUrl(repoUrl);
+  const pendingSlackMessages: string[] = [];
 
   for (const row of pending) {
     const tag: string = row.firedTag;
     const sha: string = row.firedSha ?? "";
 
-    if (!tag) continue;
+    if (!tag || !sha) {
+      log.warn({ repoUrl, branch, rowId: row.id }, "fire-pending: row missing firedTag or firedSha — skipping");
+      continue;
+    }
 
     // Verify the tag still exists in GitHub before attempting createRelease.
     try {
@@ -132,13 +149,9 @@ async function sweepFirePendingRows(ctx: TickContext): Promise<void> {
       if (newAttemptCount >= MAX_FIRE_PENDING_ATTEMPTS) {
         // Stamp the original row so it won't be re-selected by future sweeps
         // (the lt(attemptCount, MAX) filter would otherwise keep matching it).
-        await (db as any)
-          .update(releaseDecisions)
-          .set({ attemptCount: newAttemptCount })
-          .where(eq(releaseDecisions.id, row.id));
-        const skipId = `rd_${randomUUID()}`;
+        await updateReleaseDecisionAttemptCount(db, row.id, newAttemptCount);
         await persistDecision(db, repoUrl, branch, {
-          id: skipId,
+          id: generateReleaseDecisionId(),
           decision: "skip",
           reason: "release_create_failed_after_retries",
           triggerStateJson: row.triggerStateJson,
@@ -156,10 +169,7 @@ async function sweepFirePendingRows(ctx: TickContext): Promise<void> {
           "fire-pending: release creation exhausted retries — manual cleanup required",
         );
       } else {
-        await (db as any)
-          .update(releaseDecisions)
-          .set({ attemptCount: newAttemptCount })
-          .where(eq(releaseDecisions.id, row.id));
+        await updateReleaseDecisionAttemptCount(db, row.id, newAttemptCount);
         log.warn(
           { repoUrl, branch, tag, attemptCount: newAttemptCount, err: releaseErr?.message },
           "fire-pending: createRelease retry failed — will retry next tick",
@@ -185,13 +195,17 @@ async function sweepFirePendingRows(ctx: TickContext): Promise<void> {
       releaseFiredEvent({ repoUrl, branch, tag, sha, mergedPrCount }),
     );
     log.info({ repoUrl, branch, tag, releaseUrl }, "fire-pending: retry succeeded");
-    await maybePostSlack(
-      slack,
-      config.slackChannel,
-      db,
-      mutableState.slackDedup,
+    pendingSlackMessages.push(
       `:rocket: Released *${tag}* for ${repoUrl} (${branch}) — retry succeeded. ${releaseUrl}`,
-      null,
+    );
+  }
+
+  // Post all retry-success Slack messages in parallel (each is dedup-independent).
+  if (pendingSlackMessages.length > 0) {
+    await Promise.all(
+      pendingSlackMessages.map((msg) =>
+        maybePostSlack(slack, config.slackChannel, db, mutableState.slackDedup, msg, null),
+      ),
     );
     mutableState.slackDedup.lastSkipReason = null;
   }
@@ -345,7 +359,7 @@ export async function tick(ctx: TickContext): Promise<void> {
 
   // 1. Manual-tag detection — re-baseline counters.
   if (state.manualTagDetected) {
-    const id = `rd_${randomUUID()}`;
+    const id = generateReleaseDecisionId();
     await persistDecision(db, repoUrl, branch, {
       id,
       decision: "skip",
@@ -429,7 +443,7 @@ export async function tick(ctx: TickContext): Promise<void> {
   );
 
   if (result.kind === "skip") {
-    const id = `rd_${randomUUID()}`;
+    const id = generateReleaseDecisionId();
 
     // Compute attempt count for retry handling on qa_dispatch_error path.
     let attemptCount = 0;
@@ -472,7 +486,7 @@ export async function tick(ctx: TickContext): Promise<void> {
         }
       } else if (dispatch.kind === "dispatch_422") {
         finalReason = "qa_dispatch_error";
-        attemptCount = 99; // permanent skip — workflow misconfigured, retrying won't help
+        attemptCount = PERMANENT_SKIP_ATTEMPT_COUNT; // permanent skip — workflow misconfigured, retrying won't help
       } else if (dispatch.kind === "dispatch_pending") {
         // GitHub eventual-consistency window. Don't count against retry budget; next tick
         // will re-evaluate and the run should be findable by then.
@@ -544,7 +558,7 @@ export async function tick(ctx: TickContext): Promise<void> {
   }
 
   if (result.kind === "awaiting-approval") {
-    const id = `rd_${randomUUID()}`;
+    const id = generateReleaseDecisionId();
     await persistDecision(db, repoUrl, branch, {
       id,
       decision: "awaiting-approval",
