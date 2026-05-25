@@ -665,6 +665,7 @@ export const AuditEventTypeSchema = z.enum([
    *  artifact was found). The `legacy` path is logged too so operators
    *  can audit fallback rates. */
   "pipeline.surgical_review_fix",
+  "claude.auth_expired",
   /** BEC-252 — a pipeline run interrupted by a server restart was successfully
    *  marked `retriable` and then recovered by `recoverRetriableRuns`. Both
    *  the worktree and the agent session JSONL transcript were present on disk

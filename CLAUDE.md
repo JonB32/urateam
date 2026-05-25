@@ -106,13 +106,15 @@ Each gate forces `shouldDraft = true` and emits one blocking `ReviewFinding` per
 - **GitHub PR feedback** at `/webhooks/github`: `pull_request_review`, `pull_request_review_comment`, and `issue_comment` (regular PR comments — supports `@ateam` trigger keyword) all trigger `review-feedback` pipeline runs that check out the existing branch.
 
 ### Claude Authentication
-
-Three paths (full guide: `deploy/CLAUDE_AUTH.md`):
-1. `ANTHROPIC_API_KEY` — long-lived API key, pay-per-token. Recommended for production.
-2. `CLAUDE_CODE_OAUTH_TOKEN` — programmatic OAuth token from `claude setup-token`, bills against Pro/Max. Recommended for subscription users on headless deploys.
-3. Local `claude login` session at `~/.config/claude/` — convenient for dev but **expires weekly**.
-
-Precedence: `CLAUDE_CODE_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` → local session. `preflightClaudeAuth` (`packages/cli/src/lib/preflight-claude-auth.ts`) gates boot on session validity; no-op when either env var is set. BEC-207 tracks first-class executor support for `CLAUDE_CODE_OAUTH_TOKEN`.
+- Three supported paths (full guide in `deploy/CLAUDE_AUTH.md`):
+  1. `CLAUDE_CODE_OAUTH_TOKEN` — long-lived programmatic OAuth token from `claude setup-token`. Bills against Pro/Max subscription. **Recommended for subscription users on headless deploys.**
+  2. `ANTHROPIC_API_KEY` — long-lived API key, pay-per-token. Recommended for production with API billing.
+  3. Local `claude login` session — mounted credentials at `~/.config/claude/`. Convenient for local dev but **expires weekly**; not for production.
+- Precedence: `CLAUDE_CODE_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` → local session.
+- `resolveClaudeAuth()` (`packages/core/src/executor/auth-check.ts`) returns the active auth method; executor calls this before every Agent SDK invocation.
+- `preflightClaudeAuth` (`packages/cli/src/lib/preflight-claude-auth.ts`) gates boot on session validity. No-op (returns immediately) when `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` is set — those have no session-lifetime semantics. Only runs `claude auth status` subprocess when neither env var is present.
+- `isClaudeAuthValid()` — same env-var short-circuit: returns `true` immediately when either env var is set; only invokes the `claude auth status` subprocess for the local-session path.
+- **AuthMonitor** runs every 6h within PM tick. When neither env var is set, validates the mounted `claude` session and sends a Slack alert to `SLACK_ERROR_ALERTS` + logs `claude.auth_expired` audit event if expired. No-op when env-var auth is configured.
 
 ### Agent Execution
 

@@ -29,7 +29,7 @@ import { sanitize } from "../executor/prompt/sanitizer.js";
 import { resolveWorkflowStates, createLazyLinearClient } from "./linear-helpers.js";
 import { sql, inArray } from "drizzle-orm";
 import { createLogger } from "../logger.js";
-import { logAuditEventUnchecked, budgetRefusedEvent, pruneAuditLog } from "../audit/index.js";
+import { logAuditEventUnchecked, budgetRefusedEvent, pruneAuditLog, claudeAuthExpiredEvent } from "../audit/index.js";
 import { pruneExpiredSessions } from "../auth/index.js";
 import { recomputeCostRollups } from "../cost/index.js";
 import { createAuthMonitor, type AuthMonitor } from "../executor/auth-monitor.js";

@@ -264,7 +264,10 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       );
     }
 
-    // Import Agent SDK dynamically to allow mocking in tests
+    // Import Agent SDK dynamically to allow mocking in tests.
+    // The SDK reads CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY from the
+    // process environment — no explicit passing needed when auth.method is
+    // "oauth-token" or "api-key".
     log.info({ workdir }, "importing Agent SDK");
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     log.info({ workdir }, "starting agent query");
