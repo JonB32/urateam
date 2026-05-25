@@ -184,9 +184,13 @@ export class TunnelManager extends EventEmitter {
         return;
       }
 
+      // Hoisted so onError can cancel it before the promise is already settled.
+      let urlTimer: ReturnType<typeof setTimeout> | undefined;
+
       // Synchronous ENOENT surfaces as an "error" event on the child, not as
       // a throw — cover both paths.
       const onError = (err: NodeJS.ErrnoException) => {
+        clearTimeout(urlTimer);
         if (err.code === "ENOENT") {
           reject(new CloudflaredMissingError());
         } else {
@@ -204,7 +208,7 @@ export class TunnelManager extends EventEmitter {
         return;
       }
 
-      const urlTimer = setTimeout(() => {
+      urlTimer = setTimeout(() => {
         reject(
           new Error(
             `TunnelManager: did not see a *.trycloudflare.com URL within ${this.urlDetectTimeoutMs}ms`,
