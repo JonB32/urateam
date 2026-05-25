@@ -10,7 +10,7 @@ import type {
   MergeConflictContext,
   AgentProfile,
 } from "../types.js";
-import type { Db, AnyDb } from "../db/client.js";
+import type { AnyDb } from "../db/client.js";
 import { stageRuns, agentLogs } from "../db/schema.js";
 import { getAgentProfiles } from "./profiles.js";
 import { assemblePrompt } from "./prompt/assembler.js";
@@ -34,13 +34,16 @@ import { persistDecisionArtifact } from "../db/decisions-store.js";
  * firstMessageTimeoutMs timer inside consumeAgentStream somehow fails to fire.
  * Default: 60 min for implement (longest legitimate stage), 30 min for others.
  */
-const WALL_CLOCK_STAGE_TIMEOUT_MS: Partial<Record<string, number>> = {
+const WALL_CLOCK_STAGE_TIMEOUT_MS: Partial<Record<StageType, number>> = {
   implement: 60 * 60_000, // 60 min — longest legitimate stage
 };
 const DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS = 30 * 60_000; // 30 min for all others
 
 /** First-message timeout passed to consumeAgentStream (BEC-183). */
 const FIRST_MESSAGE_TIMEOUT_MS = 5 * 60_000; // 5 min
+
+/** Max bytes stored per log entry in agent_logs (tool messages + error messages). */
+const LOG_CONTENT_MAX_BYTES = 2048;
 
 /**
  * BEC-182: review-feedback runs are bounded — N comments, push, done.
@@ -68,7 +71,7 @@ export interface ExecuteStageContext {
   repoConfig: RepoConfig;
   handoff?: HandoffArtifact;
   workdir: string;
-  db: Db;
+  db: AnyDb;
   techStack?: TechStackProfile;
   devcontainerSession?: DevcontainerSession;
   /** RALPH iteration context — appended to prompt when re-running implement. */
@@ -222,6 +225,22 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
   let cacheCreationInputTokens = 0;
   let cacheReadInputTokens = 0;
 
+  // BEC-249: wall-clock timer started BEFORE any pre-flight await so it
+  // covers resolveSessionOpts (which calls countLines via createReadStream
+  // and can hang on an unresponsive Docker volume). Declared outside try so
+  // the finally block can always cancel it regardless of which exit path runs.
+  const stageTimeoutMs = WALL_CLOCK_STAGE_TIMEOUT_MS[stage] ?? DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS;
+  let stageTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  const stageTimeoutPromise = new Promise<never>((_, reject) => {
+    stageTimeoutTimer = setTimeout(() => {
+      reject(new StagePreStreamStalledError(stageTimeoutMs));
+    }, stageTimeoutMs);
+  });
+  // Suppress Node.js PromiseRejectionHandledWarning: rejection is always consumed
+  // by the Promise.race calls below; no-op handler marks it "handled" for the
+  // unhandledRejection machinery without affecting race or error semantics.
+  stageTimeoutPromise.catch(() => {});
+
   // BEC-251: diagnostic state captured for error enrichment in the catch block.
   // Declared outside try so the catch block can read whatever was set before the throw.
   const stageStartMs = Date.now();
@@ -245,7 +264,10 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       );
     }
 
-    // Import Agent SDK dynamically to allow mocking in tests
+    // Import Agent SDK dynamically to allow mocking in tests.
+    // The SDK reads CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY from the
+    // process environment — no explicit passing needed when auth.method is
+    // "oauth-token" or "api-key".
     log.info({ workdir }, "importing Agent SDK");
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     log.info({ workdir }, "starting agent query");
@@ -268,17 +290,22 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
     // BEC-231 — session-resolver derives the shape from on-disk state, not
     // from `isFirstResumableStage` (which flipped before the SDK wrote
     // anything; first-stage failures left the session lost forever).
+    // BEC-249 — raced against stageTimeoutPromise so a hung countLines call
+    // (unresponsive Docker volume) is cut by the wall-clock guard.
     const resolvedModel = context.stageModels?.[stage] ?? effectiveProfile.model;
     const agentSessionId = context.agentSessionId ?? null;
-    const sessionOpts = await resolveSessionOpts({
-      stage,
-      model: resolvedModel,
-      agentSessionId,
-      workdir,
-      runId,
-      issueId,
-      db,
-    });
+    const sessionOpts = await Promise.race([
+      resolveSessionOpts({
+        stage,
+        model: resolvedModel,
+        agentSessionId,
+        workdir,
+        runId,
+        issueId,
+        db,
+      }),
+      stageTimeoutPromise,
+    ]);
 
     // BEC-251: determine session type for error enrichment.
     if ("resume" in sessionOpts) {
@@ -369,14 +396,8 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
     // BEC-183: wall-clock stage timeout — second defensive layer independent
     // of the in-stream watchdog. Fires as StagePreStreamStalledError so the
     // catch block below sets status=failed with a clear message.
-    const stageTimeoutMs = WALL_CLOCK_STAGE_TIMEOUT_MS[stage] ?? DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS;
-    let stageTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
-    const stageTimeoutPromise = new Promise<never>((_, reject) => {
-      stageTimeoutTimer = setTimeout(() => {
-        reject(new StagePreStreamStalledError(stageTimeoutMs));
-      }, stageTimeoutMs);
-    });
-
+    // BEC-249: stageTimeoutPromise is created before the try block; same
+    // instance reused here so the wall-clock covers pre-flight + stream.
     const result = await Promise.race([
       consumeAgentStream(messagesWithCapture, {
         onProgress: (stats) => {
@@ -396,7 +417,7 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
             id: nanoid(),
             stageRunId: stageRunId,
             type: msg.type!,
-            content: JSON.stringify(msg).slice(0, 2048),
+            content: JSON.stringify(msg).slice(0, LOG_CONTENT_MAX_BYTES),
           });
           if (logBatch.length >= BATCH_SIZE) {
             flushLogBatch().catch((err) => log.warn({ err }, "mid-stream log batch flush failed"));
@@ -555,5 +576,9 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       errorMessage: enrichedMessage,
       stageRunId,
     };
+  } finally {
+    // Always cancel the wall-clock timer regardless of exit path (BEC-249).
+    // Clearing an already-fired timer is a no-op, so this is always safe.
+    if (stageTimeoutTimer) clearTimeout(stageTimeoutTimer);
   }
 }

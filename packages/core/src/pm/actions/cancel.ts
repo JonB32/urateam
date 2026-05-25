@@ -1,14 +1,13 @@
 import type { PmSlackNotifier } from "../slack.js";
 import type { AnyDb } from "../../db/client.js";
-import { batchFetchPendingApprovals } from "./approval-helpers.js";
-import { pmApprovals } from "../../db/schema.js";
+import { batchFetchPendingApprovals, insertApprovalRequest } from "./approval-helpers.js";
 import { createLogger } from "../../logger.js";
-import { nanoid } from "nanoid";
+import type { LinearClient } from "@linear/sdk";
 
 const log = createLogger({ component: "PmAgent:cancel" });
 
 export interface CancelInput {
-  linearClient: any;
+  linearClient: Pick<LinearClient, "issues">;
   teamIds: string[];
   slackNotifier: PmSlackNotifier;
   db: AnyDb;
@@ -63,20 +62,8 @@ export async function cancelAbandonedIssues(input: CancelInput): Promise<string[
         const reason = `In ${stateName} for ${ageDays} days, priority 4, no comments in 14 days`;
         const issueUrl = issue.url ?? `https://linear.app/issue/${issue.identifier}`;
 
-        const ts = await slackNotifier.postApprovalRequest(issue.identifier, "cancel", reason, issueUrl);
-        if (!ts) {
-          log.debug({ issueId: issue.identifier }, "Slack post failed, skipping");
-          continue;
-        }
-
-        await db.insert(pmApprovals).values({
-          id: nanoid(),
-          issueId: issue.identifier,
-          action: "cancel",
-          reason,
-          slackMessageTs: ts,
-          status: "pending",
-        });
+        const ts = await insertApprovalRequest(db, slackNotifier, issue.identifier, "cancel", reason, issueUrl);
+        if (!ts) continue;
 
         requested.push(issue.identifier);
         log.info({ issueId: issue.identifier, ageDays, stateName }, "cancel approval requested");

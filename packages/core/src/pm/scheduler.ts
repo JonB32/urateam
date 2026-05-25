@@ -15,6 +15,7 @@ import { startTodoIssues, type StartTodoInput, type StartTodoResult } from "./ac
 import { getCircuitBreakerProbeConfig } from "./actions/circuit-breaker-config.js";
 import { selectProbeCandidates } from "./actions/select-probe-candidates.js";
 import { sweepRecoveredCircuitBreakers } from "./actions/sweep-recovered-circuit-breakers.js";
+import { sweepOrphanStageRuns } from "./actions/sweep-orphan-stage-runs.js";
 import { getActiveFileMaps, predictConflict, type ActiveRun } from "./conflict.js";
 import { fetchCircuitBrokenIssues, ACTIVE_STATUSES } from "./actions/db-queries.js";
 import { PmSlackNotifier } from "./slack.js";
@@ -28,9 +29,11 @@ import { sanitize } from "../executor/prompt/sanitizer.js";
 import { resolveWorkflowStates, createLazyLinearClient } from "./linear-helpers.js";
 import { sql, inArray } from "drizzle-orm";
 import { createLogger } from "../logger.js";
-import { logAuditEventUnchecked, budgetRefusedEvent, pruneAuditLog } from "../audit/index.js";
+import { logAuditEventUnchecked, budgetRefusedEvent, pruneAuditLog, claudeAuthExpiredEvent } from "../audit/index.js";
 import { pruneExpiredSessions } from "../auth/index.js";
 import { recomputeCostRollups } from "../cost/index.js";
+import type { PipelineConfig, RepoConfig, SanitizedIssue } from "../types.js";
+import type { LinearIssue } from "../pipeline/runner.js";
 import { createAuthMonitor, type AuthMonitor } from "../executor/auth-monitor.js";
 
 const log = createLogger({ component: "PmAgent:scheduler" });
@@ -69,10 +72,10 @@ export interface PmSchedulerDeps {
   agentRunDir?: string;
   runner?: {
     resume: (issueId: string) => Promise<void>;
-    start: (issue: any, pipelineKey: string, pipelineConfig: any, repoConfig: any, sanitizedIssue: any) => Promise<void>;
+    start: (issue: LinearIssue, pipelineKey: string, pipelineConfig: PipelineConfig, repoConfig: RepoConfig, sanitizedIssue: SanitizedIssue, linearTeamId?: string | null) => Promise<void>;
   };
-  pipelineConfigs?: Record<string, any>;
-  repoConfigs?: Record<string, any>;
+  pipelineConfigs?: Record<string, PipelineConfig>;
+  repoConfigs?: Record<string, RepoConfig>;
   actions?: Partial<PmSchedulerActions>;
   /** Injectable auth monitor — defaults to the real createAuthMonitor. Used by tests to avoid slow real API calls. */
   authMonitor?: AuthMonitor;
@@ -300,7 +303,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
         let stateMap = new Map<string, string>();
         if (!actions) {
           try {
-            stateMap = await resolveWorkflowStates(await getLinearClient(), config.teamIds);
+            stateMap = await resolveWorkflowStates((await getLinearClient())!, config.teamIds);
           } catch (err) {
             captureTickError(tick, "resolveWorkflowStates", err, "resolveWorkflowStates failed");
           }
@@ -315,7 +318,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
             const stuckResult = actions?.recoverStuckInProgressIssues
               ? await actions.recoverStuckInProgressIssues({} as any)
               : await recoverStuckInProgressIssues({
-                  linearClient: await getLinearClient(),
+                  linearClient: (await getLinearClient())!,
                   db,
                   teamIds: config.teamIds,
                   targetState: config.stuckIssueTargetState ?? "Backlog",
@@ -334,6 +337,18 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
             }
           } catch (err) {
             captureTickError(tick, "recoverStuck", err, "stuck issue recovery sweep failed");
+          }
+        }
+
+        // BEC-250 — orphan stage_runs sweep: cancel stage_runs whose parent is
+        // terminal and delete any whose parent is missing. Runs every tick;
+        // idempotent and fail-open. Guarded by !actions so tests that inject
+        // mock actions with db:{} don't hit a real DB call.
+        if (!actions) {
+          try {
+            await sweepOrphanStageRuns(db);
+          } catch (err) {
+            log.warn({ err }, "orphan stage_runs sweep failed");
           }
         }
 
@@ -366,9 +381,12 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           // `completed` run landed). Recovery deletes the state row and
           // strips the Tier-5-added `needs-design` label.
           try {
-            await sweepRecoveredCircuitBreakers(db, await getLinearClient(), {
-              maxConsecutiveFailures: breakerThreshold,
-            });
+            const sweepClient = await getLinearClient();
+            if (sweepClient) {
+              await sweepRecoveredCircuitBreakers(db, sweepClient, {
+                maxConsecutiveFailures: breakerThreshold,
+              });
+            }
           } catch (err) {
             captureTickError(tick, "sweepRecovered", err, "sweepRecoveredCircuitBreakers failed");
           }
@@ -381,7 +399,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
               const todoResults = actions?.startTodoIssues
                 ? await actions.startTodoIssues({} as any)
                 : await startTodoIssues({
-                    linearClient: await getLinearClient(),
+                    linearClient: (await getLinearClient())!,
                     db: deps.db as AnyDb,
                     teamIds: config.teamIds,
                     runner: deps.runner as any,
@@ -412,7 +430,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           tick.triaged = actions
             ? await actions.triageNewIssues({} as any)
             : await triageNewIssues({
-                linearClient: await getLinearClient(),
+                linearClient: (await getLinearClient())!,
                 teamIds: config.teamIds,
                 callClaude: callClaudeFn,
                 sanitize,
@@ -428,7 +446,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
           const approvalResult = actions
             ? await actions.resolveApprovals({} as any)
             : await resolveApprovals({
-                linearClient: await getLinearClient(),
+                linearClient: (await getLinearClient())!,
                 slackNotifier: getSlackNotifier(),
                 db,
                 teamIds: config.teamIds,
@@ -493,7 +511,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
                     ({ overlapRisk: "none" as const, likelyFiles: [] as string[], reasoning: "conflict detection requires license" });
 
               tick.promoted = await promoteReadyIssues({
-                linearClient: await getLinearClient(),
+                linearClient: (await getLinearClient())!,
                 teamIds: config.teamIds,
                 slotsAvailable,
                 checkConflict,
@@ -516,7 +534,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
         }
 
         if (!isPmPaused() && isFeatureLicensed("approval-workflows")) {
-          const linearClient = await getLinearClient();
+          const linearClient = (await getLinearClient())!;
           const slackNotifier = getSlackNotifier();
 
           const [depResult, cancelResult] = await Promise.allSettled([

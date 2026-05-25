@@ -1,5 +1,6 @@
 import type { AuditEvent } from "../types.js";
 import { base } from "./internal.js";
+import { getAuthExpiredMessages } from "./auth-error-messages.js";
 
 export function policyPathBlockedEvent(args: {
   runId: string;
@@ -255,14 +256,46 @@ export function reviewModelLowOutputRatioEvent(args: {
  */
 export function claudeAuthExpiredEvent(args: {
   detectedAt: Date;
+  authMethod: "oauth-token" | "mounted-session";
 }): AuditEvent {
+  const { hint } = getAuthExpiredMessages(args.authMethod);
   return base({
     eventType: "claude.auth_expired",
     actor: "system",
     actorType: "system",
     payload: {
       detectedAt: args.detectedAt.toISOString(),
-      hint: "Run `claude login` in the container, or switch to CLAUDE_CODE_OAUTH_TOKEN (see deploy/CLAUDE_AUTH.md)",
+      authMethod: args.authMethod,
+      hint,
+    },
+  });
+}
+
+/**
+ * BEC-252 — emitted when a stuck `running` pipeline_run was successfully
+ * recovered after a container restart (worktree + transcript both found
+ * on disk, last stage is idempotent-safe). The run is marked `retriable`
+ * and re-queued by the PM Agent's normal recovery sweep.
+ */
+export function restartInterruptRecoveredEvent(args: {
+  runId: string;
+  issueId: string;
+  stage: string;
+  worktreeExisted: boolean;
+  transcriptExisted: boolean;
+  restartGapMs: number;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.restart_interrupt_recovered",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      stage: args.stage,
+      worktreeExisted: args.worktreeExisted,
+      transcriptExisted: args.transcriptExisted,
+      restartGapMs: args.restartGapMs,
     },
   });
 }

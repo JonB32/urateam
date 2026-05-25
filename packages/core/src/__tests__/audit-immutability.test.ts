@@ -69,6 +69,9 @@ describe("audit_events immutability", () => {
       "packages/core/src/pm/actions/start-todo.ts",
       "packages/core/src/pm/actions/resolve-approvals.ts",
       "packages/core/src/pm/actions/recover-stuck.ts",
+      // BEC-252: restart-interrupt recovery is a base-tier operational signal —
+      // operators need to see it regardless of Enterprise audit-log dashboard.
+      "packages/core/src/pm/actions/recover.ts",
       "packages/core/src/pipeline/review-providers-runner.ts",
       "packages/core/src/release-manager/release-tick.ts",
       "packages/core/src/release-manager/release-helpers.ts",
@@ -97,6 +100,7 @@ describe("audit_events immutability", () => {
       // still trip; the allow-list entry is the right surface for "this
       // file mentions the name but does not invoke it" exceptions.
       "packages/core/src/security/review-checklist.ts",
+      "packages/core/src/__tests__/auth-monitor.test.ts",
     ];
 
     let matches: string[] = [];

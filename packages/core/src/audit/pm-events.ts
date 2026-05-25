@@ -337,3 +337,20 @@ export function pmTriageQualityScoreEvent(args: {
     },
   });
 }
+
+/** BEC-253 — `ura tick` CLI command invoked. */
+export function pmManualTickInvokedEvent(args: {
+  actor: string;
+  durationMs: number;
+  errors: string[];
+}): AuditEvent {
+  return base({
+    eventType: "pm.manual_tick_invoked",
+    actor: args.actor,
+    actorType: "cli",
+    payload: {
+      durationMs: args.durationMs,
+      errors: args.errors,
+    },
+  });
+}
