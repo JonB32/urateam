@@ -19,7 +19,10 @@ function fail(err: unknown): never {
 const backfillSubcommand = new Command("backfill")
   .description(
     "Backfill cost rollups for a given number of days (default: 365). " +
-    "Requires the cost-roi enterprise license.",
+    "Requires the cost-roi enterprise license. " +
+    "Dollar costs are computed with built-in default model pricing (Sonnet $3/$15 per M tokens); " +
+    "operators with custom modelPricing should instead raise COST_ROLLUP_MAX_BACKFILL_DAYS " +
+    "and let the PM tick recompute rollups with the full server config.",
   )
   .option("--days <n>", "number of UTC days to backfill ending yesterday", "365")
   .action(async (opts: { days: string }) => {

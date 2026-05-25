@@ -49,6 +49,25 @@ function addDays(dateStr: string, days: number): string {
   return utcDateStr(d);
 }
 
+/** Returns yesterday's date as a YYYY-MM-DD UTC string. */
+function getYesterdayUtcStr(): string {
+  const now = new Date();
+  return utcDateStr(new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1,
+  )));
+}
+
+/** Build an inclusive date range [firstDate, endDate] as YYYY-MM-DD strings. */
+function generateDateRange(firstDate: string, endDate: string): string[] {
+  const dates: string[] = [];
+  let d = firstDate;
+  while (d <= endDate) {
+    dates.push(d);
+    d = addDays(d, 1);
+  }
+  return dates;
+}
+
 /**
  * Roll up cost data for a single UTC day into cost_rollups_daily.
  * Idempotent — uses onConflictDoUpdate.
@@ -134,40 +153,42 @@ async function rollOneDay(
     if (run.status === "completed" && run.runType !== "review-feedback") b.prsMerged += 1;
   }
 
-  let rowsWritten = 0;
-  for (const b of buckets.values()) {
-    await db.insert(costRollupsDaily).values({
-      id: `cr_${randomUUID()}`,
-      date: dateStr,
-      pipelineKey: b.pipelineKey,
-      linearTeamId: b.linearTeamId,
-      repoUrl: b.repoUrl,
-      runs: b.runs,
-      prsMerged: b.prsMerged,
-      inputTokens: b.inputTokens,
-      outputTokens: b.outputTokens,
-      dollars: b.dollars,
-      timeSavedHours: b.timeSavedHours,
-      computedAt: new Date(),
-    }).onConflictDoUpdate({
-      target: [
-        costRollupsDaily.date,
-        costRollupsDaily.pipelineKey,
-        costRollupsDaily.linearTeamId,
-        costRollupsDaily.repoUrl,
-      ],
-      set: {
+  const now = new Date();
+  await Promise.all(
+    Array.from(buckets.values()).map((b) =>
+      db.insert(costRollupsDaily).values({
+        id: `cr_${randomUUID()}`,
+        date: dateStr,
+        pipelineKey: b.pipelineKey,
+        linearTeamId: b.linearTeamId,
+        repoUrl: b.repoUrl,
         runs: b.runs,
         prsMerged: b.prsMerged,
         inputTokens: b.inputTokens,
         outputTokens: b.outputTokens,
         dollars: b.dollars,
         timeSavedHours: b.timeSavedHours,
-        computedAt: new Date(),
-      },
-    });
-    rowsWritten += 1;
-  }
+        computedAt: now,
+      }).onConflictDoUpdate({
+        target: [
+          costRollupsDaily.date,
+          costRollupsDaily.pipelineKey,
+          costRollupsDaily.linearTeamId,
+          costRollupsDaily.repoUrl,
+        ],
+        set: {
+          runs: b.runs,
+          prsMerged: b.prsMerged,
+          inputTokens: b.inputTokens,
+          outputTokens: b.outputTokens,
+          dollars: b.dollars,
+          timeSavedHours: b.timeSavedHours,
+          computedAt: now,
+        },
+      })
+    ),
+  );
+  const rowsWritten = buckets.size;
 
   log.info({ date: dateStr, rowsWritten }, "cost rollup complete");
   return rowsWritten;
@@ -184,13 +205,8 @@ export async function recomputeCostRollups(
     );
     return { rowsWritten: 0 };
   }
-  // Determine yesterday (UTC). Rollups only cover completed UTC days.
-  const now = new Date();
-  const yesterdayUtc = new Date(Date.UTC(
-    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1,
-  ));
-  const yesterdayStr = utcDateStr(yesterdayUtc);
-
+  // Rollups only cover completed UTC days.
+  const yesterdayStr = getYesterdayUtcStr();
   const maxBackfillDays = resolveMaxBackfillDays();
 
   // Find the latest date already in the rollup table.
@@ -203,12 +219,7 @@ export async function recomputeCostRollups(
   if (latestDate === null) {
     // First run: backfill up to maxBackfillDays before yesterday, inclusive.
     const firstDate = addDays(yesterdayStr, -(maxBackfillDays - 1));
-    datesToRoll = [];
-    let d = firstDate;
-    while (d <= yesterdayStr) {
-      datesToRoll.push(d);
-      d = addDays(d, 1);
-    }
+    datesToRoll = generateDateRange(firstDate, yesterdayStr);
     log.info({ firstDate, yesterdayStr, days: datesToRoll.length }, "cost rollup: first run, backfilling");
   } else if (latestDate < yesterdayStr) {
     // Some entries exist but there's a gap. Fill from latest+1 through yesterday.
@@ -216,12 +227,7 @@ export async function recomputeCostRollups(
     const rawFirstDate = addDays(latestDate, 1);
     const cappedFirstDate = addDays(yesterdayStr, -(maxBackfillDays - 1));
     const firstDate = rawFirstDate > cappedFirstDate ? rawFirstDate : cappedFirstDate;
-    datesToRoll = [];
-    let d = firstDate;
-    while (d <= yesterdayStr) {
-      datesToRoll.push(d);
-      d = addDays(d, 1);
-    }
+    datesToRoll = generateDateRange(firstDate, yesterdayStr);
     log.info({ latestDate, firstDate, yesterdayStr, days: datesToRoll.length }, "cost rollup: backfilling missing days");
   } else if (latestDate === yesterdayStr) {
     // Already up to date — re-roll yesterday for idempotency (tick runs multiple times/day).
@@ -262,19 +268,9 @@ export async function backfillCostRollups(
   }
   const clampedDays = Math.ceil(days);
 
-  const now = new Date();
-  const yesterdayUtc = new Date(Date.UTC(
-    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1,
-  ));
-  const yesterdayStr = utcDateStr(yesterdayUtc);
+  const yesterdayStr = getYesterdayUtcStr();
   const firstDate = addDays(yesterdayStr, -(clampedDays - 1));
-
-  const datesToRoll: string[] = [];
-  let d = firstDate;
-  while (d <= yesterdayStr) {
-    datesToRoll.push(d);
-    d = addDays(d, 1);
-  }
+  const datesToRoll = generateDateRange(firstDate, yesterdayStr);
 
   log.info({ firstDate, yesterdayStr, days: datesToRoll.length }, "cost rollup: explicit backfill");
 
