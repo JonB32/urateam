@@ -1,22 +1,28 @@
 import { z } from "zod";
 import { ReviewFindingSchema, type ReviewFinding, type HandoffArtifact } from "../../types.js";
+import { PROJECT_CONVENTION_CHECKLIST } from "../../security/review-checklist.js";
 import type { ChatMessage } from "./openrouter-client.js";
 
-const SYSTEM_PROMPT = `You are a careful code reviewer. Review the diff and changed files for issues in three dimensions:
+const SYSTEM_PROMPT = `You are a careful code reviewer. Review the diff and changed files for issues in three dimensions plus the urateam project conventions enumerated below.
+
+Primary dimensions:
 - reuse: duplication of existing code
 - quality: bugs, error-handling, type misuse, edge cases
 - efficiency: needless work, N+1 queries, hot-loop allocations
+
+${PROJECT_CONVENTION_CHECKLIST}
 
 Output exactly one JSON object and nothing else, matching this shape:
 { "findings": [
     { "severity": "blocking" | "warning" | "suggestion",
       "file": "path/to/file.ext",
       "line": <integer>,
-      "category": "reuse" | "quality" | "efficiency",
+      "category": "reuse" | "quality" | "efficiency" | "scratch-files" | "db-ddl-drift" | "audit-bypass-undocumented" | "credential-in-interface" | "spec-vs-impl" | "convention-execfile" | "convention-console" | "convention-throw" | "convention-as-any",
       "description": "<concise>",
       "fix": "<concrete suggestion>" }
   ]
 }
+Use the Tier 2 project-convention category strings VERBATIM for convention violations — operators see one consistent vocabulary across both the main review agent and the OpenRouter fanout.
 Return an empty findings array if you find nothing.`;
 
 export interface BuildPromptInput {

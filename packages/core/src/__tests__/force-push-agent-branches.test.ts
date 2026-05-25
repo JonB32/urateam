@@ -394,29 +394,54 @@ describe("Force-with-lease push for agent branches (BEC-88)", () => {
     expect(branchArg).toContain(issueId);
   });
 
-  it("rebase conflicts still result in pushBranchForce (existing behavior preserved)", async () => {
-    // Simulate a rebase conflict — the conflict path always uses force-with-lease
+  it("rebase conflicts: abortRebase is called before the conflict-resolution implement pass (BEC-233)", async () => {
+    // Simulate a rebase conflict on the first rebaseBranch call
     const gitModule = await import("../repo/git.js");
     const rebaseMock = vi.spyOn(gitModule, "rebaseBranch").mockResolvedValueOnce({
       success: false,
       hasConflicts: true,
     });
 
-    // The conflict resolution implement stage will also return "completed"
-    // so the abortRebase path is exercised
-    const app = buildApp(makePipelineConfig());
-    const issueId = `FP-${++issueCounter}`;
-    const body = buildPayload(issueId);
+    // Record the global call order across abortRebase and executeStage
+    const callOrder: string[] = [];
 
-    await postWebhook(app, body);
-    await waitForPipeline(db, issueId);
+    const abortRebaseMock = vi.spyOn(gitModule, "abortRebase").mockImplementation(async () => {
+      callOrder.push("abortRebase");
+    });
 
-    // In the conflict case, after conflict resolution (which returns "completed"),
-    // the rebase should succeed on the second try (mocked to success by default),
-    // so pushBranchForce is called for the agent branch.
-    // Either way, pushBranch should not be called since it's an agent branch.
-    expect(mockPushBranch).not.toHaveBeenCalled();
+    const executorModule = await import("../executor/executor.js");
+    const executeStageOriginalImpl = vi.mocked(executorModule.executeStage).getMockImplementation();
+    vi.mocked(executorModule.executeStage).mockImplementation(async (opts) => {
+      callOrder.push(`executeStage:${opts.stage}`);
+      // executeStageOriginalImpl is always set by the vi.mock at the top of this file
+      return executeStageOriginalImpl!(opts);
+    });
 
-    rebaseMock.mockRestore();
+    try {
+      const app = buildApp(makePipelineConfig());
+      const issueId = `FP-${++issueCounter}`;
+      const body = buildPayload(issueId);
+
+      await postWebhook(app, body);
+      await waitForPipeline(db, issueId);
+
+      // In the conflict path: abortRebase must be called before the
+      // conflict-resolution implement executeStage (BEC-233 fix).
+      // callOrder looks like: [..., "abortRebase", ..., "executeStage:implement", ...]
+      // where the implement after abortRebase is the conflict-resolution pass.
+      const abortIdx = callOrder.lastIndexOf("abortRebase");
+      const lastImplementIdx = callOrder.lastIndexOf("executeStage:implement");
+      expect(abortIdx).toBeGreaterThanOrEqual(0);
+      expect(lastImplementIdx).toBeGreaterThan(abortIdx);
+
+      // Standard push must not be used (agent branch → always force-with-lease)
+      expect(mockPushBranch).not.toHaveBeenCalled();
+    } finally {
+      rebaseMock.mockRestore();
+      abortRebaseMock.mockRestore();
+      if (executeStageOriginalImpl) {
+        vi.mocked(executorModule.executeStage).mockImplementation(executeStageOriginalImpl);
+      }
+    }
   });
 });

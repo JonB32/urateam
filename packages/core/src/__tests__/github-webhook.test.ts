@@ -65,6 +65,34 @@ function makeMockDb(run: typeof mockRun | null = mockRun) {
   };
 }
 
+/** Mock DB that supports both select and update (needed for pr-merged handler). */
+function makeMockDbWithUpdate(run: typeof mockRun | null = mockRun) {
+  return {
+    select: vi.fn().mockReturnValue({
+      from: vi.fn().mockReturnValue({
+        where: vi.fn().mockReturnValue({
+          limit: vi.fn().mockResolvedValue(run ? [run] : []),
+        }),
+      }),
+    }),
+    update: vi.fn().mockReturnValue({
+      set: vi.fn().mockReturnValue({
+        where: vi.fn().mockResolvedValue(undefined),
+      }),
+    }),
+  };
+}
+
+function makeMockNotifier() {
+  return {
+    onPipelineStart: vi.fn().mockResolvedValue(undefined),
+    onStageComplete: vi.fn().mockResolvedValue(undefined),
+    onPipelineComplete: vi.fn().mockResolvedValue(undefined),
+    onPipelineFailed: vi.fn().mockResolvedValue(undefined),
+    onPRMerged: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
 function makeMockRunner() {
   return {
     startFeedback: vi.fn().mockResolvedValue(undefined),
@@ -493,5 +521,125 @@ describe("createGitHubWebhookHandler", () => {
 
     const callArgs = runner.startFeedback.mock.calls[0][0];
     expect(callArgs.feedbackComments[0].htmlUrl).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pull_request.closed (BEC-186)
+// ---------------------------------------------------------------------------
+
+function makePRClosedPayload(merged: boolean, overrides: Record<string, any> = {}) {
+  return {
+    action: "closed",
+    pull_request: {
+      number: 7,
+      html_url: "https://github.com/org/repo/pull/7",
+      merged,
+      head: { ref: "agent/LIN-42-add-user-search" },
+    },
+    repository: {
+      owner: { login: "org" },
+      name: "repo",
+    },
+    ...overrides,
+  };
+}
+
+describe("pull_request.closed — BEC-186", () => {
+  let runner: ReturnType<typeof makeMockRunner>;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    runner = makeMockRunner();
+  });
+
+  it("transitions Linear to Done when PR is merged and pipeline run exists", async () => {
+    const mockDb = makeMockDbWithUpdate();
+    const notifier = makeMockNotifier();
+    const app = createGitHubWebhookHandler(
+      buildConfig({ runner: runner as any, db: mockDb as any, notifier: notifier as any }),
+    );
+
+    const res = await postWebhook(app, makePRClosedPayload(true), "pull_request");
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.ok).toBe(true);
+    expect(json.action).toBe("pr-merged");
+
+    // DB should be updated to mark auto_merged
+    expect(mockDb.update).toHaveBeenCalled();
+
+    // notifier.onPRMerged should be called (fire-and-forget, give microtasks a tick)
+    await Promise.resolve();
+    expect(notifier.onPRMerged).toHaveBeenCalledTimes(1);
+    const runArg = notifier.onPRMerged.mock.calls[0][0];
+    expect(runArg.issueId).toBe("LIN-42");
+    expect(runArg.autoMerged).toBe(true);
+  });
+
+  it("skips and returns success when PR closed without merge (merged=false)", async () => {
+    const mockDb = makeMockDbWithUpdate();
+    const notifier = makeMockNotifier();
+    const app = createGitHubWebhookHandler(
+      buildConfig({ runner: runner as any, db: mockDb as any, notifier: notifier as any }),
+    );
+
+    const res = await postWebhook(app, makePRClosedPayload(false), "pull_request");
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.ok).toBe(true);
+    expect(json.skipped).toBe("PR closed without merge");
+
+    expect(mockDb.update).not.toHaveBeenCalled();
+    expect(notifier.onPRMerged).not.toHaveBeenCalled();
+  });
+
+  it("skips when no pipeline run found for the PR (not an agent PR)", async () => {
+    const mockDb = makeMockDbWithUpdate(null); // no DB row
+    const notifier = makeMockNotifier();
+    const app = createGitHubWebhookHandler(
+      buildConfig({ runner: runner as any, db: mockDb as any, notifier: notifier as any }),
+    );
+
+    const res = await postWebhook(app, makePRClosedPayload(true), "pull_request");
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.ok).toBe(true);
+    expect(json.skipped).toBe("not an agent-created PR");
+
+    expect(mockDb.update).not.toHaveBeenCalled();
+    expect(notifier.onPRMerged).not.toHaveBeenCalled();
+  });
+
+  it("is idempotent: skips notification when run already marked as merged", async () => {
+    const alreadyMergedRun = { ...mockRun, autoMerged: true };
+    const mockDb = makeMockDbWithUpdate(alreadyMergedRun as any);
+    const notifier = makeMockNotifier();
+    const app = createGitHubWebhookHandler(
+      buildConfig({ runner: runner as any, db: mockDb as any, notifier: notifier as any }),
+    );
+
+    const res = await postWebhook(app, makePRClosedPayload(true), "pull_request");
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.ok).toBe(true);
+    expect(json.skipped).toBe("already recorded as merged");
+
+    expect(mockDb.update).not.toHaveBeenCalled();
+    expect(notifier.onPRMerged).not.toHaveBeenCalled();
+  });
+
+  it("succeeds without calling notifier when no notifier is configured", async () => {
+    const mockDb = makeMockDbWithUpdate();
+    const app = createGitHubWebhookHandler(
+      buildConfig({ runner: runner as any, db: mockDb as any }),
+    );
+
+    const res = await postWebhook(app, makePRClosedPayload(true), "pull_request");
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.ok).toBe(true);
+    expect(json.action).toBe("pr-merged");
+    expect(mockDb.update).toHaveBeenCalled();
   });
 });

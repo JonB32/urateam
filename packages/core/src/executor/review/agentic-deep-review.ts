@@ -9,7 +9,21 @@ export class AgenticDeepReviewProvider implements ReviewProvider {
   async runReview(ctx: ReviewContext): Promise<ReviewModelRun[]> {
     const startedAt = Date.now();
     try {
-      const result = await runDeepReview(ctx.handoff, ctx.workdir);
+      // BEC-227 — forward session info from ReviewContext. When the
+      // resolved review model is in the resumable family, runDeepReview
+      // emits sub-agent SDK calls with `options.resume = agentSessionId`
+      // so they inherit the per-run transcript. Defaults (no session
+      // fields set) preserve legacy behaviour.
+      const result = await runDeepReview({
+        handoff: ctx.handoff,
+        workdir: ctx.workdir,
+        agentSessionId: ctx.agentSessionId ?? null,
+        isFirstResumableStage: ctx.isFirstResumableStage ?? false,
+        model: ctx.reviewModel,
+        runId: ctx.runId,
+        issueId: ctx.issueId,
+        db: ctx.db,
+      });
       return [
         {
           modelId: DEEP_REVIEW_MODEL,

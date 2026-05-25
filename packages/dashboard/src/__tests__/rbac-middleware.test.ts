@@ -28,6 +28,11 @@ function appWithRoute(permission: string, role: string | undefined) {
 }
 
 describe("requirePermission", () => {
+  beforeEach(async () => {
+    // Ensure license is not set before the unlicensed test runs
+    await restoreLicense();
+  });
+
   it("unlicensed → no-op, all roles pass", async () => {
     const app = appWithRoute("config.view", "viewer");
     expect((await app.request("/test")).status).toBe(200);

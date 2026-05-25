@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { consumeAgentStream, StageStalledError } from "../executor/agent-stream.js";
+import { parseJsonObject } from "../executor/agent-stream.js";
+import {
+  consumeAgentStream,
+  StageStalledError,
+  StageCancelledError,
+} from "../executor/agent-stream.js";
 
 async function* fromArray(items: Array<unknown>): AsyncIterable<unknown> {
   for (const item of items) yield item;
@@ -97,5 +102,93 @@ describe("consumeAgentStream — stall watchdog (urateam#122)", () => {
     await expect(
       consumeAgentStream(zombieStream(), { progressTimeoutMs: 200 }),
     ).rejects.toBeInstanceOf(StageStalledError);
+  });
+});
+
+describe("consumeAgentStream — operator abort", () => {
+  it("throws StageCancelledError when the AbortController fires mid-stream", async () => {
+    const controller = new AbortController();
+    // Stream that emits one message, then waits forever. The abort below fires
+    // while the second .next() is pending so we hit the abort branch of the
+    // race instead of the stall branch.
+    async function* slow(): AsyncIterable<unknown> {
+      yield { type: "assistant", content: [{ type: "text", text: "first" }], usage: { output_tokens: 5 } };
+      await new Promise(() => {});
+    }
+    setTimeout(() => controller.abort(), 50);
+    await expect(
+      consumeAgentStream(slow(), {
+        abortSignal: controller.signal,
+        progressTimeoutMs: 60_000,
+      }),
+    ).rejects.toBeInstanceOf(StageCancelledError);
+  });
+
+  it("throws StageCancelledError immediately when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    async function* never(): AsyncIterable<unknown> {
+      await new Promise(() => {});
+    }
+    await expect(
+      consumeAgentStream(never(), { abortSignal: controller.signal }),
+    ).rejects.toBeInstanceOf(StageCancelledError);
+  });
+
+  it("ignores the abort signal once the stream completes normally", async () => {
+    const controller = new AbortController();
+    async function* fast(): AsyncIterable<unknown> {
+      yield { type: "assistant", content: [{ type: "text", text: "done" }], usage: { output_tokens: 5 } };
+    }
+    const result = await consumeAgentStream(fast(), { abortSignal: controller.signal });
+    controller.abort(); // post-hoc, should not throw or matter
+    expect(result.lastText).toBe("done");
+  });
+});
+
+describe("parseJsonObject — nested-JSON handling (triage v2 regression)", () => {
+  it("parses a flat object", () => {
+    expect(parseJsonObject('{"a":1,"b":"x"}')).toEqual({ a: 1, b: "x" });
+  });
+
+  it("parses a nested object (riskAssessment shape)", () => {
+    const text = '{"priority":2,"riskAssessment":{"severity":"low","areas":["api"]}}';
+    expect(parseJsonObject(text)).toEqual({
+      priority: 2,
+      riskAssessment: { severity: "low", areas: ["api"] },
+    });
+  });
+
+  it("parses an object with array-of-objects (examples shape)", () => {
+    const text = '{"examples":[{"scenario":"a","expected":"b"},{"scenario":"c","expected":"d"}]}';
+    expect(parseJsonObject(text)).toEqual({
+      examples: [
+        { scenario: "a", expected: "b" },
+        { scenario: "c", expected: "d" },
+      ],
+    });
+  });
+
+  it("extracts a JSON object surrounded by prose", () => {
+    const text = 'Here is the result: {"a":1,"nested":{"b":2}} done.';
+    expect(parseJsonObject(text)).toEqual({ a: 1, nested: { b: 2 } });
+  });
+
+  it("handles strings containing braces (string-aware brace counting)", () => {
+    const text = '{"msg":"this has } a brace","ok":true}';
+    expect(parseJsonObject(text)).toEqual({ msg: "this has } a brace", ok: true });
+  });
+
+  it("handles escaped quotes inside strings", () => {
+    const text = '{"msg":"she said \\"hi\\"","ok":true}';
+    expect(parseJsonObject(text)).toEqual({ msg: 'she said "hi"', ok: true });
+  });
+
+  it("returns null when no object is present", () => {
+    expect(parseJsonObject("just prose, no json")).toBeNull();
+  });
+
+  it("returns null on malformed JSON", () => {
+    expect(parseJsonObject('{"a":1,"b":')).toBeNull();
   });
 });

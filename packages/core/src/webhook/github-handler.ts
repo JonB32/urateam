@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { pipelineRuns } from "../db/schema.js";
 import type { AnyDb } from "../db/client.js";
 import type { PipelineRunner } from "../pipeline/runner.js";
-import type { PipelineConfig, RepoConfig } from "../types.js";
+import type { Notifier, PipelineConfig, PipelineRun, RepoConfig } from "../types.js";
 import { createLogger } from "../logger.js";
 import { createGitHubClient } from "../repo/github.js";
 import type { GitHubConfig } from "../repo/github.js";
@@ -45,6 +45,12 @@ export interface GitHubWebhookHandlerConfig {
    * requiredStatusChecks, etc.).  When not provided, automerge events are skipped.
    */
   github?: GitHubConfig;
+  /**
+   * Notifier instance. When provided, `onPRMerged` is called when a PR is
+   * merged externally (pull_request.closed + merged=true — human merge or
+   * GitHub's auto-merge-when-ready), transitioning the Linear issue to Done.
+   */
+  notifier?: Notifier;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +76,47 @@ export function verifyGitHubSignature(
   } catch {
     return false; // Different lengths
   }
+}
+
+// ---------------------------------------------------------------------------
+// Shared DB helpers — avoid repeating the same lookup / update patterns
+// ---------------------------------------------------------------------------
+
+/**
+ * Look up a pipeline run by PR URL (primary) then by branch name (fallback).
+ * Returns `undefined` when no matching row is found.
+ */
+async function findPipelineRunByPrUrlOrBranch(
+  db: AnyDb,
+  prUrl?: string,
+  prBranch?: string,
+): Promise<(typeof pipelineRuns.$inferSelect) | undefined> {
+  if (prUrl) {
+    const rows = await db.select().from(pipelineRuns).where(eq(pipelineRuns.prUrl, prUrl)).limit(1);
+    if (rows.length > 0) return rows[0];
+  }
+  if (prBranch?.startsWith("agent/")) {
+    const rows = await db.select().from(pipelineRuns).where(eq(pipelineRuns.branch, prBranch)).limit(1);
+    if (rows.length > 0) return rows[0];
+  }
+  return undefined;
+}
+
+/**
+ * Persist a merge decision to the DB.
+ * `merged` — pass `true` (or `result.merged || null` for the automerge path).
+ * `reason` — human-readable label stored in `autoMergeReason`.
+ */
+async function updatePipelineRunMerged(
+  db: AnyDb,
+  runId: string,
+  merged: boolean | null,
+  reason: string,
+): Promise<void> {
+  await db
+    .update(pipelineRuns)
+    .set({ autoMerged: merged, autoMergeReason: reason })
+    .where(eq(pipelineRuns.id, runId));
 }
 
 // ---------------------------------------------------------------------------
@@ -171,16 +218,7 @@ async function handleAutoMergeEvent(
 
   for (const candidate of candidates) {
     // Look up pipeline run in DB by PR URL then branch
-    let originalRun: (typeof pipelineRuns.$inferSelect) | undefined;
-
-    if (candidate.prUrl) {
-      const rows = await db.select().from(pipelineRuns).where(eq(pipelineRuns.prUrl, candidate.prUrl)).limit(1);
-      if (rows.length > 0) originalRun = rows[0];
-    }
-    if (!originalRun && candidate.prBranch?.startsWith("agent/")) {
-      const rows = await db.select().from(pipelineRuns).where(eq(pipelineRuns.branch, candidate.prBranch)).limit(1);
-      if (rows.length > 0) originalRun = rows[0];
-    }
+    const originalRun = await findPipelineRunByPrUrlOrBranch(db, candidate.prUrl, candidate.prBranch);
 
     if (!originalRun) {
       log.debug({ candidate }, "automerge: no pipeline run found for PR — skipping");
@@ -233,19 +271,76 @@ async function handleAutoMergeEvent(
     );
 
     // Persist result to DB
-    await db
-      .update(pipelineRuns)
-      .set({
-        autoMerged: result.merged || null,
-        autoMergeReason: result.message,
-      })
-      .where(eq(pipelineRuns.id, originalRun.id));
+    await updatePipelineRunMerged(db, originalRun.id, result.merged || null, result.message);
 
     log.info(
       { runId: originalRun.id, prNumber, merged: result.merged, message: result.message },
       "automerge: decision recorded",
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// PR merged event handler — transitions Linear to Done when a PR is merged
+// externally (human merge or GitHub's "auto-merge when ready").
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle `pull_request.closed` events where `merged === true`.
+ *
+ * Looks up the pipeline run by PR URL, marks `auto_merged = true` in the DB,
+ * and calls `notifier.onPRMerged()` to transition the Linear issue to Done.
+ * Idempotent: if the run is already marked merged, no further action is taken.
+ */
+async function handlePRMergedEvent(
+  payload: Record<string, any>,
+  config: GitHubWebhookHandlerConfig,
+): Promise<{ skipped?: string }> {
+  const pr = payload.pull_request;
+  const prUrl: string = pr?.html_url ?? "";
+  const prBranch: string = pr?.head?.ref ?? "";
+
+  if (!prUrl) {
+    log.warn({ payload }, "pr-merged: no PR URL in payload — skipping");
+    return { skipped: "no PR URL in payload" };
+  }
+
+  const db = config.db;
+  // Look up pipeline run by PR URL (primary) then by branch (fallback)
+  const originalRun = await findPipelineRunByPrUrlOrBranch(db, prUrl, prBranch);
+
+  if (!originalRun) {
+    log.debug({ prUrl }, "pr-merged: no pipeline run found for PR — skipping");
+    return { skipped: "not an agent-created PR" };
+  }
+
+  // Idempotency: skip if already marked as merged
+  if (originalRun.autoMerged) {
+    log.debug({ runId: originalRun.id }, "pr-merged: run already marked merged — skipping");
+    return { skipped: "already recorded as merged" };
+  }
+
+  // Update DB to reflect the human/external merge
+  await updatePipelineRunMerged(db, originalRun.id, true, "merged via GitHub");
+
+  log.info({ runId: originalRun.id, prUrl }, "pr-merged: updated pipeline run auto_merged=true");
+
+  // Pass a fresh object with autoMerged=true so the notifier sees the
+  // post-update value without mutating the shared DB row reference.
+  const mergedRun = { ...originalRun, autoMerged: true } as PipelineRun;
+
+  // Transition Linear issue to Done. The DB row's `status` field is typed as
+  // `string` (Drizzle inference) while PipelineRunStatus is a string union —
+  // cast is safe because the DB value always originates from runner code that
+  // writes one of the union members. Same pattern other notifier call sites use.
+  if (config.notifier?.onPRMerged) {
+    // Fire-and-forget — don't block the webhook response on Linear's API.
+    // Tests await one microtask after posting the webhook to let this start.
+    void config.notifier.onPRMerged(mergedRun).catch((err) =>
+      log.error({ err, runId: originalRun!.id }, "pr-merged: notifier.onPRMerged() failed"),
+    );
+  }
+  return {};
 }
 
 // ---------------------------------------------------------------------------
@@ -297,7 +392,19 @@ export function createGitHubWebhookHandler(
       return c.json({ ok: true, action: "automerge-check-triggered" });
     }
 
-    // 3b. Handle PR review, inline review comment, and issue comment events
+    // 3b. PR merged externally (human merge or GitHub auto-merge-when-ready)
+    if (event === "pull_request" && action === "closed") {
+      if (payload.pull_request?.merged !== true) {
+        return c.json({ ok: true, skipped: "PR closed without merge" });
+      }
+      const result = await handlePRMergedEvent(payload, config);
+      if (result.skipped) {
+        return c.json({ ok: true, skipped: result.skipped });
+      }
+      return c.json({ ok: true, action: "pr-merged" });
+    }
+
+    // 3c. Handle PR review, inline review comment, and issue comment events
     if (
       event !== "pull_request_review" &&
       event !== "pull_request_review_comment" &&
@@ -394,25 +501,7 @@ export function createGitHubWebhookHandler(
     // 6. Find the original pipeline run for this PR
     //    First try by PR URL (exact match), then by branch name (agent/ prefix).
     const db = config.db;
-    let originalRun: (typeof pipelineRuns.$inferSelect) | undefined;
-
-    if (prUrl) {
-      const byUrl = await db
-        .select()
-        .from(pipelineRuns)
-        .where(eq(pipelineRuns.prUrl, prUrl))
-        .limit(1);
-      if (byUrl.length > 0) originalRun = byUrl[0];
-    }
-
-    if (!originalRun && prBranch?.startsWith("agent/")) {
-      const byBranch = await db
-        .select()
-        .from(pipelineRuns)
-        .where(eq(pipelineRuns.branch, prBranch))
-        .limit(1);
-      if (byBranch.length > 0) originalRun = byBranch[0];
-    }
+    const originalRun = await findPipelineRunByPrUrlOrBranch(db, prUrl, prBranch);
 
     if (!originalRun) {
       return c.json({ ok: true, skipped: "not an agent-created PR" });

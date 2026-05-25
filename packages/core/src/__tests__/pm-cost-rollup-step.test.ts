@@ -102,6 +102,7 @@ describe("pm tick cost rollup step", () => {
       linearApiKey: "",
       slackBotToken: "",
       actions: stubActions() as any,
+      authMonitor: { tick: async () => {} },
     });
 
     await scheduler.tick();
@@ -122,6 +123,7 @@ describe("pm tick cost rollup step", () => {
       linearApiKey: "",
       slackBotToken: "",
       actions: stubActions() as any,
+      authMonitor: { tick: async () => {} },
     });
 
     await expect(scheduler.tick()).resolves.toBeUndefined();

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { generatePRDescription } from "../pipeline/pr-description.js";
+import { generatePRDescription, type TriageQualityMetric } from "../pipeline/pr-description.js";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test file uses partial handoff objects
 
 /**
@@ -916,6 +916,165 @@ describe("PR Description Enrichment (BEC-83)", () => {
       // Verify it would produce a valid gh CLI call (non-empty, no undefined)
       expect(body).not.toContain("undefined");
       expect(body.trim().length).toBeGreaterThan(0);
+    });
+  });
+
+  // =========================================================================
+  // 10. Triage Quality Section (BEC-220)
+  // =========================================================================
+  describe("Triage Quality section (BEC-220)", () => {
+    const baseHandoff: any = {
+      summary: "Implemented feature.",
+      filesChanged: ["src/feature.ts", "src/feature.test.ts"],
+      approach: "test",
+      context: { issueIntent: "test", constraints: [], assumptions: [] },
+      tokenBudget: { contextTokensUsed: 10000, recommendedMaxTurns: 10 },
+    };
+
+    it("renders ## Triage Quality section when hasV2Prediction=true and intersection > 0 with missed/unexpected", () => {
+      const triageQuality: TriageQualityMetric = {
+        hasV2Prediction: true,
+        predicted: 5,
+        actual: 4,
+        intersection: 3,
+        missed: ["file-a.ts"],
+        unexpected: ["file-b.ts"],
+      };
+
+      const body = generatePRDescription({
+        handoff: baseHandoff,
+        issueId: "BEC-220",
+        triageQuality,
+      });
+
+      expect(body).toContain("## Triage Quality");
+      expect(body).toContain("- Predicted: 5 files");
+      expect(body).toContain("- Actual: 4 files");
+      expect(body).toContain("- Intersection: 3 files");
+      expect(body).toContain("- Missed: `file-a.ts`");
+      expect(body).toContain("- Unexpected: `file-b.ts`");
+
+      // Section is between ## Test plan and ## Commits / Resolves
+      const testPlanIdx = body.indexOf("## Test plan");
+      const triageIdx = body.indexOf("## Triage Quality");
+      const resolvesIdx = body.indexOf("Resolves");
+      expect(testPlanIdx).toBeLessThan(triageIdx);
+      expect(triageIdx).toBeLessThan(resolvesIdx);
+    });
+
+    it("renders ## Triage Quality section when intersection = 0 and missed/unexpected lists are empty", () => {
+      const triageQuality: TriageQualityMetric = {
+        hasV2Prediction: true,
+        predicted: 10,
+        actual: 2,
+        intersection: 0,
+        missed: [],
+        unexpected: [],
+      };
+
+      const body = generatePRDescription({
+        handoff: baseHandoff,
+        issueId: "BEC-220",
+        triageQuality,
+      });
+
+      expect(body).toContain("## Triage Quality");
+      expect(body).toContain("- Predicted: 10 files");
+      expect(body).toContain("- Actual: 2 files");
+      expect(body).toContain("- Intersection: 0 files");
+      // Missed and Unexpected lines must not appear
+      expect(body).not.toContain("- Missed:");
+      expect(body).not.toContain("- Unexpected:");
+    });
+
+    it("omits ## Triage Quality section entirely when hasV2Prediction=false (triage v1 path)", () => {
+      const triageQuality: TriageQualityMetric = {
+        hasV2Prediction: false,
+        predicted: 0,
+        actual: 3,
+        intersection: 0,
+        missed: [],
+        unexpected: ["file-x.ts", "file-y.ts"],
+      };
+
+      const body = generatePRDescription({
+        handoff: baseHandoff,
+        issueId: "BEC-220",
+        triageQuality,
+      });
+
+      expect(body).not.toContain("## Triage Quality");
+      expect(body).not.toContain("Predicted:");
+      expect(body).not.toContain("Actual:");
+      expect(body).not.toContain("Intersection:");
+      // Body must still be valid markdown
+      expect(body).toContain("## Summary");
+      expect(body).toContain("## Test plan");
+      expect(body).toContain("Resolves BEC-220");
+    });
+
+    it("omits ## Triage Quality section entirely when triageQuality is undefined (event missing)", () => {
+      const body = generatePRDescription({
+        handoff: baseHandoff,
+        issueId: "BEC-220",
+        // triageQuality intentionally omitted
+      });
+
+      expect(body).not.toContain("## Triage Quality");
+      expect(body).not.toContain("Predicted:");
+      // Body must still be valid markdown with all standard sections
+      expect(body).toContain("## Summary");
+      expect(body).toContain("## Changes");
+      expect(body).toContain("## Test plan");
+      expect(body).toContain("Resolves BEC-220");
+    });
+
+    it("places ## Triage Quality between ## Test plan and ## Commits", () => {
+      const triageQuality: TriageQualityMetric = {
+        hasV2Prediction: true,
+        predicted: 3,
+        actual: 3,
+        intersection: 3,
+        missed: [],
+        unexpected: [],
+      };
+
+      const body = generatePRDescription({
+        handoff: baseHandoff,
+        issueId: "BEC-220",
+        triageQuality,
+        agentCommits: ["feat: add feature"],
+      });
+
+      const testPlanIdx = body.indexOf("## Test plan");
+      const triageIdx = body.indexOf("## Triage Quality");
+      const commitsIdx = body.indexOf("## Commits");
+      const resolvesIdx = body.indexOf("Resolves");
+
+      expect(testPlanIdx).toBeLessThan(triageIdx);
+      expect(triageIdx).toBeLessThan(commitsIdx);
+      expect(commitsIdx).toBeLessThan(resolvesIdx);
+    });
+
+    it("handles multiple missed and unexpected files correctly", () => {
+      const triageQuality: TriageQualityMetric = {
+        hasV2Prediction: true,
+        predicted: 7,
+        actual: 5,
+        intersection: 3,
+        missed: ["src/a.ts", "src/b.ts", "src/c.ts"],
+        unexpected: ["src/x.ts", "src/y.ts"],
+      };
+
+      const body = generatePRDescription({
+        handoff: baseHandoff,
+        issueId: "BEC-220",
+        triageQuality,
+      });
+
+      expect(body).toContain("## Triage Quality");
+      expect(body).toContain("- Missed: `src/a.ts`, `src/b.ts`, `src/c.ts`");
+      expect(body).toContain("- Unexpected: `src/x.ts`, `src/y.ts`");
     });
   });
 });

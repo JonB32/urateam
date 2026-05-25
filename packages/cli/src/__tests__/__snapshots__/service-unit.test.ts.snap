@@ -1,0 +1,54 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderLaunchdPlist > matches the canonical snapshot 1`] = `
+"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.urateam.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/ura</string>
+    <string>start</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/x/.urateam</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>URATEAM_HOME</key>
+    <string>/Users/x/.urateam</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/x/.urateam/data/daemon.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/x/.urateam/data/daemon.err.log</string>
+</dict>
+</plist>
+"
+`;
+
+exports[`renderSystemdUserUnit > matches the canonical snapshot 1`] = `
+"[Unit]
+Description=urateam user-level daemon
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/Users/x/.urateam
+EnvironmentFile=/Users/x/.urateam/.env
+Environment=URATEAM_HOME=/Users/x/.urateam
+ExecStart=/usr/local/bin/ura start
+StandardOutput=append:/Users/x/.urateam/data/daemon.log
+StandardError=append:/Users/x/.urateam/data/daemon.err.log
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"
+`;

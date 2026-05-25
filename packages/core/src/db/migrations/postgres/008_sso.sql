@@ -1,20 +1,9 @@
--- Enterprise feature 4.1: SSO via WorkOS
-CREATE TABLE IF NOT EXISTS dashboard_users (
-  id TEXT PRIMARY KEY,
-  email TEXT NOT NULL UNIQUE,
-  name TEXT,
-  workos_user_id TEXT,
-  created_at TIMESTAMPTZ NOT NULL,
-  last_login_at TIMESTAMPTZ
-);
-
-CREATE TABLE IF NOT EXISTS dashboard_sessions (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL REFERENCES dashboard_users(id),
-  created_at TIMESTAMPTZ NOT NULL,
-  expires_at TIMESTAMPTZ NOT NULL,
-  last_seen_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_user_id ON dashboard_sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_expires_at ON dashboard_sessions(expires_at);
+-- BEC-149: This migration was renumbered to 009_sso to fix a duplicate prefix
+-- (008_cost_rollups and 008_sso shared prefix 008).
+--
+-- This file is retained for git history only. The migrator skips it based on
+-- the POSTGRES_MIGRATION_RENAMES map in migrator.ts, which also renames any
+-- existing "008_sso" entries in schema_migrations to "009_sso" so that
+-- existing deployments do not re-run this migration.
+--
+-- Active migration: packages/core/src/db/migrations/postgres/009_sso.sql

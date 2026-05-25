@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createDb } from "../db/client.js";
-import { aggregateAll } from "../cost/aggregate.js";
+import { aggregateHybrid } from "../cost/aggregate.js";
 import { recomputeCostRollups } from "../cost/rollup.js";
 import { pipelineRuns, stageRuns, costRollupsDaily } from "../db/schema.js";
 import { installTestProLicense, restoreLicense } from "./helpers/license.js";
@@ -70,7 +70,7 @@ describe("cost e2e", () => {
       });
     }
 
-    const live = await aggregateAll(db, {
+    const live = await aggregateHybrid(db, {
       from: new Date(completedAt.getTime() - 86400_000),
       to: new Date(),
     }, config);

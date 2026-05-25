@@ -11,18 +11,37 @@ WORKDIR /app
 # - sqlite: standalone sqlite3 CLI for runbook queries (e.g. docker exec urateam-dogfood sqlite3 ...)
 # - tini: PID 1 signal handling for clean shutdown
 # - python3, make, g++: better-sqlite3 native build fallback if no prebuild matches alpine-musl
-RUN apk add --no-cache git openssh-client github-cli sqlite tini python3 make g++
+# - bash: BEC-234 — Claude Agent SDK's Bash tool requires a POSIX shell; the
+#   alpine base ships only /bin/sh (busybox), and the SDK checks process.env.SHELL
+#   (not the filesystem) to decide whether a "suitable shell" is present.
+RUN apk add --no-cache git openssh-client github-cli sqlite tini python3 make g++ bash
+
+# BEC-234 — set SHELL so the Claude Agent SDK's "no suitable shell" check passes.
+# Without this, every Bash tool call fails with "No suitable shell found ...".
+ENV SHELL=/bin/bash
 
 # Pinned versions — image is reproducible per build.
-ARG URATEAM_CORE_VERSION=0.1.31
-ARG URATEAM_CLI_VERSION=0.1.33
-ARG URATEAM_DASHBOARD_VERSION=0.1.31
+ARG URATEAM_CORE_VERSION=0.1.64
+ARG URATEAM_CLI_VERSION=0.1.66
+ARG URATEAM_DASHBOARD_VERSION=0.1.64
 ARG CLAUDE_CODE_VERSION=2.1.128
 RUN npm install -g \
       @urateam/cli@${URATEAM_CLI_VERSION} \
       @urateam/core@${URATEAM_CORE_VERSION} \
       @urateam/dashboard@${URATEAM_DASHBOARD_VERSION} \
       @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
+
+# BEC-240 — provision pnpm for the agent's Bash tool. urateam target repos are
+# pnpm workspaces (package.json `packageManager: pnpm@9.15.0`). Without pnpm on
+# PATH the agent's `pnpm install` fails with "command not found", falls back to
+# `npm`, and that breaks the workspace toolchain: wrong dependency versions
+# (e.g. `npx vitest` pulls vitest 4.x instead of the pinned 3.x), unresolved
+# workspace imports, and many wasted agent turns. corepack ships with Node 22.
+# COREPACK_HOME is a world-readable shared path so the pnpm version this root
+# build downloads is reachable by the non-root `ura` runtime user below.
+# Keep the version in sync with the repo's `packageManager` field.
+ENV COREPACK_HOME=/usr/local/corepack
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
 
 # Non-root runtime user
 RUN addgroup -S ura && adduser -S -G ura ura
@@ -45,13 +64,21 @@ RUN git config --global user.name  "Urateam Agent" \
  && git config --global --replace-all "credential.https://gist.github.com.helper" "" \
  && git config --global --add         "credential.https://gist.github.com.helper" '!/usr/bin/gh auth git-credential'
 
+# BEC-228 — pre-create the agent-sessions volume mount point owned by ura so
+# Docker's first-mount behavior preserves ura ownership. Without this, a fresh
+# named volume mounts as root-owned and the SDK (running as ura) cannot write
+# JSONL transcripts, silently breaking BEC-227 session resume.
+RUN mkdir -p /home/ura/.claude/projects
+
 # Persistent volumes:
 # - /home/ura/data: SQLite database
 # - /home/ura/work: cloned repos + worktrees (PM agent clones REPO_URL here)
 # - /home/ura/.claude: OAuth credentials so executor's auth-check passes without
 #   ANTHROPIC_API_KEY (`docker compose exec urateam-dogfood claude login` once)
+# - /home/ura/.claude/projects: BEC-227 session transcripts (Phase 1 — must be
+#   pre-created above so the named volume initializes ura-owned)
 # - /home/ura/.config: gh CLI auth (`gh auth login --with-token` once)
-VOLUME ["/home/ura/data", "/home/ura/work", "/home/ura/.claude", "/home/ura/.config"]
+VOLUME ["/home/ura/data", "/home/ura/work", "/home/ura/.claude", "/home/ura/.claude/projects", "/home/ura/.config"]
 EXPOSE 3001
 
 # `ura start` runs the full daemon: webhook + dashboard + PM agent + Release

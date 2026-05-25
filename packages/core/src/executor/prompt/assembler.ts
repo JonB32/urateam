@@ -16,7 +16,12 @@ import {
 
 const TEMPLATE_MAP: Record<
   string,
-  (issue: SanitizedIssue, repo: RepoConfig, handoff?: HandoffArtifact) => string
+  (
+    issue: SanitizedIssue,
+    repo: RepoConfig,
+    handoff?: HandoffArtifact,
+    opts?: { suppressHandoff?: boolean },
+  ) => string
 > = {
   triage: triageTemplate,
   reproduce: reproduceTemplate,
@@ -32,6 +37,10 @@ const TEMPLATE_MAP: Record<
  * @param mergeConflict - When provided and stage is "implement", constructs a
  *   focused prompt for resolving rebase conflicts. Takes precedence over
  *   `reviewFeedback` since conflict resolution is a hard prerequisite.
+ * @param opts.suppressHandoff - BEC-227: when `true`, omits the
+ *   `<previous-stage-context>` block from the rendered prompt. The runner sets
+ *   this on resumed RALPH re-implement iterations where the same handoff is
+ *   already visible to the agent through the resumed SDK session's transcript.
  * @throws if `stage` is "await-approval" or an unknown stage.
  */
 export function assemblePrompt(
@@ -41,6 +50,7 @@ export function assemblePrompt(
   handoff?: HandoffArtifact,
   reviewFeedback?: ReviewFeedbackContext,
   mergeConflict?: MergeConflictContext,
+  opts: { suppressHandoff?: boolean } = {},
 ): string {
   if (stage === "await-approval") {
     throw new Error(
@@ -55,6 +65,7 @@ export function assemblePrompt(
       handoff,
       reviewFeedback,
       mergeConflict,
+      { suppressHandoff: opts.suppressHandoff },
     );
   }
 
@@ -63,5 +74,7 @@ export function assemblePrompt(
     throw new Error(`Unknown stage: ${stage}`);
   }
 
-  return templateFn(sanitizedIssue, repoConfig, handoff);
+  return templateFn(sanitizedIssue, repoConfig, handoff, {
+    suppressHandoff: opts.suppressHandoff,
+  });
 }

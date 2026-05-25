@@ -3,18 +3,27 @@ services:
     build:
       context: .
       args:
-        URATEAM_CORE_VERSION: 0.1.31
-        URATEAM_CLI_VERSION: 0.1.33
-        URATEAM_DASHBOARD_VERSION: 0.1.31
+        URATEAM_CORE_VERSION: 0.1.64
+        URATEAM_CLI_VERSION: 0.1.66
+        URATEAM_DASHBOARD_VERSION: 0.1.64
         CLAUDE_CODE_VERSION: 2.1.128
     container_name: urateam-dogfood
     restart: unless-stopped
     env_file: .env.dogfood
+    environment:
+      # Recommended auth: set CLAUDE_CODE_OAUTH_TOKEN in .env.dogfood (run `claude setup-token`).
+      # Long-lived subscription billing; no weekly expiry; no volume mount required.
+      # Alternatively set ANTHROPIC_API_KEY for pay-per-token billing.
+      # Legacy fallback: mount ~/.claude volume below (expires weekly).
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
     volumes:
       - urateam-dogfood-data:/home/ura/data
       - urateam-dogfood-work:/home/ura/work
-      - urateam-dogfood-claude:/home/ura/.claude
       - urateam-dogfood-config:/home/ura/.config
+      # BEC-227 — Claude Agent SDK JSONL transcripts per pipeline run. Without
+      # this volume, retriable resumes silently lose agent memory across
+      # container restarts. Mounted at the SDK's default per-cwd projects root.
+      - urateam-dogfood-agent-sessions:/home/ura/.claude/projects
     ports:
       # localhost-only — remote access via SSH tunnel during soak
       - "127.0.0.1:3001:3001"
@@ -59,7 +68,9 @@ services:
       - QUALITY_OBSERVER_AUDIT_LOG_PATH=/observer-state/audit.jsonl
     volumes:
       - urateam-dogfood-data:/observer-data:ro       # urateam's sqlite, read-only
-      - urateam-dogfood-claude:/root/.claude:ro      # Claude OAuth, shared read-only
+      # Legacy: mount the claude session volume read-only if using the mounted-session path.
+      # Not required when CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY is set in .env.observer.
+      # - urateam-dogfood-claude:/root/.claude:ro
       # Codebase observer reads the urateam source. Override path via the
       # OBSERVER_CODEBASE env if your layout differs.
       - ${OBSERVER_CODEBASE:-./}:/codebase:ro
@@ -76,6 +87,7 @@ services:
 volumes:
   urateam-dogfood-data:
   urateam-dogfood-work:
-  urateam-dogfood-claude:
   urateam-dogfood-config:
   urateam-observer-state:
+  # BEC-227 — agent session JSONL transcripts (per pipeline run).
+  urateam-dogfood-agent-sessions:
