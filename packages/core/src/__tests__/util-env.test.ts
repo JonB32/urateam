@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseIntOr, parseFloatOr, parsePositiveIntOrUndefined } from "../util/env.js";
+import { parseIntOr, parseFloatOr, parseOptPosInt } from "../util/env.js";
 
 describe("parseIntOr", () => {
   it("returns fallback for undefined", () => {
@@ -18,8 +18,8 @@ describe("parseIntOr", () => {
     expect(parseIntOr("-5", 10)).toBe(10);
   });
 
-  it("returns fallback for zero", () => {
-    expect(parseIntOr("0", 10)).toBe(10);
+  it("accepts zero as valid (non-negative semantics)", () => {
+    expect(parseIntOr("0", 10)).toBe(0);
   });
 
   it("returns parsed value for valid positive integer", () => {
@@ -65,32 +65,32 @@ describe("parseFloatOr", () => {
   });
 });
 
-describe("parsePositiveIntOrUndefined", () => {
+describe("parseOptPosInt", () => {
   it("returns undefined for undefined input", () => {
-    expect(parsePositiveIntOrUndefined(undefined)).toBeUndefined();
+    expect(parseOptPosInt(undefined)).toBeUndefined();
   });
 
   it("returns undefined for empty string", () => {
-    expect(parsePositiveIntOrUndefined("")).toBeUndefined();
+    expect(parseOptPosInt("")).toBeUndefined();
   });
 
   it("returns undefined for NaN input", () => {
-    expect(parsePositiveIntOrUndefined("abc")).toBeUndefined();
+    expect(parseOptPosInt("abc")).toBeUndefined();
   });
 
   it("returns undefined for negative numbers", () => {
-    expect(parsePositiveIntOrUndefined("-5")).toBeUndefined();
+    expect(parseOptPosInt("-5")).toBeUndefined();
   });
 
   it("returns undefined for zero", () => {
-    expect(parsePositiveIntOrUndefined("0")).toBeUndefined();
+    expect(parseOptPosInt("0")).toBeUndefined();
   });
 
   it("returns parsed value for valid positive integer", () => {
-    expect(parsePositiveIntOrUndefined("42")).toBe(42);
+    expect(parseOptPosInt("42")).toBe(42);
   });
 
   it("returns parsed value for string '1'", () => {
-    expect(parsePositiveIntOrUndefined("1")).toBe(1);
+    expect(parseOptPosInt("1")).toBe(1);
   });
 });
