@@ -501,6 +501,72 @@ export function createSlackInterface(config: SlackInterfaceConfig): {
   });
 
   // ------------------------------------------------------------------
+  // POST /slack/interactivity  (BEC-142: Block Kit button callbacks)
+  // ------------------------------------------------------------------
+  // Slack sends a URL-encoded body with a `payload` field containing JSON.
+  // Handles release_approve / release_skip button action_ids by delegating
+  // to the same releaseHandler used by /slack/commands.
+  router.post("/slack/interactivity", async (c) => {
+    const rawBody = await checkSignature(c);
+    if (rawBody === null) {
+      return c.json({ error: "Invalid signature" }, 401);
+    }
+
+    const params = new URLSearchParams(rawBody);
+    const payloadStr = params.get("payload");
+    if (!payloadStr) {
+      return c.json({ error: "Missing payload" }, 400);
+    }
+
+    let payload: Record<string, any>;
+    try {
+      payload = JSON.parse(payloadStr) as Record<string, any>;
+    } catch {
+      return c.json({ error: "Invalid payload JSON" }, 400);
+    }
+
+    // Only handle block_actions (button clicks). Acknowledge all other types.
+    if (payload.type !== "block_actions") {
+      return c.json({ ok: true });
+    }
+
+    if (!config.releaseHandler) {
+      log.warn("received block_actions but no releaseHandler configured");
+      return c.json({ ok: true });
+    }
+
+    const userId: string = (payload.user as any)?.id ?? "";
+    const actions = Array.isArray(payload.actions) ? (payload.actions as any[]) : [];
+    const responseUrl = typeof payload.response_url === "string" ? payload.response_url : undefined;
+
+    for (const action of actions) {
+      const actionId = action.action_id as string;
+
+      if (actionId === "release_approve") {
+        const r = await config.releaseHandler({ text: "approve", userId });
+        if (responseUrl) {
+          void postToResponseUrl(responseUrl, r.text, r.responseType);
+        }
+        break;
+      }
+
+      if (actionId === "release_skip") {
+        const reason = typeof action.value === "string" && action.value.trim()
+          ? action.value.trim()
+          : "Skipped via button";
+        const r = await config.releaseHandler({ text: `skip ${reason}`, userId });
+        if (responseUrl) {
+          void postToResponseUrl(responseUrl, r.text, r.responseType);
+        }
+        break;
+      }
+    }
+
+    // Acknowledge the action immediately (Slack requires 200 within 3 seconds).
+    return c.json({ ok: true });
+  });
+
+  // ------------------------------------------------------------------
   // POST /slack/events
   // ------------------------------------------------------------------
   router.post("/slack/events", async (c) => {

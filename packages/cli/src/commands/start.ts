@@ -594,6 +594,16 @@ export const startCommand = new Command("start")
                 const r = await postSlackMessage(env.SLACK_BOT_TOKEN!, { channel, text });
                 return r !== null && r.ok !== false;
               },
+              // BEC-142: Block Kit messages for awaiting-approval prompts (Approve/Skip buttons).
+              postBlockKit: async (channel, blocks, fallbackText) => {
+                const { postSlackMessage } = await import("@urateam/core");
+                const r = await postSlackMessage(process.env.SLACK_BOT_TOKEN!, {
+                  channel,
+                  blocks,
+                  text: fallbackText,
+                });
+                return r !== null && (r as any).ok !== false;
+              },
             }
           : undefined,
       });

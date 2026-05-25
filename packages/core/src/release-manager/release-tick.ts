@@ -445,10 +445,36 @@ export async function tick(ctx: TickContext): Promise<void> {
     // Always post on first transition to awaiting-approval (bypass dedup).
     // Reset lastSkipReason so a subsequent regular-skip will re-post.
     mutableState.slackDedup.lastSkipReason = null;
+    const approvalText = `:hourglass_flowing_sand: Release ready for *${repoUrl}* (${branch}): bumping ${proposedVersion} (${state.mergedCommitsSinceLastTag} commits since last tag). Click Approve or run \`/release approve\` to fire.`;
+    // BEC-142: Block Kit message with interactive Approve/Skip buttons.
+    const approvalBlocks = [
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: approvalText },
+      },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "✅ Approve", emoji: true },
+            action_id: "release_approve",
+            style: "primary",
+          },
+          {
+            type: "button",
+            text: { type: "plain_text", text: "⏭ Skip", emoji: true },
+            action_id: "release_skip",
+            value: "Skipped via button",
+          },
+        ],
+      },
+    ];
     await maybePostSlack(
       slack, slackChannel, db, mutableState.slackDedup,
-      `:hourglass_flowing_sand: Release ready for *${repoUrl}* (${branch}): bumping ${proposedVersion} (${state.mergedCommitsSinceLastTag} commits since last tag). Run \`/release approve\` to fire.`,
+      approvalText,
       null,
+      approvalBlocks,
     );
     return;
   }

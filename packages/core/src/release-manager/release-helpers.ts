@@ -27,6 +27,8 @@ const log = createLogger({ component: "ReleaseManager:helpers" });
 /** Minimal Slack client interface required by the release manager. */
 export interface SlackPoster {
   postMessage: (channel: string, text: string) => Promise<boolean>;
+  /** Optional: post a Slack Block Kit message. Falls back to postMessage when absent. */
+  postBlockKit?: (channel: string, blocks: object[], fallbackText: string) => Promise<boolean>;
 }
 
 /** 24-hour dedup window — same reason within this window is suppressed. */
@@ -70,6 +72,7 @@ export async function maybePostSlack(
   dedupState: SlackDedupState,
   text: string,
   currentSkipReason: string | null,
+  blocks?: object[],
 ): Promise<void> {
   if (!slack || !slackChannel) return;
   const now = Date.now();
@@ -80,7 +83,10 @@ export async function maybePostSlack(
     const withinWindow = now - dedupState.lastPostAt < SLACK_DEDUP_WINDOW_MS;
     if (sameReason && withinWindow) return;
   }
-  const ok = await slack.postMessage(slackChannel, text).catch(() => false);
+  const postFn = blocks && slack.postBlockKit
+    ? () => slack.postBlockKit!(slackChannel, blocks, text)
+    : () => slack.postMessage(slackChannel, text);
+  const ok = await postFn().catch(() => false);
   if (!ok) {
     void logAuditEventUnchecked(db, slackPostFailedEvent({ channel: slackChannel, reason: "post_returned_false" }));
     return;

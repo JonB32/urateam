@@ -37,7 +37,10 @@ export interface PmSlackInterfaceConfig {
   channelId: string;
   /** Team IDs for issue creation commands */
   teamIds?: string[];
-  /** BEC-135: optional handler for /release subcommands (Release Manager integration). */
+  /**
+   * BEC-135/BEC-142: handler for /release slash commands and Block Kit button callbacks.
+   * Wired by the CLI start command after the Release Manager scheduler is created.
+   */
   releaseHandler?: (params: { text: string; userId: string }) => Promise<{ text: string; responseType: "ephemeral" | "in_channel" }>;
 }
 
@@ -226,12 +229,22 @@ export async function createApp(config: ServerConfig) {
       );
     } else {
       const { createSlackInterface } = await import("./pm/slack-interface.js");
+      // BEC-135/BEC-142: the CLI start command sets config.pmSlack.releaseHandler
+      // AFTER createApp returns (it needs `db` from createApp to build it).
+      // Use a proxy so the router always reads the latest value at request time.
+      const pmSlackRef = config.pmSlack;
+      const releaseHandlerProxy = (params: { text: string; userId: string }) =>
+        pmSlackRef.releaseHandler
+          ? pmSlackRef.releaseHandler(params)
+          : Promise.resolve({ text: ":x: Release Manager is not configured on this server.", responseType: "ephemeral" as const });
+
       const { router: slackRouter } = createSlackInterface({
         signingSecret: config.pmSlack.signingSecret,
         botToken: config.pmSlack.botToken,
         channelId: config.pmSlack.channelId,
         linearApiKey: config.linearApiKey,
         teamIds: config.pmSlack.teamIds,
+        releaseHandler: releaseHandlerProxy,
         // Wire the live runner so `/pm cancel|stop|halt` fire real signals;
         // db is threaded through for audit-event writes from those commands.
         runner: {
@@ -239,7 +252,6 @@ export async function createApp(config: ServerConfig) {
           haltAll: runner.haltAll.bind(runner),
         },
         db: db as any,
-        releaseHandler: config.pmSlack.releaseHandler,
       });
       app.route("/", slackRouter);
     }
