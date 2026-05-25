@@ -130,6 +130,12 @@ async function sweepFirePendingRows(ctx: TickContext): Promise<void> {
       const newAttemptCount = row.attemptCount + 1;
 
       if (newAttemptCount >= MAX_FIRE_PENDING_ATTEMPTS) {
+        // Stamp the original row so it won't be re-selected by future sweeps
+        // (the lt(attemptCount, MAX) filter would otherwise keep matching it).
+        await (db as any)
+          .update(releaseDecisions)
+          .set({ attemptCount: newAttemptCount })
+          .where(eq(releaseDecisions.id, row.id));
         const skipId = `rd_${randomUUID()}`;
         await persistDecision(db, repoUrl, branch, {
           id: skipId,

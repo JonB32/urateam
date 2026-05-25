@@ -614,6 +614,17 @@ describe("createReleaseManagerScheduler — BEC-139 fire-pending retry sweep", (
     expect(audits.length).toBeGreaterThanOrEqual(1);
     expect(JSON.parse(audits[0].payload).tag).toBe("v1.0.1");
     expect(JSON.parse(audits[0].payload).attemptCount).toBe(3);
+
+    // Regression guard: tick 4+ must NOT produce another skip row or audit event
+    // (the exhausted fire-pending row must be outside the sweep filter after stamp).
+    await sched.tick();
+    const skipRowsAfterTick4 = await db
+      .select()
+      .from(releaseDecisions)
+      .where(eq(releaseDecisions.reason, "release_create_failed_after_retries"));
+    expect(skipRowsAfterTick4).toHaveLength(1);
+    const auditsAfterTick4 = await db.select().from(auditEvents).where(eq(auditEvents.eventType, "release.partial"));
+    expect(auditsAfterTick4).toHaveLength(1);
   });
 
   it("AC2: sweep retry succeeds → fire-pending row updated to fire, releaseFiredEvent audited, Slack posts", async () => {
