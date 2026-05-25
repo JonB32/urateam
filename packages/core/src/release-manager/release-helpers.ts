@@ -267,9 +267,11 @@ export async function tryFileQaGapIssue(params: {
   branch: string;
   workflowPath: string;
   linearTeamId: string;
+  /** Injectable LLM call function forwarded to fileGapIssue for QA_GAP_LLM_ANALYSIS enrichment. */
+  callClaude?: (prompt: string) => Promise<string>;
 }): Promise<{ finalReason: string; attemptCount: number }> {
-  const { db, linear, repoUrl, branch, workflowPath, linearTeamId } = params;
-  const gapResult = await fileGapIssue({ db, linear, repoUrl, branch, workflowPath, linearTeamId });
+  const { db, linear, repoUrl, branch, workflowPath, linearTeamId, callClaude } = params;
+  const gapResult = await fileGapIssue({ db, linear, repoUrl, branch, workflowPath, linearTeamId, callClaude });
   if (gapResult.kind !== "linear_error") {
     // Filed or already-filed — reset attempt counter for this gap-filing loop.
     return { finalReason: "qa_no_workflow", attemptCount: 0 };
