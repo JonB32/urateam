@@ -309,6 +309,20 @@ DB-backed `active_work` table tracks files modified by in-flight runs. `upsertAc
 - **Tier 4 — design-doc triage with open-questions routing** (`pm/actions/triage.ts`): triage prompt requires `approachSummary` (3-5 lines), `openQuestions` (operator-must-resolve), `antiAcceptanceCriteria` (out-of-scope). When `openQuestions.length > 0` → **forced `needs-design` regardless of classification**. Gates ambiguous issues for human review before tokens are spent guessing. `TriageResult` gains optional fields.
 - **Linear label requirement**: workspace must have `needs-design` label. If absent the gate still moves the ticket to Backlog but logs a warning and promote won't route it (no pipeline label resolved).
 
+### QA Gap Issue Filing (`packages/core/src/qa/gap.ts`, BEC-144)
+
+`fileGapIssue` creates a Linear issue when the configured QA workflow file is missing. By default it uses a static Markdown template. Set `QA_GAP_LLM_ANALYSIS=true` to enable Claude Haiku analysis that enriches the issue body with per-repo recommendations:
+- Suggested test framework + file path (inferred from repo name/structure)
+- Ephemeral env provider (Vercel Preview, Render, Fly.io, etc.)
+- 3–5 concrete acceptance criteria with file paths
+
+**Behaviour:**
+- Strict equality check (`=== "true"`); `"1"` / `"yes"` / `"TRUE"` do **not** enable it.
+- LLM is called **at most once per gap-file** — the existing idempotency row prevents re-calling on subsequent ticks for the same open gap.
+- LLM failure is non-fatal: a warning is logged and the static template is used as fallback.
+- Model: `claude-haiku-4-5-20251001` (low cost; `makeCallClaude()` from `pm/call-claude.ts`).
+- Integration: `callClaude` is wired into `tryFileQaGapIssue` (release-helpers.ts) and both call sites in `release-tick.ts`.
+
 ## Conventions
 
 - Use `execFile` (never `exec`) for shell commands

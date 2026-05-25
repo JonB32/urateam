@@ -34,6 +34,7 @@ import { createTagAndRelease, parseRepoFromUrl } from "./github.js";
 import type { ReleaseManagerConfig } from "./types.js";
 import { triggerWorkflow, pollWorkflowRun, workflowFileExists } from "../qa/github.js";
 import { markGapResolved } from "../qa/gap.js";
+import { makeCallClaude } from "../pm/call-claude.js";
 import {
   maybePostSlack,
   persistDecision,
@@ -159,6 +160,9 @@ function approvalTtlMs(config: ReleaseManagerConfig): number {
  *
  * @param ctx - All dependencies and mutable state for this tick invocation.
  */
+// Lazy singleton — created once per process, not per tick (avoids re-importing on every call).
+const callClaude = makeCallClaude();
+
 export async function tick(ctx: TickContext): Promise<void> {
   const { config, db, octokit, linear, repoUrl, branch, isLicensed, slack, mutableState } = ctx;
   const slackChannel = config.slackChannel;
@@ -320,6 +324,7 @@ export async function tick(ctx: TickContext): Promise<void> {
             db, linear, repoUrl, branch,
             workflowPath: config.triggers.qaCheck!.workflow,
             linearTeamId: config.triggers.qaCheck!.linearTeamId,
+            callClaude,
           });
           finalReason = gapResult.finalReason;
           attemptCount = gapResult.attemptCount;
@@ -356,6 +361,7 @@ export async function tick(ctx: TickContext): Promise<void> {
           db, linear, repoUrl, branch,
           workflowPath: config.triggers.qaCheck!.workflow,
           linearTeamId: config.triggers.qaCheck!.linearTeamId,
+          callClaude,
         });
         finalReason = gapResult.finalReason;
         attemptCount = gapResult.attemptCount;
