@@ -32,6 +32,7 @@ import { decide } from "./decide.js";
 import { bumpFromConfigAndCommits } from "./versioning.js";
 import { createTagAndRelease, parseRepoFromUrl } from "./github.js";
 import type { ReleaseManagerConfig } from "./types.js";
+import { RELEASE_APPROVE_ACTION_ID, RELEASE_SKIP_ACTION_ID } from "./types.js";
 import { triggerWorkflow, pollWorkflowRun, workflowFileExists } from "../qa/github.js";
 import { markGapResolved } from "../qa/gap.js";
 import { makeCallClaude } from "../pm/call-claude.js";
@@ -57,13 +58,8 @@ const log = createLogger({ component: "ReleaseManager:scheduler" });
  */
 const MAX_AUDITED_RUN_IDS = 10_000;
 
-/**
- * Sentinel attempt count that permanently skips retry logic for a dispatch
- * failure that cannot recover (e.g. workflow misconfigured via dispatch_422).
- * Must exceed MAX_QA_RETRY_ATTEMPTS so the circuit-breaker is never triggered
- * on a retriable path.
- */
-const PERMANENT_FAILURE_ATTEMPT_COUNT = 99;
+/** Sentinel attempt count that signals a permanent skip (no further retries). */
+const PERMANENT_SKIP_ATTEMPT_COUNT = 99;
 
 /**
  * Mutable per-instance state that persists across tick invocations.
@@ -290,7 +286,7 @@ export async function tick(ctx: TickContext): Promise<void> {
               qaRunCompletedEvent({
                 repoUrl, branch,
                 runId: state.qaRun.runId,
-                conclusion: polled.conclusion as any,
+                conclusion: polled.conclusion as "success" | "failure" | "cancelled" | "timed_out" | "action_required" | "skipped" | "stale" | "neutral",
                 durationMs: polled.durationMs,
               }),
             );
@@ -322,22 +318,21 @@ export async function tick(ctx: TickContext): Promise<void> {
     let finalReason = result.reason;
 
     if (result.qaActionNeeded?.reason === "qa_needs_trigger") {
-      // BEC-146: read the most-recent row's attemptCount (ORDER BY decidedAt DESC LIMIT 1)
-      // rather than MAX(attemptCount) across all rows for this (branch, sha) pair.
-      // Using MAX caused false permanent skips: after a successful dispatch reset
-      // attemptCount to 0, the MAX query still returned the old high-water mark
-      // from earlier failure rows, causing the next failure to immediately escalate.
-      attemptCount = await getMaxAttemptCountForReason(
-        db, repoUrl, branch, "qa_needs_trigger", state.headSha,
-      );
-
+      // Parallelize: DB read (attempt count) and GitHub API call (dispatch) are independent.
+      // Look up the highest attempt count across all qa_needs_trigger rows for this
+      // (branch, sha) pair. Using MAX instead of ORDER BY + LIMIT 1 to be stable
+      // when multiple rows share the same decidedAt timestamp.
       const { owner, repo } = parseRepoFromUrl(repoUrl);
-      const dispatch = await triggerWorkflow({
-        octokit, db, owner, repo, repoUrl, branch,
-        workflow: config.triggers.qaCheck!.workflow,
-        ref: state.headSha,
-        inputs: config.triggers.qaCheck!.workflowInputs,
-      });
+      const [prevAttemptCount, dispatch] = await Promise.all([
+        getMaxAttemptCountForReason(db, repoUrl, branch, "qa_needs_trigger", state.headSha),
+        triggerWorkflow({
+          octokit, db, owner, repo, repoUrl, branch,
+          workflow: config.triggers.qaCheck!.workflow,
+          ref: state.headSha,
+          inputs: config.triggers.qaCheck!.workflowInputs,
+        }),
+      ]);
+      attemptCount = prevAttemptCount;
       if (dispatch.kind === "ok") {
         // BEC-146: clear prior failure rows for this SHA so MAX(attemptCount)
         // naturally returns 0 if the run subsequently fails and we re-enter
@@ -356,7 +351,7 @@ export async function tick(ctx: TickContext): Promise<void> {
         }));
       } else if (dispatch.kind === "dispatch_422") {
         finalReason = "qa_dispatch_error";
-        attemptCount = PERMANENT_FAILURE_ATTEMPT_COUNT; // permanent skip — workflow misconfigured, retrying won't help
+        attemptCount = PERMANENT_SKIP_ATTEMPT_COUNT; // permanent skip — workflow misconfigured, retrying won't help
       } else if (dispatch.kind === "dispatch_pending") {
         // GitHub eventual-consistency window. The HTTP dispatch DID succeed (204 OK), so
         // reset the retry counter to 0 — a successful dispatch is not a failure.
@@ -445,10 +440,36 @@ export async function tick(ctx: TickContext): Promise<void> {
     // Always post on first transition to awaiting-approval (bypass dedup).
     // Reset lastSkipReason so a subsequent regular-skip will re-post.
     mutableState.slackDedup.lastSkipReason = null;
+    const approvalText = `:hourglass_flowing_sand: Release ready for *${repoUrl}* (${branch}): bumping ${proposedVersion} (${state.mergedCommitsSinceLastTag} commits since last tag). Click Approve or run \`/release approve\` to fire.`;
+    // BEC-142: Block Kit message with interactive Approve/Skip buttons.
+    const approvalBlocks = [
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: approvalText },
+      },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "✅ Approve", emoji: true },
+            action_id: RELEASE_APPROVE_ACTION_ID,
+            style: "primary",
+          },
+          {
+            type: "button",
+            text: { type: "plain_text", text: "⏭ Skip", emoji: true },
+            action_id: RELEASE_SKIP_ACTION_ID,
+            value: "Skipped via button",
+          },
+        ],
+      },
+    ];
     await maybePostSlack(
       slack, slackChannel, db, mutableState.slackDedup,
-      `:hourglass_flowing_sand: Release ready for *${repoUrl}* (${branch}): bumping ${proposedVersion} (${state.mergedCommitsSinceLastTag} commits since last tag). Run \`/release approve\` to fire.`,
+      approvalText,
       null,
+      approvalBlocks,
     );
     return;
   }

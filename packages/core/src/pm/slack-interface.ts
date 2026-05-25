@@ -23,6 +23,8 @@ import { makeCallClaude, makeCallClaudeSonnet } from "./call-claude.js";
 import { postSlackMessage, reactToSlackMessage } from "./slack-helpers.js";
 import { executePmCommand } from "./slack-commands.js";
 import type { CommandExecutorDeps, PmCommand } from "./slack-commands.js";
+import type { SlackResponse } from "../release-manager/slack-handler.js";
+import { RELEASE_APPROVE_ACTION_ID, RELEASE_SKIP_ACTION_ID } from "../release-manager/types.js";
 
 const log = createLogger({ component: "PmAgent:slack-interface" });
 
@@ -114,7 +116,7 @@ export interface SlackInterfaceConfig {
   /** Optional Sonnet-model callable for bulk create analysis (defaults to Sonnet if not provided) */
   callClaudeSonnet?: (prompt: string) => Promise<string>;
   /** BEC-135: optional handler for /release subcommands. */
-  releaseHandler?: (params: { text: string; userId: string }) => Promise<{ text: string; responseType: "ephemeral" | "in_channel" }>;
+  releaseHandler?: (params: { text: string; userId: string }) => Promise<SlackResponse>;
   /**
    * Live runner reference. Required for the `cancel`/`stop`/`halt` Slack
    * commands. When absent, those commands report a clear configuration error
@@ -204,6 +206,7 @@ export async function verifySlackSignature(
  *   "assign BEC-13"             → { type: "assign", issueId: "BEC-13" }
  */
 const ISSUE_ID_RE = /^[A-Z]+-\d+$/;
+const RUN_ID_RE = /^[A-Za-z0-9_-]{6,}$/;
 
 /**
  * Extracts and validates an issue ID from a command like "prioritize BEC-25".
@@ -252,10 +255,10 @@ export function parsePmCommand(text: string): PmCommand {
   // `cancel <runId>` and `stop <runId>` — runId is a nanoid (URL-safe chars,
   // 8+ in practice). Not validated against the DB here; the executor reports
   // "not found" for invalid ids so the operator sees a clear failure.
-  const cancelMatch = trimmed.match(/^cancel\s+([A-Za-z0-9_-]{6,})$/i);
-  if (cancelMatch) return { type: "cancel", runId: cancelMatch[1] };
-  const stopMatch = trimmed.match(/^stop\s+([A-Za-z0-9_-]{6,})$/i);
-  if (stopMatch) return { type: "stop", runId: stopMatch[1] };
+  const cancelMatch = trimmed.match(/^cancel\s+(\S+)$/i);
+  if (cancelMatch && RUN_ID_RE.test(cancelMatch[1])) return { type: "cancel", runId: cancelMatch[1] };
+  const stopMatch = trimmed.match(/^stop\s+(\S+)$/i);
+  if (stopMatch && RUN_ID_RE.test(stopMatch[1])) return { type: "stop", runId: stopMatch[1] };
 
   return { type: "unknown", original: text };
 }
@@ -498,6 +501,73 @@ export function createSlackInterface(config: SlackInterfaceConfig): {
     }
     const replyText = await executePmCommand(cmd, withSlackUser(userId));
     return c.json({ response_type: "ephemeral", text: replyText });
+  });
+
+  // ------------------------------------------------------------------
+  // POST /slack/interactivity  (BEC-142: Block Kit button callbacks)
+  // ------------------------------------------------------------------
+  // Slack sends a URL-encoded body with a `payload` field containing JSON.
+  // Handles release_approve / release_skip button action_ids by delegating
+  // to the same releaseHandler used by /slack/commands.
+  router.post("/slack/interactivity", async (c) => {
+    const rawBody = await checkSignature(c);
+    if (rawBody === null) {
+      return c.json({ error: "Invalid signature" }, 401);
+    }
+
+    const params = new URLSearchParams(rawBody);
+    const payloadStr = params.get("payload");
+    if (!payloadStr) {
+      return c.json({ error: "Missing payload" }, 400);
+    }
+
+    let payload: Record<string, any>;
+    try {
+      payload = JSON.parse(payloadStr) as Record<string, any>;
+    } catch {
+      return c.json({ error: "Invalid payload JSON" }, 400);
+    }
+
+    // Only handle block_actions (button clicks). Acknowledge all other types.
+    if (payload.type !== "block_actions") {
+      return c.json({ ok: true });
+    }
+
+    if (!config.releaseHandler) {
+      log.warn("received block_actions but no releaseHandler configured");
+      return c.json({ ok: true });
+    }
+
+    const userId: string = (payload.user as { id?: string } | undefined)?.id ?? "";
+    const actions: unknown[] = Array.isArray(payload.actions) ? payload.actions : [];
+    const responseUrl = typeof payload.response_url === "string" ? payload.response_url : undefined;
+
+    for (const action of actions) {
+      const a = action as { action_id?: string; value?: string };
+      const actionId = a.action_id ?? "";
+
+      if (actionId === RELEASE_APPROVE_ACTION_ID) {
+        const r = await config.releaseHandler({ text: "approve", userId });
+        if (responseUrl) {
+          void postToResponseUrl(responseUrl, r.text, r.responseType);
+        }
+        break;
+      }
+
+      if (actionId === RELEASE_SKIP_ACTION_ID) {
+        const reason = typeof a.value === "string" && a.value.trim()
+          ? a.value.trim()
+          : "Skipped via button";
+        const r = await config.releaseHandler({ text: `skip ${reason}`, userId });
+        if (responseUrl) {
+          void postToResponseUrl(responseUrl, r.text, r.responseType);
+        }
+        break;
+      }
+    }
+
+    // Acknowledge the action immediately (Slack requires 200 within 3 seconds).
+    return c.json({ ok: true });
   });
 
   // ------------------------------------------------------------------

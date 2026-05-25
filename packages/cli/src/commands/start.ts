@@ -61,6 +61,12 @@ async function scheduleRepeatedly(
   return handle;
 }
 
+/** Parse an env var as a positive integer, returning defaultValue if absent, non-integer, or non-positive. */
+function parsePositiveIntEnvVar(value: string | undefined, defaultValue: number): number {
+  const parsed = parseInt(value ?? String(defaultValue), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
+}
+
 export const startCommand = new Command("start")
   .description("Start production server (webhook + dashboard)")
   .option("--port <port>", "Webhook server port", "3000")
@@ -72,10 +78,9 @@ export const startCommand = new Command("start")
   )
   .action(async (options) => {
     try {
-    loadUserLevelEnv();
-    // Boot-time env validation — runs first, reports all errors at once.
-    const env = loadEnvConfig("start");
-
+      loadUserLevelEnv();
+      // Boot-time env validation — runs first, reports all errors at once.
+      const env = loadEnvConfig("start");
 
     const { createApp, defaultConfigs, applyDeepReviewPassesOverride, applyAutoMergeOverride, cleanupWorktrees, runAgentBranchSweep, addLogStream, initSlackAlertManager, createSlackAlertStream, validateReviewModels } = await import("@urateam/core");
 
@@ -586,15 +591,21 @@ export const startCommand = new Command("start")
         repoUrl: rmRepoUrl,
         isLicensed: () => isFeatureLicensed("release-manager"),
         linear: linearClient,
-        slack: env.SLACK_BOT_TOKEN
-          ? {
-              postMessage: async (channel, text) => {
+        slack: process.env.SLACK_BOT_TOKEN
+          ? (() => {
+              const slackPost = async (payload: object): Promise<boolean> => {
                 const { postSlackMessage } = await import("@urateam/core");
-                // postSlackMessage returns Promise<any> — no cast needed
-                const r = await postSlackMessage(env.SLACK_BOT_TOKEN!, { channel, text });
-                return r !== null && r.ok !== false;
-              },
-            }
+                const r = await postSlackMessage(process.env.SLACK_BOT_TOKEN!, payload);
+                return r !== null && (r as { ok?: boolean }).ok !== false;
+              };
+              return {
+                postMessage: (channel: string, text: string) =>
+                  slackPost({ channel, text }),
+                // BEC-142: Block Kit messages for awaiting-approval prompts (Approve/Skip buttons).
+                postBlockKit: (channel: string, blocks: Record<string, unknown>[], fallbackText: string) =>
+                  slackPost({ channel, blocks, text: fallbackText }),
+              };
+            })()
           : undefined,
       });
 
