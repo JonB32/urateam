@@ -32,6 +32,7 @@ import { decide } from "./decide.js";
 import { bumpFromConfigAndCommits } from "./versioning.js";
 import { createTagAndRelease, parseRepoFromUrl } from "./github.js";
 import type { ReleaseManagerConfig } from "./types.js";
+import { RELEASE_APPROVE_ACTION_ID, RELEASE_SKIP_ACTION_ID } from "./types.js";
 import { triggerWorkflow, pollWorkflowRun, workflowFileExists } from "../qa/github.js";
 import { markGapResolved } from "../qa/gap.js";
 import { makeCallClaude } from "../pm/call-claude.js";
@@ -57,13 +58,8 @@ const log = createLogger({ component: "ReleaseManager:scheduler" });
  */
 const MAX_AUDITED_RUN_IDS = 10_000;
 
-/**
- * Sentinel attempt count that permanently skips retry logic for a dispatch
- * failure that cannot recover (e.g. workflow misconfigured via dispatch_422).
- * Must exceed MAX_QA_RETRY_ATTEMPTS so the circuit-breaker is never triggered
- * on a retriable path.
- */
-const PERMANENT_FAILURE_ATTEMPT_COUNT = 99;
+/** Sentinel attempt count that signals a permanent skip (no further retries). */
+const PERMANENT_SKIP_ATTEMPT_COUNT = 99;
 
 /**
  * Mutable per-instance state that persists across tick invocations.
@@ -356,7 +352,7 @@ export async function tick(ctx: TickContext): Promise<void> {
         }));
       } else if (dispatch.kind === "dispatch_422") {
         finalReason = "qa_dispatch_error";
-        attemptCount = PERMANENT_FAILURE_ATTEMPT_COUNT; // permanent skip — workflow misconfigured, retrying won't help
+        attemptCount = PERMANENT_SKIP_ATTEMPT_COUNT; // permanent skip — workflow misconfigured, retrying won't help
       } else if (dispatch.kind === "dispatch_pending") {
         // GitHub eventual-consistency window. The HTTP dispatch DID succeed (204 OK), so
         // reset the retry counter to 0 — a successful dispatch is not a failure.
@@ -458,13 +454,13 @@ export async function tick(ctx: TickContext): Promise<void> {
           {
             type: "button",
             text: { type: "plain_text", text: "✅ Approve", emoji: true },
-            action_id: "release_approve",
+            action_id: RELEASE_APPROVE_ACTION_ID,
             style: "primary",
           },
           {
             type: "button",
             text: { type: "plain_text", text: "⏭ Skip", emoji: true },
-            action_id: "release_skip",
+            action_id: RELEASE_SKIP_ACTION_ID,
             value: "Skipped via button",
           },
         ],

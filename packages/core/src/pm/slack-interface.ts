@@ -23,6 +23,8 @@ import { makeCallClaude, makeCallClaudeSonnet } from "./call-claude.js";
 import { postSlackMessage, reactToSlackMessage } from "./slack-helpers.js";
 import { executePmCommand } from "./slack-commands.js";
 import type { CommandExecutorDeps, PmCommand } from "./slack-commands.js";
+import type { SlackResponse } from "../release-manager/slack-handler.js";
+import { RELEASE_APPROVE_ACTION_ID, RELEASE_SKIP_ACTION_ID } from "../release-manager/types.js";
 
 const log = createLogger({ component: "PmAgent:slack-interface" });
 
@@ -114,7 +116,7 @@ export interface SlackInterfaceConfig {
   /** Optional Sonnet-model callable for bulk create analysis (defaults to Sonnet if not provided) */
   callClaudeSonnet?: (prompt: string) => Promise<string>;
   /** BEC-135: optional handler for /release subcommands. */
-  releaseHandler?: (params: { text: string; userId: string }) => Promise<{ text: string; responseType: "ephemeral" | "in_channel" }>;
+  releaseHandler?: (params: { text: string; userId: string }) => Promise<SlackResponse>;
   /**
    * Live runner reference. Required for the `cancel`/`stop`/`halt` Slack
    * commands. When absent, those commands report a clear configuration error
@@ -204,6 +206,7 @@ export async function verifySlackSignature(
  *   "assign BEC-13"             → { type: "assign", issueId: "BEC-13" }
  */
 const ISSUE_ID_RE = /^[A-Z]+-\d+$/;
+const RUN_ID_RE = /^[A-Za-z0-9_-]{6,}$/;
 
 /**
  * Extracts and validates an issue ID from a command like "prioritize BEC-25".
@@ -252,10 +255,10 @@ export function parsePmCommand(text: string): PmCommand {
   // `cancel <runId>` and `stop <runId>` — runId is a nanoid (URL-safe chars,
   // 8+ in practice). Not validated against the DB here; the executor reports
   // "not found" for invalid ids so the operator sees a clear failure.
-  const cancelMatch = trimmed.match(/^cancel\s+([A-Za-z0-9_-]{6,})$/i);
-  if (cancelMatch) return { type: "cancel", runId: cancelMatch[1] };
-  const stopMatch = trimmed.match(/^stop\s+([A-Za-z0-9_-]{6,})$/i);
-  if (stopMatch) return { type: "stop", runId: stopMatch[1] };
+  const cancelMatch = trimmed.match(/^cancel\s+(\S+)$/i);
+  if (cancelMatch && RUN_ID_RE.test(cancelMatch[1])) return { type: "cancel", runId: cancelMatch[1] };
+  const stopMatch = trimmed.match(/^stop\s+(\S+)$/i);
+  if (stopMatch && RUN_ID_RE.test(stopMatch[1])) return { type: "stop", runId: stopMatch[1] };
 
   return { type: "unknown", original: text };
 }
@@ -542,7 +545,7 @@ export function createSlackInterface(config: SlackInterfaceConfig): {
     for (const action of actions) {
       const actionId = action.action_id as string;
 
-      if (actionId === "release_approve") {
+      if (actionId === RELEASE_APPROVE_ACTION_ID) {
         const r = await config.releaseHandler({ text: "approve", userId });
         if (responseUrl) {
           void postToResponseUrl(responseUrl, r.text, r.responseType);
@@ -550,7 +553,7 @@ export function createSlackInterface(config: SlackInterfaceConfig): {
         break;
       }
 
-      if (actionId === "release_skip") {
+      if (actionId === RELEASE_SKIP_ACTION_ID) {
         const reason = typeof action.value === "string" && action.value.trim()
           ? action.value.trim()
           : "Skipped via button";
