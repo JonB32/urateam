@@ -2,6 +2,7 @@ import type { HandoffArtifact, ReviewFinding } from "../../types.js";
 import { AgenticDeepReviewProvider } from "./agentic-deep-review.js";
 import { OpenRouterFanoutProvider } from "./openrouter-fanout.js";
 import { createLogger } from "../../logger.js";
+import { parseIntOr, parsePositiveIntOrUndefined } from "../../util/env.js";
 
 const log = createLogger({ component: "review.provider" });
 
@@ -187,14 +188,3 @@ function levenshtein(a: string, b: string): number {
   return dp[n];
 }
 
-function parseIntOr(raw: string | undefined, fallback: number): number {
-  if (!raw) return fallback;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-function parsePositiveIntOrUndefined(raw: string | undefined): number | undefined {
-  if (!raw) return undefined;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : undefined;
-}

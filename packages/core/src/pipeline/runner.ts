@@ -100,6 +100,7 @@ import { evaluatePolicyGates } from "../policy/evaluate.js";
 import { buildReviewerRequest, verifyApprovalsReceived } from "../policy/index.js";
 import { logAuditEvent, policyReviewersRequestedEvent, reviewFanoutFallbackUsedEvent } from "../audit/index.js";
 import { matchesAnyPattern } from "../util/glob.js";
+import { parseJsonOr } from "../util/json.js";
 
 // Module-level logger (no runId yet — used for pre-run messages)
 const log = createLogger({ component: "PipelineRunner" });
@@ -336,17 +337,15 @@ export class PipelineRunner {
       return;
     }
 
-    let payload: {
+    const payload = parseJsonOr<{
       handoff: HandoffArtifact | null;
       pipelineConfig: PipelineConfig;
       repoConfig: RepoConfig;
       sanitizedIssue: SanitizedIssue;
       worktreePath: string;
-    };
+    } | null>(pausedRun.resumePayload, null);
 
-    try {
-      payload = JSON.parse(pausedRun.resumePayload);
-    } catch {
+    if (payload === null) {
       runLog.error("resume payload is invalid JSON — failing run");
       await db
         .update(pipelineRuns)

@@ -27,6 +27,7 @@ import { createLogger } from "../logger.js";
 import { logAuditEventUnchecked, budgetRefusedEvent, pruneAuditLog } from "../audit/index.js";
 import { pruneExpiredSessions } from "../auth/index.js";
 import { recomputeCostRollups } from "../cost/index.js";
+import { parseIntOr } from "../util/env.js";
 
 const log = createLogger({ component: "PmAgent:scheduler" });
 
@@ -267,8 +268,7 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
             // PM_AGENT_STUCK_RUN_AGE_MIN: use isNaN guard so '0' doesn't silently
             // fall back to 60 via || falsy check; clamp to ≥1 min to prevent
             // overly-aggressive recovery on mis-configured deployments.
-            const _parsedAge = parseInt(process.env.PM_AGENT_STUCK_RUN_AGE_MIN ?? "", 10);
-            const stuckRunAgeMinutes = isNaN(_parsedAge) ? 60 : Math.max(1, _parsedAge);
+            const stuckRunAgeMinutes = Math.max(1, parseIntOr(process.env.PM_AGENT_STUCK_RUN_AGE_MIN, 60));
             const stuckResult = actions?.recoverStuckInProgressIssues
               ? await actions.recoverStuckInProgressIssues({} as any)
               : await recoverStuckInProgressIssues({
