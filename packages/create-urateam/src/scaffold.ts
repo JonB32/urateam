@@ -71,6 +71,12 @@ export interface ScaffoldOptions {
   caddyEmail?: string;
   /** Linear webhook signing secret — must match the value set in Linear. */
   linearWebhookSecret?: string;
+  /**
+   * Long-lived programmatic OAuth token from `claude setup-token`. Recommended for
+   * subscription users on headless / containerized deploys. Takes precedence over
+   * ANTHROPIC_API_KEY and the mounted CLI session.
+   */
+  claudeCodeOauthToken?: string;
   /** Anthropic auth — set this for headless / API-key path; omit for `claude login`. */
   anthropicApiKey?: string;
   /** Pro license JWT. If omitted, the scaffolded sidecar runs in OSS mode. */
@@ -247,6 +253,7 @@ export function buildEnv(
     linearWebhookSecret: string;
     domain: string;
     caddyEmail: string;
+    claudeCodeOauthToken: string;
     anthropicApiKey: string;
     licenseKey: string;
     dashboardUser: string;
@@ -290,11 +297,15 @@ export function buildEnv(
   push(`REPO_TEAM_ID=${options.linearTeamId}`);
   blank();
 
-  push("# === Anthropic auth ===");
-  if (options.anthropicApiKey) {
+  push("# === Anthropic auth (pick ONE; precedence: CLAUDE_CODE_OAUTH_TOKEN > ANTHROPIC_API_KEY > claude login) ===");
+  if (options.claudeCodeOauthToken) {
+    push(`CLAUDE_CODE_OAUTH_TOKEN=${options.claudeCodeOauthToken}`);
+  } else if (options.anthropicApiKey) {
     push(`ANTHROPIC_API_KEY=${options.anthropicApiKey}`);
   } else {
-    push("# ANTHROPIC_API_KEY=  # blank → run `docker compose exec agent claude login` after deploy");
+    push("# CLAUDE_CODE_OAUTH_TOKEN=  # recommended: run `claude setup-token` (long-lived, subscription billing, no weekly expiry)");
+    push("# ANTHROPIC_API_KEY=  # alternative: pay-per-token API key");
+    push("# Or run `docker compose exec agent claude login` after deploy (legacy — expires weekly)");
   }
   blank();
 
@@ -579,10 +590,11 @@ export function scaffold(options: ScaffoldOptions): ScaffoldResult {
           "PM_AGENT_* + SLACK_* lines in .env to enable it.",
       );
     }
-    if (!options.anthropicApiKey) {
+    if (!options.claudeCodeOauthToken && !options.anthropicApiKey) {
       todos.push(
-        "Anthropic auth — run `docker compose exec agent claude login` after the stack is up " +
-          "(or set ANTHROPIC_API_KEY in .env for headless API auth).",
+        "Anthropic auth — run `claude setup-token` and set CLAUDE_CODE_OAUTH_TOKEN in .env " +
+          "(recommended: long-lived subscription billing), or set ANTHROPIC_API_KEY for pay-per-token, " +
+          "or run `docker compose exec agent claude login` after deploy (legacy — expires weekly).",
       );
     }
     todos.push(
@@ -619,6 +631,7 @@ export function scaffold(options: ScaffoldOptions): ScaffoldResult {
       linearWebhookSecret,
       domain: options.domain ?? "",
       caddyEmail: options.caddyEmail ?? "",
+      claudeCodeOauthToken: options.claudeCodeOauthToken ?? "",
       anthropicApiKey: options.anthropicApiKey ?? "",
       licenseKey: options.licenseKey ?? "",
       dashboardUser: options.dashboardUser ?? "admin",

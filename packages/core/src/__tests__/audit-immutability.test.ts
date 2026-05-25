@@ -100,6 +100,7 @@ describe("audit_events immutability", () => {
       // still trip; the allow-list entry is the right surface for "this
       // file mentions the name but does not invoke it" exceptions.
       "packages/core/src/security/review-checklist.ts",
+      "packages/core/src/__tests__/auth-monitor.test.ts",
     ];
 
     let matches: string[] = [];

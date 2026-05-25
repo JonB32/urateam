@@ -106,13 +106,15 @@ Each gate forces `shouldDraft = true` and emits one blocking `ReviewFinding` per
 - **GitHub PR feedback** at `/webhooks/github`: `pull_request_review`, `pull_request_review_comment`, and `issue_comment` (regular PR comments — supports `@ateam` trigger keyword) all trigger `review-feedback` pipeline runs that check out the existing branch.
 
 ### Claude Authentication
-
-Three paths (full guide: `deploy/CLAUDE_AUTH.md`):
-1. `ANTHROPIC_API_KEY` — long-lived API key, pay-per-token. Recommended for production.
-2. `CLAUDE_CODE_OAUTH_TOKEN` — programmatic OAuth token from `claude setup-token`, bills against Pro/Max. Recommended for subscription users on headless deploys.
-3. Local `claude login` session at `~/.config/claude/` — convenient for dev but **expires weekly**.
-
-Precedence: `CLAUDE_CODE_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` → local session. `preflightClaudeAuth` (`packages/cli/src/lib/preflight-claude-auth.ts`) gates boot on session validity; no-op when either env var is set. BEC-207 tracks first-class executor support for `CLAUDE_CODE_OAUTH_TOKEN`.
+- Three supported paths (full guide in `deploy/CLAUDE_AUTH.md`):
+  1. `CLAUDE_CODE_OAUTH_TOKEN` — long-lived programmatic OAuth token from `claude setup-token`. Bills against Pro/Max subscription. **Recommended for subscription users on headless deploys.**
+  2. `ANTHROPIC_API_KEY` — long-lived API key, pay-per-token. Recommended for production with API billing.
+  3. Local `claude login` session — mounted credentials at `~/.config/claude/`. Convenient for local dev but **expires weekly**; not for production.
+- Precedence: `CLAUDE_CODE_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` → local session.
+- `resolveClaudeAuth()` (`packages/core/src/executor/auth-check.ts`) returns the active auth method; executor calls this before every Agent SDK invocation.
+- `preflightClaudeAuth` (`packages/cli/src/lib/preflight-claude-auth.ts`) gates boot on session validity. No-op (returns immediately) when `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` is set — those have no session-lifetime semantics. Only runs `claude auth status` subprocess when neither env var is present.
+- `isClaudeAuthValid()` — same env-var short-circuit: returns `true` immediately when either env var is set; only invokes the `claude auth status` subprocess for the local-session path.
+- **AuthMonitor** runs every 6h within PM tick. When neither env var is set, validates the mounted `claude` session and sends a Slack alert to `SLACK_ERROR_ALERTS` + logs `claude.auth_expired` audit event if expired. No-op when env-var auth is configured.
 
 ### Agent Execution
 
@@ -282,7 +284,7 @@ All gated by `isFeatureLicensed(<feature>)`. Routes 404 when unlicensed.
 
 | Feature | License | Setup doc | Notes |
 |---------|---------|-----------|-------|
-| Audit log (4.2) | `audit-log` | — | Append-only `audit_events` + projection from `pipeline_runs`/`pm_approvals`/`budget_alerts`. Dashboard: `/audit` + `/audit/page` + `/audit/export.csv`. Mutation only via `audit/retention.ts:pruneAuditLog` (enforced by `__tests__/audit-immutability.test.ts`). Retention default 365d in PM tick. **Canonical event list lives in `AuditEventTypeSchema` (`packages/core/src/types.ts`)** — don't duplicate that list here. **Current count: 63 event types** — the Tier 1d test enforces this sentence stays in sync with `AuditEventTypeSchema.options.length`. |
+| Audit log (4.2) | `audit-log` | — | Append-only `audit_events` + projection from `pipeline_runs`/`pm_approvals`/`budget_alerts`. Dashboard: `/audit` + `/audit/page` + `/audit/export.csv`. Mutation only via `audit/retention.ts:pruneAuditLog` (enforced by `__tests__/audit-immutability.test.ts`). Retention default 365d in PM tick. **Canonical event list lives in `AuditEventTypeSchema` (`packages/core/src/types.ts`)** — don't duplicate that list here. **Current count: 64 event types** — the Tier 1d test enforces this sentence stays in sync with `AuditEventTypeSchema.options.length`. |
 | SSO via WorkOS (4.1) | `sso` | `deploy/SSO_SETUP.md` | `dashboard_users` + `dashboard_sessions` tables. Middleware `packages/dashboard/src/middleware/sso.ts` skips `/auth/*` + `/webhooks/*`. **`getUserById` MUST return `role`** — dropping it silently 403s every user. **Session IDs are credentials — never log them** (`touchSessionLastSeen` logs only `id.slice(0,8) + "…"`). |
 | RBAC (4.4) | `rbac` | `deploy/RBAC_SETUP.md` | Roles `admin` / `operator` / `viewer`, global only in v1. Bootstrap via `URATEAM_ADMIN_EMAILS` env var (comma-separated, case-insensitive). `setUserRole` wraps SELECT+COUNT+UPDATE in a transaction to prevent last-admin demotion TOCTOU. Admin UI `/users`; CLI `ura admin {list,grant,revoke}`. v1 write action: `POST /runs/:id/retry`. |
 | Org policy (4.6) | `org-policy` | — | `PipelineConfig.policy = { pathBlocklist, maxTokensPerIssue, overrideLabel, mandatoryReviewers }`. Cost gate checks token total once after all stages. Override: case-insensitive Linear-label check; **security note: relies on Linear label creation being restricted**. Reviewer gate fires on GitHub App path only at auto-merge — `gh` CLI fallback passes `--reviewer` at PR creation but can't poll approvals. **Team-membership cache** in `verifyApprovalsReceived` (TTL 15 min, keyed by `(org, team_slug)`) — prevents GitHub secondary rate-limit exhaustion. Audit: `policy.{path_blocked,cost_exceeded,override_used,reviewers_requested}`. |
