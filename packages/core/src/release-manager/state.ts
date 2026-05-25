@@ -1,4 +1,4 @@
-import { and, eq, isNull, desc, gte } from "drizzle-orm";
+import { and, eq, isNull, desc, gte, or } from "drizzle-orm";
 import type { Octokit } from "@octokit/rest";
 import type { AnyDb } from "../db/client.js";
 import { releaseApprovals, releaseDecisions } from "../db/schema.js";
@@ -49,8 +49,10 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
     log.warn({ err, repoUrl, branch }, "listTags failed — treating as no-tag");
   }
 
-  // 3. Manual-tag detection: did any release_decisions with kind="fire" record
-  //    a fired_tag, and does the current latest tag differ from it?
+  // 3. Manual-tag detection: did any release_decisions with kind="fire" or
+  //    "fire-pending" record a fired_tag, and does the current latest tag
+  //    differ from it? Including "fire-pending" prevents a partial-fire tag
+  //    from being misread as a human-created manual tag on the next tick.
   const lastFired = await (db as any)
     .select({ firedTag: releaseDecisions.firedTag })
     .from(releaseDecisions)
@@ -58,7 +60,10 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
       and(
         eq(releaseDecisions.repoUrl, repoUrl),
         eq(releaseDecisions.branch, branch),
-        eq(releaseDecisions.decision, "fire"),
+        or(
+          eq(releaseDecisions.decision, "fire"),
+          eq(releaseDecisions.decision, "fire-pending"),
+        ),
       ),
     )
     .orderBy(desc(releaseDecisions.decidedAt))

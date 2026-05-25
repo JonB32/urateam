@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { randomBytes } from "node:crypto";
 import { unlinkSync } from "node:fs";
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { createDb } from "../db/index.js";
-import { releaseDecisions, releaseApprovals } from "../db/schema.js";
+import { auditEvents, releaseDecisions, releaseApprovals } from "../db/schema.js";
 import { createReleaseManagerScheduler } from "../release-manager/scheduler.js";
 import { _resetLicenseCache } from "../license.js";
 import { ReleaseManagerConfigSchema } from "../release-manager/types.js";
@@ -455,5 +455,257 @@ describe("createReleaseManagerScheduler — qaCheck integration", () => {
     expect(rows.length).toBe(3);
     expect(rows[2].reason).toBe("qa_dispatch_error");
     expect(rows[2].decision).toBe("skip");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BEC-139: fire-pending retry sweep
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Build a mock octokit suitable for sweep tests.
+ * - listTags returns the already-created `v1.0.1` tag (orphaned by the initial failure).
+ * - compareCommits returns 0 commits (so the main-tick path skips with mergedPRsSince).
+ * - git.getRef succeeds (tag exists).
+ * - createRelease is configurable per test.
+ */
+function makeFirePendingOctokit(over: {
+  createRelease?: (input: any) => Promise<any>;
+  getRef?: (input: any) => Promise<any>;
+} = {}) {
+  return {
+    repos: {
+      getBranch: vi.fn(async () => ({ data: { commit: { sha: "head_sha" } } })),
+      listTags: vi.fn(async () => ({
+        data: [{ name: "v1.0.1", commit: { sha: "head_sha" } }],
+      })),
+      getCommit: vi.fn(async () => ({
+        data: { commit: { committer: { date: "2026-04-01T12:00:00Z" } } },
+      })),
+      compareCommits: vi.fn(async () => ({ data: { commits: [] } })),
+      listCommits: vi.fn(async () => ({ data: [] })),
+      createRelease: vi.fn(over.createRelease ?? (async () => {
+        throw new Error("createRelease failed");
+      })),
+    },
+    git: {
+      createRef: vi.fn(async () => ({ data: {} })),
+      getRef: vi.fn(over.getRef ?? (async () => ({ data: { object: { sha: "head_sha" } } }))),
+    },
+    checks: {
+      listForRef: vi.fn(async () => ({
+        data: {
+          check_runs: [
+            { status: "completed", conclusion: "success", completed_at: "2026-05-01T11:00:00Z" },
+          ],
+        },
+      })),
+    },
+  } as any;
+}
+
+describe("createReleaseManagerScheduler — BEC-139 fire-pending retry sweep", () => {
+  const paths: string[] = [];
+  let db: any;
+  const repoUrl = "https://github.com/org/repo";
+  const branch = "main";
+
+  // Use a high threshold so the main tick always skips; sweep tests own the rows.
+  const sweepConfig = ReleaseManagerConfigSchema.parse({
+    enabled: true,
+    triggers: { mergedPRsSince: 100 },
+    slackChannel: "#releases",
+  });
+
+  beforeEach(async () => {
+    delete process.env.URATEAM_LICENSE_KEY;
+    _resetLicenseCache();
+    const path = tmpDbPath();
+    paths.push(path);
+    const created = await createDb({ driver: "sqlite", connectionString: path });
+    db = created as any;
+  });
+
+  afterEach(() => {
+    for (const p of paths) {
+      try { unlinkSync(p); } catch {}
+      try { unlinkSync(p + "-wal"); } catch {}
+      try { unlinkSync(p + "-shm"); } catch {}
+    }
+    paths.length = 0;
+    _resetLicenseCache();
+  });
+
+  it("AC1: release_create_failed path writes fire-pending row, not an immediate skip", async () => {
+    // Tick where createRef succeeds but createRelease fails — must write fire-pending.
+    const octokit = {
+      repos: {
+        getBranch: vi.fn(async () => ({ data: { commit: { sha: "head_sha" } } })),
+        listTags: vi.fn(async () => ({ data: [{ name: "v1.0.0", commit: { sha: "old_sha" } }] })),
+        getCommit: vi.fn(async () => ({ data: { commit: { committer: { date: "2026-04-01T12:00:00Z" } } } })),
+        compareCommits: vi.fn(async () => ({
+          data: { commits: [{ commit: { message: "fix: a" } }, { commit: { message: "fix: b" } }] },
+        })),
+        listCommits: vi.fn(async () => ({ data: [] })),
+        createRelease: vi.fn(async () => { throw new Error("GitHub 500"); }),
+      },
+      git: {
+        createRef: vi.fn(async () => ({ data: {} })),
+        getRef: vi.fn(async () => ({ data: { object: { sha: "head_sha" } } })),
+      },
+      checks: {
+        listForRef: vi.fn(async () => ({
+          data: { check_runs: [{ status: "completed", conclusion: "success", completed_at: "2026-05-01T11:00:00Z" }] },
+        })),
+      },
+    } as any;
+
+    const cfg = ReleaseManagerConfigSchema.parse({ enabled: true, triggers: { mergedPRsSince: 1 } });
+    const sched = createReleaseManagerScheduler({ config: cfg, db, octokit, repoUrl, isLicensed: () => true, slack: undefined });
+    await sched.tick();
+
+    const rows = await db.select().from(releaseDecisions);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].decision).toBe("fire-pending");
+    expect(rows[0].reason).toBe("release_create_failed");
+    expect(rows[0].firedTag).toMatch(/^v1\.0\.1$/);
+    expect(rows[0].attemptCount).toBe(1);
+  });
+
+  it("AC1: 3 sweep attempts all fail → skip with release_create_failed_after_retries, releasePartialEvent audited", async () => {
+    // Pre-seed a fire-pending row representing the initial failure (attemptCount=1).
+    await db.insert(releaseDecisions).values({
+      id: "rd_fp",
+      repoUrl,
+      branch,
+      decidedAt: new Date(Date.now() - 7200_000),
+      decision: "fire-pending",
+      reason: "release_create_failed",
+      triggerStateJson: JSON.stringify({ mergedCommitsSinceLastTag: 2 }),
+      proposedVersion: "v1.0.1",
+      firedTag: "v1.0.1",
+      firedSha: "head_sha",
+      attemptCount: 1,
+    });
+
+    const octokit = makeFirePendingOctokit(); // createRelease always throws
+
+    const sched = createReleaseManagerScheduler({
+      config: sweepConfig, db, octokit, repoUrl, isLicensed: () => true, slack: undefined,
+    });
+
+    // Tick 2: attemptCount 1→2 (still fire-pending)
+    await sched.tick();
+    const afterTick2 = await db.select().from(releaseDecisions).where(eq(releaseDecisions.id, "rd_fp"));
+    expect(afterTick2[0].decision).toBe("fire-pending");
+    expect(afterTick2[0].attemptCount).toBe(2);
+
+    // Tick 3: attemptCount 2→3 — exhausted, write new skip row
+    await sched.tick();
+    const allRows = await db.select().from(releaseDecisions).orderBy(desc(releaseDecisions.decidedAt));
+    const skipRow = allRows.find((r: any) => r.reason === "release_create_failed_after_retries");
+    expect(skipRow).toBeDefined();
+    expect(skipRow!.decision).toBe("skip");
+    expect(skipRow!.firedTag).toBe("v1.0.1");
+    expect(skipRow!.attemptCount).toBe(3);
+
+    // releasePartialEvent must have been written to the audit table.
+    const audits = await db.select().from(auditEvents).where(eq(auditEvents.eventType, "release.partial"));
+    expect(audits.length).toBeGreaterThanOrEqual(1);
+    expect(JSON.parse(audits[0].payload).tag).toBe("v1.0.1");
+    expect(JSON.parse(audits[0].payload).attemptCount).toBe(3);
+  });
+
+  it("AC2: sweep retry succeeds → fire-pending row updated to fire, releaseFiredEvent audited, Slack posts", async () => {
+    // Pre-seed a fire-pending row.
+    await db.insert(releaseDecisions).values({
+      id: "rd_fp2",
+      repoUrl,
+      branch,
+      decidedAt: new Date(Date.now() - 3600_000),
+      decision: "fire-pending",
+      reason: "release_create_failed",
+      triggerStateJson: JSON.stringify({ mergedCommitsSinceLastTag: 2 }),
+      proposedVersion: "v1.0.1",
+      firedTag: "v1.0.1",
+      firedSha: "head_sha",
+      attemptCount: 1,
+    });
+
+    const octokit = makeFirePendingOctokit({
+      createRelease: async () => ({
+        data: { html_url: "https://github.com/org/repo/releases/tag/v1.0.1" },
+      }),
+    });
+
+    const slackMock = { postMessage: vi.fn(async () => true) };
+    const sched = createReleaseManagerScheduler({
+      config: sweepConfig, db, octokit, repoUrl, isLicensed: () => true, slack: slackMock,
+    });
+
+    await sched.tick();
+
+    // Row must now be decision="fire".
+    const updated = await db.select().from(releaseDecisions).where(eq(releaseDecisions.id, "rd_fp2"));
+    expect(updated[0].decision).toBe("fire");
+
+    // releaseFiredEvent must appear in audit_events.
+    const audits = await db.select().from(auditEvents).where(eq(auditEvents.eventType, "release.fired"));
+    expect(audits.length).toBeGreaterThanOrEqual(1);
+    expect(JSON.parse(audits[0].payload).tag).toBe("v1.0.1");
+
+    // Slack was posted at least once with the retry-success message.
+    expect(slackMock.postMessage).toHaveBeenCalled();
+    const retrySuccessCall = (slackMock.postMessage as any).mock.calls.find(
+      (c: any[]) => /retry succeeded/i.test(c[1]),
+    );
+    expect(retrySuccessCall, "expected a Slack post containing 'retry succeeded'").toBeDefined();
+  });
+
+  it("AC3: fire-pending row with matching tag does NOT trigger manualTagDetected", async () => {
+    // Seed an old successful fire (v1.0.0) and a newer fire-pending (v1.0.1).
+    // GH reports v1.0.1 as the latest tag. Without the fix, state.ts would see
+    // lastFiredTag=v1.0.0 (fire-only query) and flag a manual tag detection.
+    await db.insert(releaseDecisions).values({
+      id: "rd_old_fire",
+      repoUrl,
+      branch,
+      decidedAt: new Date(Date.now() - 2 * 86_400_000),
+      decision: "fire",
+      reason: "all triggers passed",
+      triggerStateJson: "{}",
+      firedTag: "v1.0.0",
+      firedSha: "old_sha",
+      attemptCount: 0,
+    });
+    await db.insert(releaseDecisions).values({
+      id: "rd_fp3",
+      repoUrl,
+      branch,
+      decidedAt: new Date(Date.now() - 3600_000),
+      decision: "fire-pending",
+      reason: "release_create_failed",
+      triggerStateJson: JSON.stringify({ mergedCommitsSinceLastTag: 2 }),
+      proposedVersion: "v1.0.1",
+      firedTag: "v1.0.1",
+      firedSha: "head_sha",
+      attemptCount: 1,
+    });
+
+    const octokit = makeFirePendingOctokit(); // listTags returns v1.0.1, createRelease throws
+
+    const sched = createReleaseManagerScheduler({
+      config: sweepConfig, db, octokit, repoUrl, isLicensed: () => true, slack: undefined,
+    });
+    await sched.tick();
+
+    // If manualTagDetected had fired, a skip row with reason="manual_tag_detected" would appear.
+    const allRows = await db.select().from(releaseDecisions);
+    const manualRows = allRows.filter((r: any) => r.reason === "manual_tag_detected");
+    expect(manualRows).toHaveLength(0);
+
+    // The sweep should have incremented attemptCount to 2 (not exhausted yet).
+    const fp = await db.select().from(releaseDecisions).where(eq(releaseDecisions.id, "rd_fp3"));
+    expect(fp[0].attemptCount).toBe(2);
   });
 });

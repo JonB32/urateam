@@ -15,9 +15,11 @@
  *   - tick              — execute a single release-manager decision cycle
  */
 import { randomUUID } from "node:crypto";
+import { and, desc, eq, lt } from "drizzle-orm";
 import type { Octokit } from "@octokit/rest";
 import type { LinearClient } from "@linear/sdk";
 import type { AnyDb } from "../db/client.js";
+import { releaseDecisions } from "../db/schema.js";
 import { createLogger } from "../logger.js";
 import { logAuditEventUnchecked } from "../audit/writer.js";
 import {
@@ -54,6 +56,140 @@ const log = createLogger({ component: "ReleaseManager:scheduler" });
  * long-running deployments).
  */
 const MAX_AUDITED_RUN_IDS = 10_000;
+
+/** Maximum createRelease attempts before a fire-pending row is exhausted. */
+const MAX_FIRE_PENDING_ATTEMPTS = 3;
+
+/**
+ * Retry sweep for fire-pending rows.
+ *
+ * Called at the top of every tick, before collectState, so the state query
+ * sees the result of any successful retry (avoiding a spurious
+ * `manual_tag_detected` skip on the same tick).
+ *
+ * For each fire-pending row with attemptCount < MAX_FIRE_PENDING_ATTEMPTS:
+ *   - Verify the tag still exists in GitHub (skip if 404, fail-open on error).
+ *   - Call createRelease only (the tag already exists).
+ *   - Success → update the row to decision="fire", audit releaseFiredEvent.
+ *   - Failure → increment attemptCount. When it reaches the cap, write a new
+ *     skip row with reason="release_create_failed_after_retries" and audit
+ *     releasePartialEvent.
+ */
+async function sweepFirePendingRows(ctx: TickContext): Promise<void> {
+  const { db, octokit, repoUrl, branch, slack, mutableState, config } = ctx;
+
+  const pending = await (db as any)
+    .select()
+    .from(releaseDecisions)
+    .where(
+      and(
+        eq(releaseDecisions.repoUrl, repoUrl),
+        eq(releaseDecisions.branch, branch),
+        eq(releaseDecisions.decision, "fire-pending"),
+        lt(releaseDecisions.attemptCount, MAX_FIRE_PENDING_ATTEMPTS),
+      ),
+    )
+    .orderBy(desc(releaseDecisions.decidedAt));
+
+  if (pending.length === 0) return;
+
+  const { owner, repo } = parseRepoFromUrl(repoUrl);
+
+  for (const row of pending) {
+    const tag: string = row.firedTag;
+    const sha: string = row.firedSha ?? "";
+
+    if (!tag) continue;
+
+    // Verify the tag still exists in GitHub before attempting createRelease.
+    try {
+      await octokit.git.getRef({ owner, repo, ref: `tags/${tag}` });
+    } catch (refErr: any) {
+      if (refErr?.status === 404) {
+        log.info({ repoUrl, branch, tag }, "fire-pending: tag no longer exists — operator cleaned up; skipping retry");
+        continue;
+      }
+      // Network/other error — fail-open and try createRelease anyway.
+      log.warn({ err: refErr, repoUrl, branch, tag }, "fire-pending: getRef failed — attempting createRelease anyway");
+    }
+
+    let releaseUrl: string | undefined;
+    let createFailed = false;
+
+    try {
+      const res = await octokit.repos.createRelease({
+        owner,
+        repo,
+        tag_name: tag,
+        target_commitish: sha,
+        generate_release_notes: true,
+      });
+      releaseUrl = (res as any)?.data?.html_url ?? `https://github.com/${owner}/${repo}/releases/tag/${tag}`;
+    } catch (releaseErr: any) {
+      createFailed = true;
+      const newAttemptCount = row.attemptCount + 1;
+
+      if (newAttemptCount >= MAX_FIRE_PENDING_ATTEMPTS) {
+        const skipId = `rd_${randomUUID()}`;
+        await persistDecision(db, repoUrl, branch, {
+          id: skipId,
+          decision: "skip",
+          reason: "release_create_failed_after_retries",
+          triggerStateJson: row.triggerStateJson,
+          proposedVersion: row.proposedVersion ?? undefined,
+          firedTag: tag,
+          firedSha: sha,
+          attemptCount: newAttemptCount,
+        });
+        void logAuditEventUnchecked(
+          db,
+          releasePartialEvent({ repoUrl, branch, tag, attemptCount: newAttemptCount }),
+        );
+        log.error(
+          { repoUrl, branch, tag, attemptCount: newAttemptCount },
+          "fire-pending: release creation exhausted retries — manual cleanup required",
+        );
+      } else {
+        await (db as any)
+          .update(releaseDecisions)
+          .set({ attemptCount: newAttemptCount })
+          .where(eq(releaseDecisions.id, row.id));
+        log.warn(
+          { repoUrl, branch, tag, attemptCount: newAttemptCount, err: releaseErr?.message },
+          "fire-pending: createRelease retry failed — will retry next tick",
+        );
+      }
+    }
+
+    if (createFailed) continue;
+
+    // Success — promote row to decision="fire".
+    await (db as any)
+      .update(releaseDecisions)
+      .set({ decision: "fire" })
+      .where(eq(releaseDecisions.id, row.id));
+
+    let mergedPrCount = 0;
+    try {
+      mergedPrCount = JSON.parse(row.triggerStateJson)?.mergedCommitsSinceLastTag ?? 0;
+    } catch {}
+
+    void logAuditEventUnchecked(
+      db,
+      releaseFiredEvent({ repoUrl, branch, tag, sha, mergedPrCount }),
+    );
+    log.info({ repoUrl, branch, tag, releaseUrl }, "fire-pending: retry succeeded");
+    await maybePostSlack(
+      slack,
+      config.slackChannel,
+      db,
+      mutableState.slackDedup,
+      `:rocket: Released *${tag}* for ${repoUrl} (${branch}) — retry succeeded. ${releaseUrl}`,
+      null,
+    );
+    mutableState.slackDedup.lastSkipReason = null;
+  }
+}
 
 /**
  * Mutable per-instance state that persists across tick invocations.
@@ -172,6 +308,15 @@ export async function tick(ctx: TickContext): Promise<void> {
   if (Date.now() < mutableState.pausedUntilTs) {
     log.info({ pausedUntilTs: mutableState.pausedUntilTs }, "scheduler paused (via /release skip) — skipping tick");
     return;
+  }
+
+  // Retry any fire-pending rows before collecting state so that a successfully
+  // retried tag is reflected in the state query (preventing spurious
+  // manual_tag_detected on the same tick).
+  try {
+    await sweepFirePendingRows(ctx);
+  } catch (sweepErr) {
+    log.error({ err: sweepErr, repoUrl, branch }, "sweepFirePendingRows failed — continuing tick");
   }
 
   let state;
@@ -445,29 +590,23 @@ export async function tick(ctx: TickContext): Promise<void> {
   }
 
   if (githubResult.kind === "release_create_failed") {
-    // Tag was created; release-creation failed. Write a single skip row with the
-    // partial-fire details so an operator can see what happened and clean up the
-    // orphaned tag manually. v1 does NOT retry release-creation across ticks
-    // (the tag is now committed, so the next tick would hit `tag_exists` and
-    // skip again — see plan §"Known v1 simplifications"). Proper retry is a v2
-    // feature requiring a tick-start sweep that calls only `createRelease` for
-    // matching fire-pending rows.
+    // Tag was created but release-creation failed. Write a fire-pending row so
+    // the tick-start sweep can retry createRelease on subsequent ticks (up to
+    // MAX_FIRE_PENDING_ATTEMPTS total). No releasePartialEvent is emitted here;
+    // that fires only after all retry attempts are exhausted.
     await persistDecision(db, repoUrl, branch, {
       id,
-      decision: "skip",
+      decision: "fire-pending",
       reason: "release_create_failed",
       triggerStateJson,
       proposedVersion,
       firedTag: proposedVersion,
       firedSha: state.headSha,
+      attemptCount: 1,
     });
-    void logAuditEventUnchecked(
-      db,
-      releasePartialEvent({ repoUrl, branch, tag: proposedVersion, attemptCount: 1 }),
-    );
-    log.error(
+    log.warn(
       { repoUrl, branch, tag: proposedVersion, msg: githubResult.message },
-      "release create failed — tag exists in GitHub but release page not created; manual cleanup required",
+      "release create failed after tag was created — will retry release creation next tick",
     );
     return;
   }
