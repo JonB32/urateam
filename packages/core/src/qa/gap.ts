@@ -186,7 +186,7 @@ export async function fileGapIssue(input: FileGapIssueInput): Promise<FileGapIss
   let identifier: string;
   try {
     const body = ISSUE_BODY_TEMPLATE
-      .replace("{repoUrl}", repoUrl)
+      .replace(/{repoUrl}/g, repoUrl)
       .replace(/{branch}/g, branch)
       .replace(/{workflowPath}/g, workflowPath) + analysisSection;
     const created = await linear.createIssue({
