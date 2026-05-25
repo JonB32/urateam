@@ -286,7 +286,7 @@ export async function tick(ctx: TickContext): Promise<void> {
               qaRunCompletedEvent({
                 repoUrl, branch,
                 runId: state.qaRun.runId,
-                conclusion: polled.conclusion as any,
+                conclusion: polled.conclusion as "success" | "failure" | "cancelled" | "timed_out" | "action_required" | "skipped" | "stale" | "neutral",
                 durationMs: polled.durationMs,
               }),
             );
@@ -318,22 +318,21 @@ export async function tick(ctx: TickContext): Promise<void> {
     let finalReason = result.reason;
 
     if (result.qaActionNeeded?.reason === "qa_needs_trigger") {
-      // BEC-146: read the most-recent row's attemptCount (ORDER BY decidedAt DESC LIMIT 1)
-      // rather than MAX(attemptCount) across all rows for this (branch, sha) pair.
-      // Using MAX caused false permanent skips: after a successful dispatch reset
-      // attemptCount to 0, the MAX query still returned the old high-water mark
-      // from earlier failure rows, causing the next failure to immediately escalate.
-      attemptCount = await getMaxAttemptCountForReason(
-        db, repoUrl, branch, "qa_needs_trigger", state.headSha,
-      );
-
+      // Parallelize: DB read (attempt count) and GitHub API call (dispatch) are independent.
+      // Look up the highest attempt count across all qa_needs_trigger rows for this
+      // (branch, sha) pair. Using MAX instead of ORDER BY + LIMIT 1 to be stable
+      // when multiple rows share the same decidedAt timestamp.
       const { owner, repo } = parseRepoFromUrl(repoUrl);
-      const dispatch = await triggerWorkflow({
-        octokit, db, owner, repo, repoUrl, branch,
-        workflow: config.triggers.qaCheck!.workflow,
-        ref: state.headSha,
-        inputs: config.triggers.qaCheck!.workflowInputs,
-      });
+      const [prevAttemptCount, dispatch] = await Promise.all([
+        getMaxAttemptCountForReason(db, repoUrl, branch, "qa_needs_trigger", state.headSha),
+        triggerWorkflow({
+          octokit, db, owner, repo, repoUrl, branch,
+          workflow: config.triggers.qaCheck!.workflow,
+          ref: state.headSha,
+          inputs: config.triggers.qaCheck!.workflowInputs,
+        }),
+      ]);
+      attemptCount = prevAttemptCount;
       if (dispatch.kind === "ok") {
         // BEC-146: clear prior failure rows for this SHA so MAX(attemptCount)
         // naturally returns 0 if the run subsequently fails and we re-enter

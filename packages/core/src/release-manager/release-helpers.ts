@@ -28,7 +28,7 @@ const log = createLogger({ component: "ReleaseManager:helpers" });
 export interface SlackPoster {
   postMessage: (channel: string, text: string) => Promise<boolean>;
   /** Optional: post a Slack Block Kit message. Falls back to postMessage when absent. */
-  postBlockKit?: (channel: string, blocks: object[], fallbackText: string) => Promise<boolean>;
+  postBlockKit?: (channel: string, blocks: Record<string, unknown>[], fallbackText: string) => Promise<boolean>;
 }
 
 /** 24-hour dedup window — same reason within this window is suppressed. */
@@ -72,7 +72,7 @@ export async function maybePostSlack(
   dedupState: SlackDedupState,
   text: string,
   currentSkipReason: string | null,
-  blocks?: object[],
+  blocks?: Record<string, unknown>[],
 ): Promise<void> {
   if (!slack || !slackChannel) return;
   const now = Date.now();
