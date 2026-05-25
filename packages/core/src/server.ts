@@ -25,6 +25,7 @@ import {
 } from "./audit/index.js";
 import { defaultProjectsRoot } from "./executor/session-store.js";
 import { isAgentSessionResumeEnabled } from "./executor/session-policy.js";
+import type { SlackResponse } from "./release-manager/slack-handler.js";
 
 const log = createLogger({ component: "server" });
 
@@ -41,7 +42,7 @@ export interface PmSlackInterfaceConfig {
    * BEC-135/BEC-142: handler for /release slash commands and Block Kit button callbacks.
    * Wired by the CLI start command after the Release Manager scheduler is created.
    */
-  releaseHandler?: (params: { text: string; userId: string }) => Promise<{ text: string; responseType: "ephemeral" | "in_channel" }>;
+  releaseHandler?: (params: { text: string; userId: string }) => Promise<SlackResponse>;
 }
 
 export interface ServerConfig {

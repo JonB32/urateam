@@ -538,12 +538,13 @@ export function createSlackInterface(config: SlackInterfaceConfig): {
       return c.json({ ok: true });
     }
 
-    const userId: string = (payload.user as any)?.id ?? "";
-    const actions = Array.isArray(payload.actions) ? (payload.actions as any[]) : [];
+    const userId: string = (payload.user as { id?: string } | undefined)?.id ?? "";
+    const actions: unknown[] = Array.isArray(payload.actions) ? payload.actions : [];
     const responseUrl = typeof payload.response_url === "string" ? payload.response_url : undefined;
 
     for (const action of actions) {
-      const actionId = action.action_id as string;
+      const a = action as { action_id?: string; value?: string };
+      const actionId = a.action_id ?? "";
 
       if (actionId === RELEASE_APPROVE_ACTION_ID) {
         const r = await config.releaseHandler({ text: "approve", userId });
@@ -554,8 +555,8 @@ export function createSlackInterface(config: SlackInterfaceConfig): {
       }
 
       if (actionId === RELEASE_SKIP_ACTION_ID) {
-        const reason = typeof action.value === "string" && action.value.trim()
-          ? action.value.trim()
+        const reason = typeof a.value === "string" && a.value.trim()
+          ? a.value.trim()
           : "Skipped via button";
         const r = await config.releaseHandler({ text: `skip ${reason}`, userId });
         if (responseUrl) {
