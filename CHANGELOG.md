@@ -17,6 +17,12 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+### Added (OSS+)
+- **BEC-203: Sentry + CloudWatch webhook integrations** — two new observability webhook integrations that bridge external alerting systems to the urateam autonomous pipeline:
+  - **Sentry integration** (`packages/core/src/integrations/sentry.ts`): `POST /webhooks/sentry` handler verifies `X-Sentry-Hook-Signature` HMAC-SHA256, parses Sentry issue alert payloads (stack trace, breadcrumbs, affected files, triggered rule), maps Sentry level (`critical/error/warning/info`) to Linear priority (`1/2/3/4`), and creates a Linear ticket in Triage state with `bug` + `auto-implement` labels. Idempotent: queries Linear for existing `[Sentry#<id>]`-prefixed ticket within a configurable window (default 24h).
+  - **CloudWatch integration** (`packages/core/src/integrations/cloudwatch.ts`): `POST /webhooks/cloudwatch` handler processes AWS SNS messages. Auto-confirms `SubscriptionConfirmation` by fetching `SubscribeURL`. Verifies `Notification` messages via RSA-SHA1/SHA256 using the cert at `SigningCertURL` (must be `*.amazonaws.com`; cert is cached). Parses CloudWatch alarm state changes, extracts alarm name, metric values, state change details, and generates a CloudWatch Logs Insights link. Only `ALARM` state transitions create tickets. Idempotent: queries Linear for existing `[CW:<alarm-name>]`-prefixed ticket within the window.
+  - Both handlers are mounted in `createApp()` when `sentryIntegration` / `cloudwatchIntegration` is set in `ServerConfig`.
+  - Setup docs: `deploy/SENTRY_INTEGRATION_SETUP.md`, `deploy/CLOUDWATCH_INTEGRATION_SETUP.md`.
 ### Added (BEC-206)
 - **Complete GitLab parity**: `repo/gitlab.ts:addMRComment()` is now wired into all comment-posting code paths in `runner.ts`. The `repoConfig.provider !== "gitlab"` short-circuit guards on cost-summary and change-summary comments have been removed. GitLab users now receive per-PR cost summaries (opt-in via `URATEAM_PR_COST_SUMMARY=true`) and change-summary comments on review-feedback runs, identical to GitHub.
 - **GitLab automerge** (`merge_when_pipeline_succeeds`): `runner.ts` now calls the new `mergeMRWhenPipelineSucceeds()` function when `autoMerge: true` and `repoConfig.provider === "gitlab"`. The GitLab API queues the MR for merge once all CI pipelines succeed.
