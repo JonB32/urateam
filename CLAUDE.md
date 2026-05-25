@@ -234,6 +234,11 @@ DB-backed `active_work` table tracks files modified by in-flight runs. `upsertAc
 ### Triage Quality Command (`packages/cli/src/commands/triage-quality.ts`, BEC-219)
 `ura triage-quality` — surfaces `pm.triage_quality_score` audit events as operator stats. Reads from the audit log and prints a summary of triage v2 file-prediction accuracy. Flags: `--days <n>` (time window, default 7), `--limit <n>` (max events in per-run table, default 20), `--format text|json` (default text). Text output includes: summary counts and averages (intersection ratio, miss rate, unexpected rate), top-10 missed files, top-10 unexpected files, and a per-run table. JSON output returns the raw event array. Reads `DATABASE_URL` env var; falls back to `./urateam.db` with a warning when unset.
 
+### Cost Backfill Command (`packages/cli/src/commands/cost.ts`, BEC-127)
+`ura cost backfill --days 365` — explicit opt-in to backfill cost rollups for up to N UTC days ending yesterday. Requires the `cost-roi` enterprise license. Idempotent (re-rolling an existing day overwrites with current data). Reads `DATABASE_URL` env var; falls back to `./urateam.db` with a warning when unset. Default: 365 days.
+
+**Env var alternative**: `COST_ROLLUP_MAX_BACKFILL_DAYS=<n>` raises the automatic backfill cap in `recomputeCostRollups` (default 30) for deployments that want the PM tick to catch up a larger window automatically. Invalid or non-positive values warn and fall back to the 30-day default. Read at call time — no daemon restart required.
+
 ### Quality Observer (`packages/observers/`)
 
 - `engine.ts` (isFirstTick, seedDedupOnFirstTick, processFindings), `scheduler.ts`, `store.ts` (SQLite ObserverStore). No dep on `@urateam/core`.

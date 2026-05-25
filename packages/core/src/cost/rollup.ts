@@ -10,6 +10,18 @@ const log = createLogger({ component: "cost.rollup" });
 
 const MAX_BACKFILL_DAYS = 30;
 
+/** Read `COST_ROLLUP_MAX_BACKFILL_DAYS` from env. Returns the module default when unset or invalid. */
+function resolveMaxBackfillDays(): number {
+  const raw = process.env.COST_ROLLUP_MAX_BACKFILL_DAYS;
+  if (!raw) return MAX_BACKFILL_DAYS;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) {
+    log.warn({ raw }, "COST_ROLLUP_MAX_BACKFILL_DAYS is not a positive integer — using default");
+    return MAX_BACKFILL_DAYS;
+  }
+  return n;
+}
+
 interface CostConfig {
   costs?: {
     modelPricing?: Record<string, { inputPerMillion: number; outputPerMillion: number }>;
@@ -179,6 +191,8 @@ export async function recomputeCostRollups(
   ));
   const yesterdayStr = utcDateStr(yesterdayUtc);
 
+  const maxBackfillDays = resolveMaxBackfillDays();
+
   // Find the latest date already in the rollup table.
   const [latestRow] = await db.select({ latestDate: max(costRollupsDaily.date) }).from(costRollupsDaily);
   const latestDate: string | null = latestRow?.latestDate ?? null;
@@ -187,8 +201,8 @@ export async function recomputeCostRollups(
   let datesToRoll: string[];
 
   if (latestDate === null) {
-    // First run: backfill up to MAX_BACKFILL_DAYS before yesterday, inclusive.
-    const firstDate = addDays(yesterdayStr, -(MAX_BACKFILL_DAYS - 1));
+    // First run: backfill up to maxBackfillDays before yesterday, inclusive.
+    const firstDate = addDays(yesterdayStr, -(maxBackfillDays - 1));
     datesToRoll = [];
     let d = firstDate;
     while (d <= yesterdayStr) {
@@ -198,9 +212,9 @@ export async function recomputeCostRollups(
     log.info({ firstDate, yesterdayStr, days: datesToRoll.length }, "cost rollup: first run, backfilling");
   } else if (latestDate < yesterdayStr) {
     // Some entries exist but there's a gap. Fill from latest+1 through yesterday.
-    // Cap at MAX_BACKFILL_DAYS to avoid runaway on pathological stale dates.
+    // Cap at maxBackfillDays to avoid runaway on pathological stale dates.
     const rawFirstDate = addDays(latestDate, 1);
-    const cappedFirstDate = addDays(yesterdayStr, -(MAX_BACKFILL_DAYS - 1));
+    const cappedFirstDate = addDays(yesterdayStr, -(maxBackfillDays - 1));
     const firstDate = rawFirstDate > cappedFirstDate ? rawFirstDate : cappedFirstDate;
     datesToRoll = [];
     let d = firstDate;
@@ -224,5 +238,51 @@ export async function recomputeCostRollups(
   }
 
   return { rowsWritten: totalRowsWritten };
+}
+
+/**
+ * Explicitly backfill `days` UTC days ending yesterday — no cap applied.
+ * Intended for the `ura cost backfill --days N` CLI command.
+ * Idempotent: re-rolling an existing day overwrites with current data.
+ */
+export async function backfillCostRollups(
+  db: AnyDb,
+  config: CostConfig,
+  days: number,
+): Promise<{ rowsWritten: number; daysProcessed: number }> {
+  if (!isFeatureLicensed("cost-roi")) {
+    log.warn(
+      { feature: "cost-roi" },
+      "backfillCostRollups called without an enterprise license — skipping",
+    );
+    return { rowsWritten: 0, daysProcessed: 0 };
+  }
+  if (!Number.isFinite(days) || days <= 0) {
+    throw new Error(`backfillCostRollups: days must be a positive integer, got ${days}`);
+  }
+  const clampedDays = Math.ceil(days);
+
+  const now = new Date();
+  const yesterdayUtc = new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1,
+  ));
+  const yesterdayStr = utcDateStr(yesterdayUtc);
+  const firstDate = addDays(yesterdayStr, -(clampedDays - 1));
+
+  const datesToRoll: string[] = [];
+  let d = firstDate;
+  while (d <= yesterdayStr) {
+    datesToRoll.push(d);
+    d = addDays(d, 1);
+  }
+
+  log.info({ firstDate, yesterdayStr, days: datesToRoll.length }, "cost rollup: explicit backfill");
+
+  let totalRowsWritten = 0;
+  for (const dateStr of datesToRoll) {
+    totalRowsWritten += await rollOneDay(db, dateStr, config);
+  }
+
+  return { rowsWritten: totalRowsWritten, daysProcessed: datesToRoll.length };
 }
 
