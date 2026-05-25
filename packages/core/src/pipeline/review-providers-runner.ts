@@ -1,5 +1,6 @@
 import {
   getEnabledProviders,
+  parseModels,
   type ReviewContext,
   type ReviewModelRun,
 } from "../executor/review/review-provider.js";
@@ -27,7 +28,7 @@ export interface RunReviewProvidersResult {
 }
 
 /**
- * Runs all enabled review providers in sequence and persists their per-model
+ * Runs all enabled review providers in parallel and persists their per-model
  * results to `review_model_runs` when a stage_run row id is provided.
  *
  * Provider failures are caught and recorded as advisory `failed` runs rather
@@ -53,10 +54,7 @@ export async function runReviewProviders(
   // emit a warn + audit event for models below threshold; operator removes
   // from REVIEW_MODELS manually. Auto-suspend deliberately scoped out
   // (transient outage feedback-loop risk).
-  const modelIds = (opts.env.REVIEW_MODELS ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const modelIds = parseModels(opts.env.REVIEW_MODELS ?? "");
   const healthThreshold = parseFloatOr(process.env.REVIEW_MODELS_MIN_OUTPUT_RATIO, 0.05);
   const healthLookbackHours = parseIntOr(process.env.REVIEW_MODELS_HEALTH_LOOKBACK_HOURS, 168);
   const healthMinRuns = parseIntOr(process.env.REVIEW_MODELS_MIN_RUNS, 5);
@@ -90,13 +88,14 @@ export async function runReviewProviders(
     log.warn({ err }, "model-health probe failed — skipping flagging this tick");
   }
 
-  for (const p of providers) {
-    try {
-      const runs = await p.runReview(ctx);
-      allRuns.push(...runs);
-    } catch (err) {
+  const providerResults = await Promise.allSettled(providers.map((p) => p.runReview(ctx)));
+  for (const [i, result] of providerResults.entries()) {
+    const p = providers[i];
+    if (result.status === "fulfilled") {
+      allRuns.push(...result.value);
+    } else {
       log.warn(
-        { providerId: p.id, err: err instanceof Error ? err.message : String(err) },
+        { providerId: p.id, err: result.reason instanceof Error ? result.reason.message : String(result.reason) },
         "review provider threw — recording as advisory failure",
       );
       allRuns.push({
@@ -107,7 +106,7 @@ export async function runReviewProviders(
         inputTokens: 0,
         outputTokens: 0,
         durationMs: 0,
-        errorMessage: err instanceof Error ? err.message : String(err),
+        errorMessage: result.reason instanceof Error ? result.reason.message : String(result.reason),
       });
     }
   }

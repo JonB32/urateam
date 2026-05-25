@@ -52,7 +52,7 @@ const SANE_OUTPUT_TOKENS_FLOOR = 256;
 const CATALOG_FETCH_TIMEOUT_MS = 10_000;
 
 /** Splits a comma-separated model list, trims whitespace, drops empty entries. */
-function parseModels(raw: string): string[] {
+export function parseModels(raw: string): string[] {
   return raw.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
