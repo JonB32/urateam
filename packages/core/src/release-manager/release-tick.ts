@@ -110,13 +110,12 @@ async function sweepFirePendingRows(ctx: TickContext): Promise<void> {
   const pendingSlackMessages: string[] = [];
 
   for (const row of pending) {
-    const tag: string = row.firedTag;
-    const sha: string = row.firedSha ?? "";
-
-    if (!tag || !sha) {
+    if (!row.firedTag || !row.firedSha) {
       log.warn({ repoUrl, branch, rowId: row.id }, "fire-pending: row missing firedTag or firedSha — skipping");
       continue;
     }
+    const tag: string = row.firedTag;
+    const sha: string = row.firedSha;
 
     // Verify the tag still exists in GitHub before attempting createRelease.
     try {
