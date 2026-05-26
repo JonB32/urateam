@@ -64,6 +64,8 @@ export interface BootstrapDeps {
   fetch?: typeof fetch;
   /** Replaces fs.writeFile. */
   writeFile?: typeof fs.writeFile;
+  /** Replaces fs.unlink. */
+  unlink?: typeof fs.unlink;
   /** Replaces fs.mkdir. */
   mkdir?: typeof fs.mkdir;
   /** Replaces process.stdout.write (for console output). */
@@ -349,6 +351,10 @@ export async function preflightChecks(deps?: BootstrapDeps): Promise<void> {
 // Step 2: GitHub App manifest flow
 // ---------------------------------------------------------------------------
 
+/** Escapes a string for safe embedding in an HTML double-quoted attribute value. */
+const htmlEscapeAttr = (s: string): string =>
+  s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
 /**
  * Builds a self-submitting HTML page that POSTs the GitHub App manifest to
  * GitHub. GitHub's manifest flow requires the manifest via POST hidden field,
@@ -358,17 +364,14 @@ export async function preflightChecks(deps?: BootstrapDeps): Promise<void> {
  * @param manifestJson - Raw (unencoded) manifest JSON string.
  */
 export function buildManifestPostHtml(actionUrl: string, manifestJson: string): string {
-  const esc = (s: string): string =>
-    s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
   return (
     `<!DOCTYPE html>\n` +
     `<html lang="en">\n` +
     `<head><meta charset="utf-8"><title>Creating GitHub App…</title></head>\n` +
     `<body>\n` +
     `<p>Submitting GitHub App manifest…</p>\n` +
-    `<form id="f" method="post" action="${esc(actionUrl)}">\n` +
-    `  <input type="hidden" name="manifest" value="${esc(manifestJson)}">\n` +
+    `<form id="f" method="post" action="${htmlEscapeAttr(actionUrl)}">\n` +
+    `  <input type="hidden" name="manifest" value="${htmlEscapeAttr(manifestJson)}">\n` +
     `</form>\n` +
     `<script>document.getElementById("f").submit();</script>\n` +
     `</body>\n` +
@@ -459,6 +462,7 @@ export async function createGitHubApp(
   // The browser submits the form to GitHub with the manifest as a hidden field,
   // which is the only mechanism GitHub supports for manifest pre-population.
   const writeFn = deps?.writeFile ?? fs.writeFile;
+  const unlinkFn = deps?.unlink ?? fs.unlink;
   const tmpFile = path.join(os.tmpdir(), `urateam-gh-manifest-${state.slice(0, 8)}.html`);
   await writeFn(tmpFile, htmlContent, "utf8");
 
@@ -466,7 +470,7 @@ export async function createGitHubApp(
     let settled = false;
 
     const cleanup = (): void => {
-      fs.unlink(tmpFile).catch(() => {});
+      unlinkFn(tmpFile).catch(() => {});
     };
 
     const timeout = setTimeout(() => {
