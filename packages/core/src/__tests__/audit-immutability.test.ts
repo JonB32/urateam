@@ -42,7 +42,7 @@ describe("audit_events immutability", () => {
     }
 
     const offenders = matches
-      .map((line) => line.split(":")[0]!)
+      .map((line) => line.split(":")[0])
       .filter((file) => !allowed.some((a) => file.endsWith(a) || file === a));
 
     expect(
@@ -69,6 +69,9 @@ describe("audit_events immutability", () => {
       "packages/core/src/pm/actions/start-todo.ts",
       "packages/core/src/pm/actions/resolve-approvals.ts",
       "packages/core/src/pm/actions/recover-stuck.ts",
+      // BEC-252: restart-interrupt recovery is a base-tier operational signal —
+      // operators need to see it regardless of Enterprise audit-log dashboard.
+      "packages/core/src/pm/actions/recover.ts",
       "packages/core/src/pipeline/review-providers-runner.ts",
       "packages/core/src/release-manager/release-tick.ts",
       "packages/core/src/release-manager/release-helpers.ts",
@@ -77,7 +80,15 @@ describe("audit_events immutability", () => {
       // for the rationale on bypassing the audit-log feature gate.
       "packages/core/src/executor/auth-monitor.ts",
       "packages/core/src/__tests__/auth-monitor.test.ts",
-      "packages/core/src/audit/events.ts",
+      // BEC-236: circuit-breaker probe / recovery / manual reset are base-tier
+      // operational signals — operators need to see them regardless of whether
+      // the Enterprise audit-log dashboard is licensed. Same rationale as
+      // auth-monitor: the events drive a critical recovery loop that must be
+      // observable in OSS/Pro tiers.
+      "packages/core/src/pm/actions/select-probe-candidates.ts",
+      "packages/core/src/pm/actions/recover-circuit-breaker.ts",
+      "packages/cli/src/commands/circuit.ts",
+      "packages/core/src/audit/policy-release-events.ts",
       "packages/core/src/repo/agent-branch-sweep-runner.ts",
       "packages/core/src/qa/github.ts",
       "packages/core/src/qa/gap.ts",
@@ -89,6 +100,7 @@ describe("audit_events immutability", () => {
       // still trip; the allow-list entry is the right surface for "this
       // file mentions the name but does not invoke it" exceptions.
       "packages/core/src/security/review-checklist.ts",
+      "packages/core/src/__tests__/auth-monitor.test.ts",
     ];
 
     let matches: string[] = [];
@@ -104,7 +116,7 @@ describe("audit_events immutability", () => {
     }
 
     const offenders = matches
-      .map((line) => line.split(":")[0]!)
+      .map((line) => line.split(":")[0])
       .filter((file) => !allowed.some((a) => file.endsWith(a) || file === a));
 
     expect(

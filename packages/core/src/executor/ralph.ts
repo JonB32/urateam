@@ -4,6 +4,7 @@ import { gitExecSafe } from "../repo/git.js";
 import { createLogger } from "../logger.js";
 import { consumeAgentStream, parseJsonBlock } from "./agent-stream.js";
 import { sanitize } from "./prompt/sanitizer.js";
+import { parseIntOr } from "../util/env.js";
 
 const log = createLogger({ component: "RALPH" });
 const RALPH_MODEL = "claude-haiku-4-5-20251001";
@@ -106,7 +107,7 @@ Be strict but fair. If the code addresses the intent of a criterion even if not 
      * Operators can override via the RALPH_MAX_TURNS environment variable for
      * tickets whose acceptance criteria require more extensive shell verification.
      */
-    const maxTurns = process.env.RALPH_MAX_TURNS ? parseInt(process.env.RALPH_MAX_TURNS, 10) : 15;
+    const maxTurns = parseIntOr(process.env.RALPH_MAX_TURNS, 15);
 
     const messages = query({
       prompt,

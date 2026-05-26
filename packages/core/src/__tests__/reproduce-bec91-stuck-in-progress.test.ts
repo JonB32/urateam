@@ -171,6 +171,7 @@ describe("BEC-91: stuck In Progress issues are not recovered by current PM Agent
       linearApiKey: "",
       slackBotToken: "",
       actions: mockActions as any,
+      authMonitor: { tick: async () => {} },
     });
 
     await scheduler.tick();
@@ -230,6 +231,7 @@ describe("BEC-91: stuck In Progress issues are not recovered by current PM Agent
       linearApiKey: "",
       slackBotToken: "",
       actions: mockActions as any,
+      authMonitor: { tick: async () => {} },
     });
 
     await scheduler.tick();

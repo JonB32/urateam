@@ -10,7 +10,7 @@
  *   - maybePostSlack              — post to Slack with 24-hour same-reason dedup
  *   - persistDecision             — write a release_decisions row
  *   - consumeApprovalRow          — mark the most-recent fresh approval as consumed
- *   - getMaxAttemptCountForReason — query the highest attempt count for a (repo, branch, reason) triple
+ *   - getMaxAttemptCountForReason — query the attempt count from the most-recent row for a (repo, branch, reason) triple
  *   - tryFileQaGapIssue           — file a QA gap issue via Linear and handle transient errors
  */
 import { and, desc, eq, isNull, max } from "drizzle-orm";
@@ -27,6 +27,8 @@ const log = createLogger({ component: "ReleaseManager:helpers" });
 /** Minimal Slack client interface required by the release manager. */
 export interface SlackPoster {
   postMessage: (channel: string, text: string) => Promise<boolean>;
+  /** Optional: post a Slack Block Kit message. Falls back to postMessage when absent. */
+  postBlockKit?: (channel: string, blocks: Record<string, unknown>[], fallbackText: string) => Promise<boolean>;
 }
 
 /** 24-hour dedup window — same reason within this window is suppressed. */
@@ -70,6 +72,7 @@ export async function maybePostSlack(
   dedupState: SlackDedupState,
   text: string,
   currentSkipReason: string | null,
+  blocks?: Record<string, unknown>[],
 ): Promise<void> {
   if (!slack || !slackChannel) return;
   const now = Date.now();
@@ -80,7 +83,10 @@ export async function maybePostSlack(
     const withinWindow = now - dedupState.lastPostAt < SLACK_DEDUP_WINDOW_MS;
     if (sameReason && withinWindow) return;
   }
-  const ok = await slack.postMessage(slackChannel, text).catch(() => false);
+  const postFn = blocks && slack.postBlockKit
+    ? () => slack.postBlockKit!(slackChannel, blocks, text)
+    : () => slack.postMessage(slackChannel, text);
+  const ok = await postFn().catch(() => false);
   if (!ok) {
     void logAuditEventUnchecked(db, slackPostFailedEvent({ channel: slackChannel, reason: "post_returned_false" }));
     return;
@@ -167,8 +173,16 @@ export async function consumeApprovalRow(
 /**
  * Query the highest `attemptCount` stored for a given `(repoUrl, branch, reason)` triple.
  *
- * Uses `MAX(attemptCount)` rather than `ORDER BY + LIMIT 1` to be stable when
- * multiple rows share the same `decidedAt` timestamp (e.g. rapid consecutive ticks).
+ * Uses `MAX(attemptCount)` rather than `ORDER BY decidedAt DESC + LIMIT 1` to be stable
+ * when multiple rows share the same `decidedAt` timestamp (e.g. rapid consecutive ticks
+ * within the same second — `crossTimestamp` stores SQLite epoch with second resolution).
+ *
+ * BEC-146: the original ORDER BY+LIMIT version was non-deterministic on timestamp ties
+ * and caused two regressions: (a) reset row sometimes missed → false escalation, (b)
+ * latest failure row sometimes missed → escalation never fires when it should. The
+ * counter-reset behavior on `dispatch_pending` is now handled by `clearFailureRowsForSha`
+ * (called from release-tick.ts before persisting the reset row), which removes prior
+ * failure rows so MAX naturally returns 0 after a reset.
  *
  * @param db        - Database client.
  * @param repoUrl   - Repository URL.
@@ -206,6 +220,32 @@ export async function getMaxAttemptCountForReason(
 }
 
 /**
+ * BEC-146: clear prior QA-retry failure rows for a (repoUrl, branch, qaRunSha) so that
+ * after a successful dispatch (or `dispatch_pending` — HTTP 204 succeeded but listWorkflowRuns
+ * hasn't seen the run yet) the retry counter naturally starts from 0 again.
+ *
+ * The audit log (`audit_events`) retains the full history; `releaseDecisions` is
+ * working state for retry tracking and dedup, not the historical record.
+ */
+export async function clearFailureRowsForSha(
+  db: AnyDb,
+  repoUrl: string,
+  branch: string,
+  reason: string,
+  qaRunSha: string,
+): Promise<void> {
+  await (db as any).delete(releaseDecisions).where(
+    and(
+      eq(releaseDecisions.repoUrl, repoUrl),
+      eq(releaseDecisions.branch, branch),
+      eq(releaseDecisions.reason, reason),
+      eq(releaseDecisions.qaRunSha, qaRunSha),
+      isNull(releaseDecisions.qaRunId),
+    ),
+  );
+}
+
+/**
  * File a QA gap issue via Linear and handle transient filing errors.
  *
  * Wraps `fileGapIssue` with attempt-count tracking. On a `linear_error` response,
@@ -233,9 +273,11 @@ export async function tryFileQaGapIssue(params: {
   branch: string;
   workflowPath: string;
   linearTeamId: string;
+  /** Injectable LLM call function forwarded to fileGapIssue for QA_GAP_LLM_ANALYSIS enrichment. */
+  callClaude?: (prompt: string) => Promise<string>;
 }): Promise<{ finalReason: string; attemptCount: number }> {
-  const { db, linear, repoUrl, branch, workflowPath, linearTeamId } = params;
-  const gapResult = await fileGapIssue({ db, linear, repoUrl, branch, workflowPath, linearTeamId });
+  const { db, linear, repoUrl, branch, workflowPath, linearTeamId, callClaude } = params;
+  const gapResult = await fileGapIssue({ db, linear, repoUrl, branch, workflowPath, linearTeamId, callClaude });
   if (gapResult.kind !== "linear_error") {
     // Filed or already-filed — reset attempt counter for this gap-filing loop.
     return { finalReason: "qa_no_workflow", attemptCount: 0 };

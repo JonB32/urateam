@@ -47,8 +47,8 @@ export interface GitHubWebhookHandlerConfig {
   github?: GitHubConfig;
   /**
    * Notifier instance. When provided, `onPRMerged` is called when a PR is
-   * merged externally (human merge or GitHub's auto-merge-when-ready), which
-   * transitions the Linear issue to Done.
+   * merged externally (pull_request.closed + merged=true — human merge or
+   * GitHub's auto-merge-when-ready), transitioning the Linear issue to Done.
    */
   notifier?: Notifier;
 }
@@ -295,14 +295,14 @@ async function handleAutoMergeEvent(
 async function handlePRMergedEvent(
   payload: Record<string, any>,
   config: GitHubWebhookHandlerConfig,
-): Promise<void> {
+): Promise<{ skipped?: string }> {
   const pr = payload.pull_request;
   const prUrl: string = pr?.html_url ?? "";
   const prBranch: string = pr?.head?.ref ?? "";
 
   if (!prUrl) {
     log.warn({ payload }, "pr-merged: no PR URL in payload — skipping");
-    return;
+    return { skipped: "no PR URL in payload" };
   }
 
   const db = config.db;
@@ -311,13 +311,13 @@ async function handlePRMergedEvent(
 
   if (!originalRun) {
     log.debug({ prUrl }, "pr-merged: no pipeline run found for PR — skipping");
-    return;
+    return { skipped: "not an agent-created PR" };
   }
 
   // Idempotency: skip if already marked as merged
   if (originalRun.autoMerged) {
     log.debug({ runId: originalRun.id }, "pr-merged: run already marked merged — skipping");
-    return;
+    return { skipped: "already recorded as merged" };
   }
 
   // Update DB to reflect the human/external merge
@@ -325,15 +325,22 @@ async function handlePRMergedEvent(
 
   log.info({ runId: originalRun.id, prUrl }, "pr-merged: updated pipeline run auto_merged=true");
 
+  // Pass a fresh object with autoMerged=true so the notifier sees the
+  // post-update value without mutating the shared DB row reference.
+  const mergedRun = { ...originalRun, autoMerged: true } as PipelineRun;
+
   // Transition Linear issue to Done. The DB row's `status` field is typed as
   // `string` (Drizzle inference) while PipelineRunStatus is a string union —
   // cast is safe because the DB value always originates from runner code that
   // writes one of the union members. Same pattern other notifier call sites use.
   if (config.notifier?.onPRMerged) {
-    await config.notifier.onPRMerged(originalRun as unknown as PipelineRun).catch((err) =>
+    // Fire-and-forget — don't block the webhook response on Linear's API.
+    // Tests await one microtask after posting the webhook to let this start.
+    void config.notifier.onPRMerged(mergedRun).catch((err) =>
       log.error({ err, runId: originalRun!.id }, "pr-merged: notifier.onPRMerged() failed"),
     );
   }
+  return {};
 }
 
 // ---------------------------------------------------------------------------
@@ -386,8 +393,14 @@ export function createGitHubWebhookHandler(
     }
 
     // 3b. PR merged externally (human merge or GitHub auto-merge-when-ready)
-    if (event === "pull_request" && action === "closed" && payload.pull_request?.merged === true) {
-      await handlePRMergedEvent(payload, config);
+    if (event === "pull_request" && action === "closed") {
+      if (payload.pull_request?.merged !== true) {
+        return c.json({ ok: true, skipped: "PR closed without merge" });
+      }
+      const result = await handlePRMergedEvent(payload, config);
+      if (result.skipped) {
+        return c.json({ ok: true, skipped: result.skipped });
+      }
       return c.json({ ok: true, action: "pr-merged" });
     }
 

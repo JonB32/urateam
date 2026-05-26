@@ -5,13 +5,14 @@ import { eq } from "drizzle-orm";
 import { resolveWorkflowStates } from "../linear-helpers.js";
 import { createLogger } from "../../logger.js";
 import { logAuditEventUnchecked, pmDeprioritizedEvent, pmCancelledEvent } from "../../audit/index.js";
+import type { LinearClient } from "@linear/sdk";
 
 const log = createLogger({ component: "PmAgent:approvals" });
 
 const APPROVAL_TIMEOUT_MS = 48 * 60 * 60 * 1000; // 48 hours
 
 export interface ResolveApprovalsInput {
-  linearClient: any;
+  linearClient: Pick<LinearClient, "workflowStates" | "searchIssues" | "updateIssue" | "createComment">;
   slackNotifier: PmSlackNotifier;
   db: AnyDb;
   teamIds: string[];

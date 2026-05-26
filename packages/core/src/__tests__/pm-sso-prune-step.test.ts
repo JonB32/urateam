@@ -87,6 +87,7 @@ describe("pm tick session prune sweep", () => {
       linearApiKey: "",
       slackBotToken: "",
       actions: stubActions() as any,
+      authMonitor: { tick: async () => {} },
     });
 
     await scheduler.tick();
@@ -109,6 +110,7 @@ describe("pm tick session prune sweep", () => {
       linearApiKey: "",
       slackBotToken: "",
       actions: stubActions() as any,
+      authMonitor: { tick: async () => {} },
     });
 
     await expect(scheduler.tick()).resolves.toBeUndefined();

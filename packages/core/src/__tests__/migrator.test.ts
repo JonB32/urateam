@@ -3,13 +3,39 @@ import Database from "better-sqlite3";
 import postgres from "postgres";
 import {
   loadMigrationFiles,
+  loadActiveMigrationFiles,
   runMigrationsSqlite,
   runMigrationsPostgres,
   getMigrationStatusSqlite,
   getMigrationStatusPostgres,
+  SQLITE_MIGRATION_RENAMES,
+  POSTGRES_MIGRATION_RENAMES,
   type Migration,
   type MigrationStatus,
 } from "../db/migrator.js";
+
+/**
+ * Core tables expected to be created by the full migration suite.
+ * Shared between SQLite and Postgres test sections to avoid duplication.
+ */
+const EXPECTED_CORE_TABLES = [
+  "pipeline_runs",
+  "stage_runs",
+  "agent_logs",
+  "pm_approvals",
+  "active_work",
+  "webhook_dedup",
+  "schema_migrations",
+];
+
+// Helper: schema_migrations DDL, used in tests that pre-populate the table
+const CREATE_SCHEMA_MIGRATIONS_SQLITE_FOR_TEST = `
+  CREATE TABLE IF NOT EXISTS schema_migrations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+  )
+`;
 
 describe("Migration Framework", () => {
   describe("loadMigrationFiles", () => {
@@ -48,6 +74,69 @@ describe("Migration Framework", () => {
     });
   });
 
+  describe("loadActiveMigrationFiles", () => {
+    it("should exclude tombstone (renamed) migrations from SQLite list", () => {
+      const all = loadMigrationFiles("sqlite");
+      const active = loadActiveMigrationFiles("sqlite");
+
+      // Active list must be smaller than full list (tombstones excluded)
+      expect(active.length).toBeLessThan(all.length);
+
+      // No tombstone names in the active list
+      for (const name of Object.keys(SQLITE_MIGRATION_RENAMES)) {
+        expect(active.map((m) => m.name)).not.toContain(name);
+      }
+
+      // All canonical (new) names are present in the active list
+      for (const newName of Object.values(SQLITE_MIGRATION_RENAMES)) {
+        expect(active.map((m) => m.name)).toContain(newName);
+      }
+    });
+
+    it("should exclude tombstone (renamed) migrations from Postgres list", () => {
+      const all = loadMigrationFiles("postgres");
+      const active = loadActiveMigrationFiles("postgres");
+
+      expect(active.length).toBeLessThan(all.length);
+
+      for (const name of Object.keys(POSTGRES_MIGRATION_RENAMES)) {
+        expect(active.map((m) => m.name)).not.toContain(name);
+      }
+
+      for (const newName of Object.values(POSTGRES_MIGRATION_RENAMES)) {
+        expect(active.map((m) => m.name)).toContain(newName);
+      }
+    });
+  });
+
+  describe("Unique migration prefixes (BEC-149)", () => {
+    it("SQLite active migrations must all have unique numeric prefixes", () => {
+      const active = loadActiveMigrationFiles("sqlite");
+      const prefixes = active.map((m) => m.name.match(/^(\d+)_/)?.[1]);
+
+      // Every active migration must have a numeric prefix
+      for (const prefix of prefixes) {
+        expect(prefix).toBeTruthy();
+      }
+
+      // All prefixes must be unique
+      const uniquePrefixes = new Set(prefixes);
+      expect(uniquePrefixes.size).toBe(prefixes.length);
+    });
+
+    it("Postgres active migrations must all have unique numeric prefixes", () => {
+      const active = loadActiveMigrationFiles("postgres");
+      const prefixes = active.map((m) => m.name.match(/^(\d+)_/)?.[1]);
+
+      for (const prefix of prefixes) {
+        expect(prefix).toBeTruthy();
+      }
+
+      const uniquePrefixes = new Set(prefixes);
+      expect(uniquePrefixes.size).toBe(prefixes.length);
+    });
+  });
+
   describe("SQLite Migrations", () => {
     let db: Database.Database;
 
@@ -71,34 +160,74 @@ describe("Migration Framework", () => {
       expect(tableExists).toBeTruthy();
     });
 
-    it("should record applied migrations in schema_migrations", () => {
+    it("should record all active migrations in schema_migrations", () => {
       runMigrationsSqlite(db);
 
-      const migrations = loadMigrationFiles("sqlite");
+      const activeMigrations = loadActiveMigrationFiles("sqlite");
       const recorded = db
         .prepare("SELECT name FROM schema_migrations ORDER BY name")
         .all() as Array<{ name: string }>;
 
       const recordedNames = recorded.map((r) => r.name);
-      const migrationNames = migrations.map((m) => m.name);
+      const activeMigrationNames = activeMigrations.map((m) => m.name).sort();
 
-      expect(recordedNames).toEqual(migrationNames);
+      expect(recordedNames).toEqual(activeMigrationNames);
+    });
+
+    it("should NOT record tombstone (renamed) migrations in schema_migrations", () => {
+      runMigrationsSqlite(db);
+
+      const recorded = db
+        .prepare("SELECT name FROM schema_migrations")
+        .all() as Array<{ name: string }>;
+      const recordedNames = recorded.map((r) => r.name);
+
+      for (const oldName of Object.keys(SQLITE_MIGRATION_RENAMES)) {
+        expect(recordedNames).not.toContain(oldName);
+      }
+    });
+
+    it("should rename existing schema_migrations entries from old to new names (existing deployment simulation)", () => {
+      // Simulate an existing deployment that has the old pre-BEC-149 names
+      db.exec(CREATE_SCHEMA_MIGRATIONS_SQLITE_FOR_TEST);
+
+      // Insert old migration names (as they would exist before BEC-149 fix)
+      const insert = db.prepare(
+        "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)"
+      );
+      for (const oldName of Object.keys(SQLITE_MIGRATION_RENAMES)) {
+        insert.run(oldName);
+      }
+
+      // Verify old names are present
+      const beforeRun = db
+        .prepare("SELECT name FROM schema_migrations")
+        .all() as Array<{ name: string }>;
+      expect(beforeRun.map((r) => r.name)).toContain("007_sso");
+
+      // Run migrations (should rename old → new without re-running SQL)
+      runMigrationsSqlite(db);
+
+      const afterRun = db
+        .prepare("SELECT name FROM schema_migrations")
+        .all() as Array<{ name: string }>;
+      const afterNames = afterRun.map((r) => r.name);
+
+      // Old names should be gone
+      for (const oldName of Object.keys(SQLITE_MIGRATION_RENAMES)) {
+        expect(afterNames).not.toContain(oldName);
+      }
+
+      // New canonical names should be present
+      for (const newName of Object.values(SQLITE_MIGRATION_RENAMES)) {
+        expect(afterNames).toContain(newName);
+      }
     });
 
     it("should create all expected tables", () => {
       runMigrationsSqlite(db);
 
-      const expectedTables = [
-        "pipeline_runs",
-        "stage_runs",
-        "agent_logs",
-        "pm_approvals",
-        "active_work",
-        "webhook_dedup",
-        "schema_migrations",
-      ];
-
-      for (const table of expectedTables) {
+      for (const table of EXPECTED_CORE_TABLES) {
         const tableExists = db
           .prepare(
             `SELECT name FROM sqlite_master WHERE type='table' AND name=?`
@@ -153,8 +282,8 @@ describe("Migration Framework", () => {
       runMigrationsSqlite(db);
       const statuses = getMigrationStatusSqlite(db);
 
-      const migrations = loadMigrationFiles("sqlite");
-      expect(statuses.length).toBe(migrations.length);
+      const activeMigrations = loadActiveMigrationFiles("sqlite");
+      expect(statuses.length).toBe(activeMigrations.length);
 
       // All should be applied
       for (const status of statuses) {
@@ -167,8 +296,8 @@ describe("Migration Framework", () => {
       // Don't run migrations, just check status
       const statuses = getMigrationStatusSqlite(db);
 
-      const migrations = loadMigrationFiles("sqlite");
-      expect(statuses.length).toBe(migrations.length);
+      const activeMigrations = loadActiveMigrationFiles("sqlite");
+      expect(statuses.length).toBe(activeMigrations.length);
 
       // All should be pending
       for (const status of statuses) {
@@ -227,7 +356,7 @@ describe("Migration Framework", () => {
       expect(result[0].exists).toBe(true);
     });
 
-    it("should record applied migrations in schema_migrations", async () => {
+    it("should record all active migrations in schema_migrations", async () => {
       if (!dbUrl) {
         console.warn("Skipping Postgres test: TEST_POSTGRES_URL not set");
         return;
@@ -235,13 +364,13 @@ describe("Migration Framework", () => {
 
       await runMigrationsPostgres(client);
 
-      const migrations = loadMigrationFiles("postgres");
+      const activeMigrations = loadActiveMigrationFiles("postgres");
       const recorded = await client`SELECT name FROM schema_migrations ORDER BY name`;
 
       const recordedNames = recorded.map((r) => r.name);
-      const migrationNames = migrations.map((m) => m.name);
+      const activeMigrationNames = activeMigrations.map((m) => m.name).sort();
 
-      expect(recordedNames).toEqual(migrationNames);
+      expect(recordedNames).toEqual(activeMigrationNames);
     });
 
     it("should create all expected tables", async () => {
@@ -252,17 +381,7 @@ describe("Migration Framework", () => {
 
       await runMigrationsPostgres(client);
 
-      const expectedTables = [
-        "pipeline_runs",
-        "stage_runs",
-        "agent_logs",
-        "pm_approvals",
-        "active_work",
-        "webhook_dedup",
-        "schema_migrations",
-      ];
-
-      for (const table of expectedTables) {
+      for (const table of EXPECTED_CORE_TABLES) {
         const result = await client.unsafe(
           `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)`,
           [table]
@@ -323,8 +442,8 @@ describe("Migration Framework", () => {
       await runMigrationsPostgres(client);
       const statuses = await getMigrationStatusPostgres(client);
 
-      const migrations = loadMigrationFiles("postgres");
-      expect(statuses.length).toBe(migrations.length);
+      const activeMigrations = loadActiveMigrationFiles("postgres");
+      expect(statuses.length).toBe(activeMigrations.length);
 
       // All should be applied
       for (const status of statuses) {
@@ -342,8 +461,8 @@ describe("Migration Framework", () => {
       // Don't run migrations, just check status
       const statuses = await getMigrationStatusPostgres(client);
 
-      const migrations = loadMigrationFiles("postgres");
-      expect(statuses.length).toBe(migrations.length);
+      const activeMigrations = loadActiveMigrationFiles("postgres");
+      expect(statuses.length).toBe(activeMigrations.length);
 
       // All should be pending
       for (const status of statuses) {
@@ -364,8 +483,12 @@ describe("Migration Framework", () => {
 
         // SQL should not be empty
         expect(migration.sql.trim().length).toBeGreaterThan(0);
+      }
+    });
 
-        // Should contain valid SQL statements
+    it("active SQLite migrations must contain valid SQL statements", () => {
+      const migrations = loadActiveMigrationFiles("sqlite");
+      for (const migration of migrations) {
         expect(migration.sql).toMatch(
           /CREATE|ALTER|INSERT|UPDATE|DELETE/i
         );
@@ -382,8 +505,12 @@ describe("Migration Framework", () => {
 
         // SQL should not be empty
         expect(migration.sql.trim().length).toBeGreaterThan(0);
+      }
+    });
 
-        // Should contain valid SQL statements
+    it("active Postgres migrations must contain valid SQL statements", () => {
+      const migrations = loadActiveMigrationFiles("postgres");
+      for (const migration of migrations) {
         expect(migration.sql).toMatch(
           /CREATE|ALTER|INSERT|UPDATE|DELETE|DO/i
         );
@@ -391,3 +518,4 @@ describe("Migration Framework", () => {
     });
   });
 });
+

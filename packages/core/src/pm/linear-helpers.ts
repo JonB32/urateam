@@ -1,3 +1,4 @@
+import type { LinearClient } from "@linear/sdk";
 import { getLinearClient, resolveWorkflowStatesByTeam } from "../util/linear.js";
 
 /**
@@ -15,7 +16,7 @@ import { getLinearClient, resolveWorkflowStatesByTeam } from "../util/linear.js"
  *   This wrapper is retained for backwards compatibility with existing callers.
  */
 export function createLazyLinearClient(apiKey: string | undefined): {
-  getClient: () => Promise<any>;
+  getClient: () => Promise<LinearClient | null>;
 } {
   return {
     getClient: () => getLinearClient(apiKey),
@@ -30,7 +31,7 @@ export function createLazyLinearClient(apiKey: string | undefined): {
  * parallelizes all `state.team` relation fetches via Promise.all.
  */
 export async function resolveWorkflowStates(
-  linearClient: any,
+  linearClient: Pick<LinearClient, "workflowStates">,
   teamIds: string[],
 ): Promise<Map<string, string>> {
   return resolveWorkflowStatesByTeam(linearClient, teamIds);

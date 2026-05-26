@@ -55,6 +55,7 @@ describe("BEC-62 reproduction — scheduler ignores isPmPaused()", () => {
       linearApiKey: "",
       slackBotToken: "",
       actions: mockActions,
+      authMonitor: { tick: async () => {} },
     });
   }
 

@@ -81,3 +81,8 @@ export type DecisionResult =
   | { kind: "fire"; reason: string }
   | { kind: "skip"; reason: string; qaActionNeeded?: QaTriggerResult }
   | { kind: "awaiting-approval"; reason: string };
+
+/** Slack Block Kit action_id for the Approve button (BEC-142). */
+export const RELEASE_APPROVE_ACTION_ID = "release_approve";
+/** Slack Block Kit action_id for the Skip button (BEC-142). */
+export const RELEASE_SKIP_ACTION_ID = "release_skip";

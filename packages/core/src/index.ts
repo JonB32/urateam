@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
+export { parseIntOr, parsePosIntOr, parseFloatOr, parseOptPosInt, parseCsv } from "./util/env.js";
 export * from "./types.js";
 export {
   checkLicense,
@@ -14,8 +15,9 @@ export * from "./rbac/index.js";
 export { computeConfigFingerprint } from "./audit/config-fingerprint.js";
 export { rootLogger, createLogger, addLogStream } from "./logger.js";
 export { createDb, isPostgres, sqlDateGroup, sqlDaysAgoFilter, type Db, type AnyDb } from "./db/index.js";
-export { pipelineRuns, stageRuns, agentLogs, activeWork, pmApprovals } from "./db/index.js";
-export { createApp, type ServerConfig } from "./server.js";
+export { pipelineRuns, stageRuns, agentLogs, activeWork, pmApprovals, circuitBreakerState, pipelineRunDecisions, reviewModelRuns } from "./db/index.js";
+export { batchCountConsecutiveFailures, deleteFailedRunsForIssue } from "./pm/actions/db-queries.js";
+export { createApp, type ServerConfig, type PmSlackInterfaceConfig } from "./server.js";
 export { PipelineRunner, type PipelineRunnerConfig, type LinearIssue } from "./pipeline/index.js";
 export { type StopMode, requestRunStop, getStopSignal, clearStopSignal } from "./pipeline/index.js";
 export {
@@ -39,6 +41,9 @@ export {
 } from "./notifier/index.js";
 export { assemblePrompt, sanitize, mapIssueToSchema } from "./executor/index.js";
 export { executeStage } from "./executor/index.js";
+export { detectStageHang, HANG_DETECTION_INTERVAL_MS, DEFAULT_HANG_THRESHOLD_MS, type HangDiagnostics } from "./executor/index.js";
+export { terminateRun, type TerminateRunResult } from "./pipeline/index.js";
+export { getSessionMessages, type SessionMessage } from "./executor/index.js";
 export { validateReviewModels } from "./executor/review/review-provider.js";
 export { validateHandoff, type ValidationResult } from "./executor/validate.js";
 export { extractHandoff } from "./executor/extract-handoff.js";
@@ -75,10 +80,13 @@ export type { PmAgentConfig, TickResult } from "./pm/types.js";
 export { PmAgentConfigSchema } from "./pm/types.js";
 export {
   loadMigrationFiles,
+  loadActiveMigrationFiles,
   runMigrationsSqlite,
   runMigrationsPostgres,
   getMigrationStatusSqlite,
   getMigrationStatusPostgres,
+  SQLITE_MIGRATION_RENAMES,
+  POSTGRES_MIGRATION_RENAMES,
   type Migration,
   type MigrationStatus,
 } from "./db/index.js";
@@ -102,3 +110,4 @@ export {
 export * from "./release-manager/index.js";
 export * from "./qa/index.js";
 export * from "./sync/index.js";
+export * from "./integrations/index.js";

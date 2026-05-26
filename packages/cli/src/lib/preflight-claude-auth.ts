@@ -1,13 +1,14 @@
 /**
  * OSS-tier Claude session auth pre-flight, shared by `ura dev` and `ura start`.
  *
- * The OSS tier of urateam runs against the local `claude` CLI session, which
- * expires silently in the background (typically weekly). Without this gate
- * the first inbound Linear webhook after expiry would burn through tokens,
- * fail mid-pipeline, and leave the operator to manually unstick the Linear
- * issue from "in progress" before re-authing. The Anthropic API tier
- * (long-lived API key) has no session-lifetime semantics — `isClaudeAuthValid`
- * resolves true there and the gate is a no-op.
+ * When CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY is set, returns immediately —
+ * those paths are long-lived and have no session-expiry semantics.
+ *
+ * For the local `claude` CLI session path (expires weekly), runs `isClaudeAuthValid`
+ * at startup and exits 1 with an operator-actionable banner if the session is
+ * missing or expired. Without this gate the first inbound Linear webhook after
+ * expiry would burn through tokens, fail mid-pipeline, and leave the operator to
+ * manually unstick the Linear issue from "in progress" before re-authing.
  *
  * On failure: prints an operator-actionable banner and exits 1.
  *

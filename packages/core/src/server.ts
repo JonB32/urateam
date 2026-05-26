@@ -16,6 +16,16 @@ import type { GitLabConfig } from "./repo/gitlab.js";
 import type { BitbucketConfig } from "./repo/bitbucket.js";
 import { isFeatureLicensed, checkLicense } from "./license.js";
 import { createLogger } from "./logger.js";
+import type { SentryIntegrationConfig } from "./integrations/sentry.js";
+import type { CloudWatchIntegrationConfig } from "./integrations/cloudwatch.js";
+import { checkSessionVolume } from "./pipeline/session-volume-check.js";
+import {
+  logAuditEvent,
+  systemSessionVolumeWarningEvent,
+} from "./audit/index.js";
+import { defaultProjectsRoot } from "./executor/session-store.js";
+import { isAgentSessionResumeEnabled } from "./executor/session-policy.js";
+import type { SlackResponse } from "./release-manager/slack-handler.js";
 
 const log = createLogger({ component: "server" });
 
@@ -28,6 +38,11 @@ export interface PmSlackInterfaceConfig {
   channelId: string;
   /** Team IDs for issue creation commands */
   teamIds?: string[];
+  /**
+   * BEC-135/BEC-142: handler for /release slash commands and Block Kit button callbacks.
+   * Wired by the CLI start command after the Release Manager scheduler is created.
+   */
+  releaseHandler?: (params: { text: string; userId: string }) => Promise<SlackResponse>;
 }
 
 export interface ServerConfig {
@@ -71,6 +86,18 @@ export interface ServerConfig {
    * webhook handler so new runs are refused when spend caps are exhausted.
    */
   pmConfig?: PmAgentConfig;
+  /**
+   * When provided, mounts the Sentry webhook handler at POST /webhooks/sentry.
+   * Enables Sentry issue alert → Linear ticket creation with HMAC verification.
+   * See deploy/SENTRY_INTEGRATION_SETUP.md for setup instructions.
+   */
+  sentryIntegration?: SentryIntegrationConfig;
+  /**
+   * When provided, mounts the CloudWatch SNS handler at POST /webhooks/cloudwatch.
+   * Enables CloudWatch alarm → Linear ticket creation via AWS SNS.
+   * See deploy/CLOUDWATCH_INTEGRATION_SETUP.md for setup instructions.
+   */
+  cloudwatchIntegration?: CloudWatchIntegrationConfig;
 }
 
 export async function createApp(config: ServerConfig) {
@@ -92,6 +119,25 @@ export async function createApp(config: ServerConfig) {
   const db = await createDb({
     connectionString: config.databaseUrl ?? ":memory:",
   });
+
+  // BEC-227: session-volume sanity check. Verifies that `~/.claude/projects`
+  // (or `URATEAM_CLAUDE_PROJECTS_DIR`) is mounted and writeable so JSONL
+  // transcripts survive container restarts. Non-fatal — a failing check
+  // means resumes silently fall back to fresh sessions.
+  if (isAgentSessionResumeEnabled()) {
+    const projectsDir = defaultProjectsRoot();
+    const status = checkSessionVolume({ projectsDir });
+    if (!status.ok) {
+      log.warn(
+        { projectsDir, reason: status.reason },
+        "agent session projects dir failed volume check — resumes will fall back to fresh sessions",
+      );
+      void logAuditEvent(
+        db as any,
+        systemSessionVolumeWarningEvent({ projectsDir, reason: status.reason }),
+      );
+    }
+  }
 
   // Notifiers
   const notifiers = [
@@ -184,12 +230,22 @@ export async function createApp(config: ServerConfig) {
       );
     } else {
       const { createSlackInterface } = await import("./pm/slack-interface.js");
+      // BEC-135/BEC-142: the CLI start command sets config.pmSlack.releaseHandler
+      // AFTER createApp returns (it needs `db` from createApp to build it).
+      // Use a proxy so the router always reads the latest value at request time.
+      const pmSlackRef = config.pmSlack;
+      const releaseHandlerProxy = (params: { text: string; userId: string }) =>
+        pmSlackRef.releaseHandler
+          ? pmSlackRef.releaseHandler(params)
+          : Promise.resolve({ text: ":x: Release Manager is not configured on this server.", responseType: "ephemeral" as const });
+
       const { router: slackRouter } = createSlackInterface({
         signingSecret: config.pmSlack.signingSecret,
         botToken: config.pmSlack.botToken,
         channelId: config.pmSlack.channelId,
         linearApiKey: config.linearApiKey,
         teamIds: config.pmSlack.teamIds,
+        releaseHandler: releaseHandlerProxy,
         // Wire the live runner so `/pm cancel|stop|halt` fire real signals;
         // db is threaded through for audit-event writes from those commands.
         runner: {
@@ -200,6 +256,22 @@ export async function createApp(config: ServerConfig) {
       });
       app.route("/", slackRouter);
     }
+  }
+
+  // Sentry webhook handler (optional — for Sentry issue alert → Linear ticket)
+  if (config.sentryIntegration) {
+    const { createSentryWebhookHandler } = await import("./integrations/sentry.js");
+    const sentryApp = createSentryWebhookHandler(config.sentryIntegration);
+    app.route("/", sentryApp);
+    log.info("Sentry integration mounted at POST /webhooks/sentry");
+  }
+
+  // CloudWatch webhook handler (optional — for CloudWatch alarm → Linear ticket via SNS)
+  if (config.cloudwatchIntegration) {
+    const { createCloudWatchWebhookHandler } = await import("./integrations/cloudwatch.js");
+    const cloudwatchApp = createCloudWatchWebhookHandler(config.cloudwatchIntegration);
+    app.route("/", cloudwatchApp);
+    log.info("CloudWatch integration mounted at POST /webhooks/cloudwatch");
   }
 
   // Health check

@@ -5,24 +5,28 @@ import { bootstrapSsoFromEnv } from "../sso-bootstrap.js";
 import { preflightClaudeAuth } from "../lib/preflight-claude-auth.js";
 import { preflightDirs } from "../lib/preflight-dirs.js";
 import { buildRepoConfigsFromEnv, requireRepoConfigs } from "../lib/build-repo-configs.js";
+import { loadEnvConfig } from "../lib/load-env-config.js";
 
 export const devCommand = new Command("dev")
   .description("Start local development server (webhook + dashboard)")
   .option("--port <port>", "Webhook server port", "3000")
   .option("--dashboard-port <port>", "Dashboard port", "3001")
   .action(async (options) => {
+    // Boot-time env validation — runs first, reports all errors at once.
+    // In dev mode LINEAR_WEBHOOK_SECRET and dashboard auth are optional.
+    const env = loadEnvConfig("dev");
+
     const { createApp, defaultConfigs, validateReviewModels } = await import("@urateam/core");
     const { createDashboard } = await import("@urateam/dashboard");
 
-    const dashboardUser = process.env.DASHBOARD_USER;
-    const dashboardPass = process.env.DASHBOARD_PASSWORD;
     const dashboardAuth =
-      dashboardUser && dashboardPass
-        ? { username: dashboardUser, password: dashboardPass }
+      env.DASHBOARD_USER && env.DASHBOARD_PASSWORD
+        ? { username: env.DASHBOARD_USER, password: env.DASHBOARD_PASSWORD }
         : undefined;
 
     // Build repoConfigs from env: REPO_TEAM_ID, REPO_URL, REPO_DEFAULT_BRANCH, etc.
-    const repoConfigs = buildRepoConfigsFromEnv();
+    // Pass process.env explicitly — loadEnvConfig() has already validated all vars.
+    const repoConfigs = buildRepoConfigsFromEnv(process.env);
 
     // Fail fast if no repoConfigs could be built. Without this, `ura dev`
     // looks healthy in logs (webhook server up, dashboard up) but every
@@ -33,8 +37,8 @@ export const devCommand = new Command("dev")
     requireRepoConfigs(repoConfigs, "ura dev");
 
     // --- Resolve and validate workspace directories ---
-    const agentRunDir = process.env.AGENT_RUN_DIR ?? join(homedir(), "data", "runs");
-    const repoCloneDir = process.env.REPO_CLONE_DIR ?? join(homedir(), "work", "repos");
+    const agentRunDir = env.AGENT_RUN_DIR ?? join(homedir(), "data", "runs");
+    const repoCloneDir = env.REPO_CLONE_DIR ?? join(homedir(), "work", "repos");
 
     // Run three independent I/O checks in parallel so startup is faster:
     //   • preflightDirs  — verifies/creates agent-run and repo-clone directories
@@ -47,19 +51,19 @@ export const devCommand = new Command("dev")
     ]);
 
     const config = {
-      webhookSecret: process.env.LINEAR_WEBHOOK_SECRET ?? "dev-secret",
-      linearApiKey: process.env.LINEAR_API_KEY ?? "",
+      webhookSecret: env.LINEAR_WEBHOOK_SECRET ?? "dev-secret",
+      linearApiKey: env.LINEAR_API_KEY,
       pipelineConfigs: defaultConfigs,
       repoConfigs,
-      slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
-      discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL,
+      slackWebhookUrl: env.SLACK_WEBHOOK_URL,
+      discordWebhookUrl: env.DISCORD_WEBHOOK_URL,
       agentRunDir,
       repoCloneDir,
-      githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET,
+      githubWebhookSecret: env.GITHUB_WEBHOOK_SECRET,
     };
 
     // Validate SSO env vars before opening DB so misconfig fails fast.
-    const ssoBootstrap = await bootstrapSsoFromEnv();
+    const ssoBootstrap = await bootstrapSsoFromEnv(process.env);
 
     const { app, db } = await createApp(config);
 
@@ -83,8 +87,8 @@ export const devCommand = new Command("dev")
     });
 
     const { serve } = await import("@hono/node-server");
-    const port = parseInt(options.port, 10);
-    const dashboardPort = parseInt(options.dashboardPort, 10);
+    const port = env.PORT;
+    const dashboardPort = env.DASHBOARD_PORT;
 
     console.log(`Linear Agent Framework — Local Dev Mode`);
     console.log(`Webhook server:  http://localhost:${port}`);

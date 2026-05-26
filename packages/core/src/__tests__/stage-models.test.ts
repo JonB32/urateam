@@ -22,9 +22,9 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 vi.mock("../executor/auth-check.js", () => ({
   isClaudeAuthValid: vi.fn().mockResolvedValue(true),
   // BEC-207: executor.ts also calls resolveClaudeAuth() to log the active
-  // auth method. Mock returns the "session" default so the test doesn't
+  // auth method. Mock returns the "mounted-session" default so the test doesn't
   // depend on env vars.
-  resolveClaudeAuth: vi.fn().mockReturnValue({ method: "session" }),
+  resolveClaudeAuth: vi.fn().mockReturnValue({ method: "mounted-session" }),
 }));
 
 vi.mock("../executor/extract-handoff.js", () => ({
@@ -45,6 +45,7 @@ vi.mock("../executor/extract-handoff.js", () => ({
       tokenBudget: { contextTokensUsed: 500, recommendedMaxTurns: 5 },
     },
     structured: true,
+    decisions: null,
   }),
 }));
 
