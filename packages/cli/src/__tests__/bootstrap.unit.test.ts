@@ -323,7 +323,7 @@ describe("generateEnvFile()", () => {
 // ---------------------------------------------------------------------------
 
 describe("generateDockerCompose()", () => {
-  function makeCtx(): BootstrapContext {
+  function makeCtx(overrides?: Partial<BootstrapContext>): BootstrapContext {
     return {
       appId: 12345,
       privateKey: "pem",
@@ -331,10 +331,11 @@ describe("generateDockerCompose()", () => {
       linearApiKey: "lin_api_test",
       linearWebhookSecret: "linearsecret",
       webhookUrl: "https://hooks.example.com",
+      ...overrides,
     };
   }
 
-  it("writes docker-compose.dogfood.yml with correct content", async () => {
+  it("writes docker-compose.dogfood.yml with correct content using default ports", async () => {
     const writtenFiles: Record<string, string> = {};
     const mockWriteFile = vi.fn(async (filePath: PathLike | fs.FileHandle, data: unknown) => {
       writtenFiles[filePath.toString()] = data as string;
@@ -352,12 +353,37 @@ describe("generateDockerCompose()", () => {
     expect(content).toContain("app:");
     expect(content).toContain("dashboard:");
 
-    // Port mappings.
+    // Default port mappings.
     expect(content).toContain("3000:3000");
     expect(content).toContain("3001:3001");
+    expect(content).toContain("PORT=3000");
+    expect(content).toContain("DASHBOARD_PORT=3001");
 
     // env_file reference.
     expect(content).toContain("env_file: .env");
+  });
+
+  it("uses custom ports from ctx when provided", async () => {
+    const writtenFiles: Record<string, string> = {};
+    const mockWriteFile = vi.fn(async (filePath: PathLike | fs.FileHandle, data: unknown) => {
+      writtenFiles[filePath.toString()] = data as string;
+    });
+
+    await generateDockerCompose(makeCtx({ appPort: 3010, dashboardPort: 3011 }), "/tmp/test-dir", {
+      writeFile: mockWriteFile as typeof fs.writeFile,
+    });
+
+    const content = Object.values(writtenFiles)[0]!;
+
+    // Custom port mappings: host:container.
+    expect(content).toContain("3010:3000");
+    expect(content).toContain("3011:3001");
+    expect(content).toContain("PORT=3010");
+    expect(content).toContain("DASHBOARD_PORT=3011");
+
+    // Must NOT contain default ports in the host-side mappings.
+    expect(content).not.toContain('"3000:3000"');
+    expect(content).not.toContain('"3001:3001"');
   });
 
   it("writes to docker-compose.dogfood.yml filename", async () => {
@@ -401,6 +427,23 @@ describe("generateReverseProxyConfig()", () => {
     expect(filePath).toMatch(/Caddyfile$/);
   });
 
+  it("writes Caddyfile with custom appPort", async () => {
+    const writtenFiles: Record<string, string> = {};
+    const mockWriteFile = vi.fn(async (filePath: PathLike | fs.FileHandle, data: unknown) => {
+      writtenFiles[filePath.toString()] = data as string;
+    });
+    const logs: string[] = [];
+
+    await generateReverseProxyConfig("hooks.example.com", "caddy", "/tmp/test-dir", {
+      writeFile: mockWriteFile as typeof fs.writeFile,
+      log: (msg) => logs.push(msg),
+    }, 3010);
+
+    const content = Object.values(writtenFiles)[0]!;
+    expect(content).toContain("reverse_proxy localhost:3010");
+    expect(content).not.toContain("localhost:3000");
+  });
+
   it("prints cloudflared command and does not write a file when choice is 'cloudflared'", async () => {
     const mockWriteFile = vi.fn();
     const logs: string[] = [];
@@ -417,6 +460,20 @@ describe("generateReverseProxyConfig()", () => {
     const allLog = logs.join("\n");
     expect(allLog).toContain("cloudflared");
     expect(allLog).toContain("localhost:3000");
+  });
+
+  it("prints cloudflared command with custom appPort", async () => {
+    const mockWriteFile = vi.fn();
+    const logs: string[] = [];
+
+    await generateReverseProxyConfig("hooks.example.com", "cloudflared", "/tmp/test-dir", {
+      writeFile: mockWriteFile as typeof fs.writeFile,
+      log: (msg) => logs.push(msg),
+    }, 3010);
+
+    const allLog = logs.join("\n");
+    expect(allLog).toContain("localhost:3010");
+    expect(allLog).not.toContain("localhost:3000");
   });
 });
 
@@ -565,6 +622,33 @@ describe("createGitHubApp()", () => {
 });
 
 // ---------------------------------------------------------------------------
+// preflightChecks — custom ports
+// ---------------------------------------------------------------------------
+
+describe("preflightChecks() — custom ports", () => {
+  it("checks the provided ports instead of defaults", async () => {
+    const ef = makeExecFile();
+    const checkedPorts: number[] = [];
+    const portCheckSpy = async (port: number): Promise<boolean> => {
+      checkedPorts.push(port);
+      return true;
+    };
+
+    await preflightChecks({ execFile: ef, isPortFree: portCheckSpy }, [3010, 3011]);
+    expect(checkedPorts).toEqual([3010, 3011]);
+  });
+
+  it("throws with the custom port number in the error when a custom port is busy", async () => {
+    const ef = makeExecFile();
+    const portCheck = async (port: number): Promise<boolean> => port !== 3011;
+
+    await expect(
+      preflightChecks({ execFile: ef, isPortFree: portCheck }, [3010, 3011]),
+    ).rejects.toThrow(/3011/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // bootstrapCommand — command metadata
 // ---------------------------------------------------------------------------
 
@@ -610,10 +694,23 @@ describe("bootstrapCommand", () => {
     expect(names).toContain("--output-dir");
   });
 
-  it("has --port option with default '3000'", () => {
+  it("has --app-port option with default '3000'", () => {
     const opts = bootstrapCommand.options;
-    const portOpt = opts.find((o) => o.long === "--port");
+    const portOpt = opts.find((o) => o.long === "--app-port");
     expect(portOpt).toBeDefined();
     expect(portOpt?.defaultValue).toBe("3000");
+  });
+
+  it("has --dashboard-port option with default '3001'", () => {
+    const opts = bootstrapCommand.options;
+    const portOpt = opts.find((o) => o.long === "--dashboard-port");
+    expect(portOpt).toBeDefined();
+    expect(portOpt?.defaultValue).toBe("3001");
+  });
+
+  it("has --port option (deprecated back-compat alias for --app-port)", () => {
+    const opts = bootstrapCommand.options;
+    const names = opts.map((o) => o.long);
+    expect(names).toContain("--port");
   });
 });

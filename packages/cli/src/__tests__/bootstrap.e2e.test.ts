@@ -76,7 +76,7 @@ describe("Bootstrap e2e — file generation", () => {
     expect(content).toContain("\\n");
   });
 
-  it("generateDockerCompose writes a valid docker-compose.dogfood.yml", async () => {
+  it("generateDockerCompose writes a valid docker-compose.dogfood.yml with default ports", async () => {
     const ctx = makeCtx();
     await generateDockerCompose(ctx, tmpDir);
 
@@ -90,17 +90,45 @@ describe("Bootstrap e2e — file generation", () => {
     expect(content).toContain("dashboard:");
     expect(content).toContain("3000:3000");
     expect(content).toContain("3001:3001");
+    expect(content).toContain("PORT=3000");
+    expect(content).toContain("DASHBOARD_PORT=3001");
     expect(content).toContain("env_file: .env");
     expect(content).toContain("urateam_data:");
     expect(content).toContain("depends_on:");
   });
 
-  it("generateReverseProxyConfig writes a Caddyfile for 'caddy'", async () => {
+  it("generateDockerCompose uses custom ports from ctx", async () => {
+    const ctx = { ...makeCtx(), appPort: 3010, dashboardPort: 3011 };
+    await generateDockerCompose(ctx, tmpDir);
+
+    const content = await fs.readFile(
+      path.join(tmpDir, "docker-compose.dogfood.yml"),
+      "utf8",
+    );
+
+    expect(content).toContain("3010:3000");
+    expect(content).toContain("3011:3001");
+    expect(content).toContain("PORT=3010");
+    expect(content).toContain("DASHBOARD_PORT=3011");
+    // Must NOT use defaults in host-side mappings.
+    expect(content).not.toContain('"3000:3000"');
+    expect(content).not.toContain('"3001:3001"');
+  });
+
+  it("generateReverseProxyConfig writes a Caddyfile for 'caddy' with default port", async () => {
     await generateReverseProxyConfig("hooks.example.com", "caddy", tmpDir);
 
     const content = await fs.readFile(path.join(tmpDir, "Caddyfile"), "utf8");
     expect(content).toContain("hooks.example.com");
     expect(content).toContain("reverse_proxy localhost:3000");
+  });
+
+  it("generateReverseProxyConfig writes Caddyfile with custom appPort", async () => {
+    await generateReverseProxyConfig("hooks.example.com", "caddy", tmpDir, undefined, 3010);
+
+    const content = await fs.readFile(path.join(tmpDir, "Caddyfile"), "utf8");
+    expect(content).toContain("reverse_proxy localhost:3010");
+    expect(content).not.toContain("localhost:3000");
   });
 
   it("generateReverseProxyConfig does not write a file for 'cloudflared'", async () => {
@@ -114,8 +142,21 @@ describe("Bootstrap e2e — file generation", () => {
       fs.access(path.join(tmpDir, "Caddyfile")),
     ).rejects.toThrow();
 
-    // But the cloudflared command is printed.
-    expect(logs.join("\n")).toContain("cloudflared");
+    // But the cloudflared command is printed with the default port.
+    const allLogs = logs.join("\n");
+    expect(allLogs).toContain("cloudflared");
+    expect(allLogs).toContain("localhost:3000");
+  });
+
+  it("generateReverseProxyConfig prints custom port for 'cloudflared'", async () => {
+    const logs: string[] = [];
+    await generateReverseProxyConfig("hooks.example.com", "cloudflared", tmpDir, {
+      log: (m) => logs.push(m),
+    }, 3010);
+
+    const allLogs = logs.join("\n");
+    expect(allLogs).toContain("localhost:3010");
+    expect(allLogs).not.toContain("localhost:3000");
   });
 
   it("all three output files coexist in the same output directory", async () => {
