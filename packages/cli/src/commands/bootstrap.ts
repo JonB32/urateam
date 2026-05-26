@@ -691,15 +691,27 @@ export function composeFilename(dogfood = false): string {
 }
 
 /**
+ * Maps a legacy dogfood filename to its consumer replacement name.
+ * @internal
+ */
+export const LEGACY_ARTIFACT_MIGRATIONS: Record<string, string> = {
+  "docker-compose.dogfood.yml": "docker-compose.yml",
+  ".env.dogfood": ".env",
+};
+
+/**
  * Checks `outputDir` for legacy "dogfood"-named artifacts written by older
- * bootstrap versions. Returns the filenames of any found legacy files so the
- * caller can print a migration hint.
+ * bootstrap versions (or manually created alongside the internal soak harness).
+ * Returns the filenames of any found legacy files so the caller can print a
+ * migration hint.
+ *
+ * Detected candidates: `docker-compose.dogfood.yml`, `.env.dogfood`.
  *
  * @param outputDir - Directory to inspect. Defaults to `process.cwd()`.
  */
 export async function detectLegacyArtifacts(outputDir?: string): Promise<string[]> {
   const dir = getOutputDir(outputDir);
-  const candidates = ["docker-compose.dogfood.yml"];
+  const candidates = Object.keys(LEGACY_ARTIFACT_MIGRATIONS);
   const found: string[] = [];
   await Promise.all(
     candidates.map(async (f) => {
@@ -965,12 +977,12 @@ export const bootstrapCommand = new Command("bootstrap")
       const legacy = await detectLegacyArtifacts(opts.outputDir);
       if (legacy.length > 0) {
         const migrations = legacy
-          .map((f) => `  cp ${f} ${f.replace("docker-compose.dogfood.yml", "docker-compose.yml")}`)
+          .map((f) => `  cp ${f} ${LEGACY_ARTIFACT_MIGRATIONS[f] ?? f}`)
           .join("\n");
         logger.warn(
           { files: legacy },
           "Legacy dogfood-named artifact(s) found in the output directory.\n" +
-            "Bootstrap now generates consumer-named files (docker-compose.yml).\n" +
+            "Bootstrap now generates consumer-named files (docker-compose.yml / .env).\n" +
             "To migrate your existing deployment, run:\n" +
             migrations,
         );

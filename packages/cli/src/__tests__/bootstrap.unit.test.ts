@@ -30,6 +30,7 @@ import {
   bootstrapCommand,
   composeFilename,
   detectLegacyArtifacts,
+  LEGACY_ARTIFACT_MIGRATIONS,
   type BootstrapContext,
   type ExecFileFn,
 } from "../commands/bootstrap.js";
@@ -359,6 +360,35 @@ describe("detectLegacyArtifacts()", () => {
     await fs.writeFile(path.join(tmpDir, "docker-compose.dogfood.yml"), "# legacy");
     const found = await detectLegacyArtifacts(tmpDir);
     expect(found).toContain("docker-compose.dogfood.yml");
+  });
+
+  it("detects .env.dogfood when present", async () => {
+    await fs.writeFile(path.join(tmpDir, ".env.dogfood"), "LINEAR_API_KEY=test");
+    const found = await detectLegacyArtifacts(tmpDir);
+    expect(found).toContain(".env.dogfood");
+  });
+
+  it("detects both legacy files when both are present", async () => {
+    await fs.writeFile(path.join(tmpDir, "docker-compose.dogfood.yml"), "# legacy compose");
+    await fs.writeFile(path.join(tmpDir, ".env.dogfood"), "LINEAR_API_KEY=test");
+    const found = await detectLegacyArtifacts(tmpDir);
+    expect(found).toContain("docker-compose.dogfood.yml");
+    expect(found).toContain(".env.dogfood");
+    expect(found).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LEGACY_ARTIFACT_MIGRATIONS
+// ---------------------------------------------------------------------------
+
+describe("LEGACY_ARTIFACT_MIGRATIONS", () => {
+  it("maps docker-compose.dogfood.yml to docker-compose.yml", () => {
+    expect(LEGACY_ARTIFACT_MIGRATIONS["docker-compose.dogfood.yml"]).toBe("docker-compose.yml");
+  });
+
+  it("maps .env.dogfood to .env", () => {
+    expect(LEGACY_ARTIFACT_MIGRATIONS[".env.dogfood"]).toBe(".env");
   });
 });
 
