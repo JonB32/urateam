@@ -22,6 +22,7 @@ import * as os from "node:os";
 import {
   preflightChecks,
   createGitHubApp,
+  buildManifestPostHtml,
   registerLinearWebhook,
   generateEnvFile,
   generateDockerCompose,
@@ -475,6 +476,60 @@ describe("validateSetup()", () => {
 });
 
 // ---------------------------------------------------------------------------
+// buildManifestPostHtml
+// ---------------------------------------------------------------------------
+
+describe("buildManifestPostHtml()", () => {
+  it("contains method=post", () => {
+    const html = buildManifestPostHtml(
+      "https://github.com/settings/apps/new?state=abc",
+      '{"name":"test"}',
+    );
+    expect(html).toContain('method="post"');
+  });
+
+  it("contains the correct action URL", () => {
+    const html = buildManifestPostHtml(
+      "https://github.com/settings/apps/new?state=abc123",
+      '{"name":"test"}',
+    );
+    expect(html).toContain('action="https://github.com/settings/apps/new?state=abc123"');
+  });
+
+  it("contains a manifest hidden field with the JSON content", () => {
+    const manifest = JSON.stringify({ name: "urateam", url: "https://example.com" });
+    const html = buildManifestPostHtml(
+      "https://github.com/settings/apps/new?state=abc",
+      manifest,
+    );
+    expect(html).toContain('name="manifest"');
+    // Manifest JSON is embedded with double-quote escaping
+    expect(html).toContain("&quot;name&quot;");
+    expect(html).toContain("&quot;urateam&quot;");
+  });
+
+  it("HTML-escapes double quotes in manifest JSON for attribute safety", () => {
+    const manifest = JSON.stringify({ name: "urateam" });
+    const html = buildManifestPostHtml(
+      "https://github.com/settings/apps/new?state=abc",
+      manifest,
+    );
+    // Raw unescaped double quotes must not appear inside the value="..." attribute
+    expect(html).not.toContain('value="{"');
+    expect(html).toContain("&quot;");
+  });
+
+  it("works with the org-scoped GitHub URL", () => {
+    const html = buildManifestPostHtml(
+      "https://github.com/organizations/my-org/settings/apps/new?state=abc",
+      "{}",
+    );
+    expect(html).toContain("https://github.com/organizations/my-org/settings/apps/new");
+    expect(html).toContain('method="post"');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // createGitHubApp
 // ---------------------------------------------------------------------------
 
@@ -510,8 +565,9 @@ describe("createGitHubApp()", () => {
     expect(portCheckSpy).not.toHaveBeenCalled();
   });
 
-  it("constructs a personal GitHub App URL when org is not provided", async () => {
+  it("opens a temp HTML file (not a GET URL) for the personal App flow", async () => {
     const openBrowserSpy = vi.fn();
+    const writeFileSpy = vi.fn().mockResolvedValue(undefined);
 
     // Will timeout after 100ms since there's no callback server
     await expect(
@@ -520,18 +576,27 @@ describe("createGitHubApp()", () => {
         timeoutMs: 100,
         deps: {
           openBrowser: openBrowserSpy,
+          writeFile: writeFileSpy,
           isPortFree: async () => true,
         },
       }),
     ).rejects.toThrow(/timed out/i);
 
-    const openedUrl = openBrowserSpy.mock.calls[0]?.[0];
-    expect(openedUrl).toContain("https://github.com/settings/apps/new");
-    expect(openedUrl).not.toContain("organizations/");
+    // Browser must be opened with a temp .html file path, not a GET GitHub URL.
+    const openedPath = openBrowserSpy.mock.calls[0]?.[0] as string;
+    expect(openedPath).toMatch(/\.html$/);
+    expect(openedPath).not.toContain("?manifest=");
+
+    // Written HTML must be the POST form targeting the personal GitHub URL.
+    const [, writtenContent] = writeFileSpy.mock.calls[0] as [string, string];
+    expect(writtenContent).toContain('method="post"');
+    expect(writtenContent).toContain("https://github.com/settings/apps/new");
+    expect(writtenContent).not.toContain("organizations/");
   });
 
-  it("constructs an org GitHub App URL when org is provided", async () => {
+  it("opens a temp HTML file targeting the org-scoped URL when org is provided", async () => {
     const openBrowserSpy = vi.fn();
+    const writeFileSpy = vi.fn().mockResolvedValue(undefined);
 
     await expect(
       createGitHubApp({
@@ -540,13 +605,15 @@ describe("createGitHubApp()", () => {
         timeoutMs: 100,
         deps: {
           openBrowser: openBrowserSpy,
+          writeFile: writeFileSpy,
           isPortFree: async () => true,
         },
       }),
     ).rejects.toThrow(/timed out/i);
 
-    const openedUrl = openBrowserSpy.mock.calls[0]?.[0];
-    expect(openedUrl).toContain("https://github.com/organizations/my-org/settings/apps/new");
+    const [, writtenContent] = writeFileSpy.mock.calls[0] as [string, string];
+    expect(writtenContent).toContain("https://github.com/organizations/my-org/settings/apps/new");
+    expect(writtenContent).toContain('method="post"');
   });
 
   it("throws on state mismatch (CSRF protection)", async () => {
