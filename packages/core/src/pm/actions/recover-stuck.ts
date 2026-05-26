@@ -291,8 +291,6 @@ export async function recoverStuckInProgressIssues(
         }
       }
 
-      await linearClient.updateIssue(issue.id, { stateId: effectiveTargetStateId });
-
       const displayStatus = isLongRunningRun ? "running (marked failed — zombie)" : lastRunStatus;
       const runNote = displayStatus
         ? `Most recent pipeline run status: \`${displayStatus}\`${lastRunPrUrl ? ` (PR: ${lastRunPrUrl})` : ""}.`
@@ -303,13 +301,16 @@ export async function recoverStuckInProgressIssues(
       const longRunningNote = isLongRunningRun
         ? `\n\n*BEC-184: run was still status \`running\` after >${stuckRunAgeMinutes} min — marked as failed and issue recovered.*`
         : "";
-      await linearClient.createComment({
-        issueId: issue.id,
-        body:
-          `🤖 **PM Agent — Auto-recovered stuck issue**\n\n` +
-          `This issue was detected in **In Progress** state with no active pipeline run. ` +
-          `It has been automatically moved to **${effectiveTargetState}** for re-evaluation.\n\n${runNote}${overrideNote}${longRunningNote}`,
-      });
+      await Promise.all([
+        linearClient.updateIssue(issue.id, { stateId: effectiveTargetStateId }),
+        linearClient.createComment({
+          issueId: issue.id,
+          body:
+            `🤖 **PM Agent — Auto-recovered stuck issue**\n\n` +
+            `This issue was detected in **In Progress** state with no active pipeline run. ` +
+            `It has been automatically moved to **${effectiveTargetState}** for re-evaluation.\n\n${runNote}${overrideNote}${longRunningNote}`,
+        }),
+      ]);
 
       results.push({
         issueId: issue.id,
