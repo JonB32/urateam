@@ -918,15 +918,18 @@ export const bootstrapCommand = new Command("bootstrap")
     domain?: string;
     proxy?: string;
     outputDir?: string;
-    appPort?: string;
-    dashboardPort?: string;
+    /** Always present — Commander default "3000". */
+    appPort: string;
+    /** Always present — Commander default "3001". */
+    dashboardPort: string;
+    /** Absent when not passed — deprecated alias for appPort. */
     port?: string;
   }) => {
     const logger = createLogger({ component: "bootstrap" });
 
     /** Logs an error via the structured logger then exits with code 1. */
     function exitWithError(message: string, err: unknown): never {
-      logger.error({ err: (err as Error).message }, message);
+      logger.error({ err: err instanceof Error ? err.message : String(err) }, message);
       process.exit(1);
     }
 
@@ -940,8 +943,8 @@ export const bootstrapCommand = new Command("bootstrap")
           "Support for --port will be removed in a future release.",
       );
     }
-    const resolvedAppPort = parseInt(opts.port ?? opts.appPort ?? String(DEFAULT_APP_PORT), 10);
-    const resolvedDashboardPort = parseInt(opts.dashboardPort ?? String(DEFAULT_DASHBOARD_PORT), 10);
+    const resolvedAppPort = parseInt(opts.port ?? opts.appPort, 10);
+    const resolvedDashboardPort = parseInt(opts.dashboardPort, 10);
 
     // ── Step 1: Pre-flight checks ──────────────────────────────────────────
     logger.info("[1/7] Running pre-flight checks...");

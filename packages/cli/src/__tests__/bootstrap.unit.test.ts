@@ -763,7 +763,7 @@ describe("validateSetup() with custom ports", () => {
     expect(callArgs[0]).not.toContain("3000");
   });
 
-  it("POSTs to port 3011 by default when not provided", async () => {
+  it("POSTs to port 3000 by default when not provided", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       status: 200,
     });
