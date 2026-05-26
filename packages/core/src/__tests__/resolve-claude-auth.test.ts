@@ -15,14 +15,15 @@ const mockExecFile = vi.mocked(execFile);
 
 function simulateCliSuccess() {
   mockExecFile.mockImplementation((_cmd, _args, _opts, cb: any) => {
-    cb(null);
+    cb(null, "ok", "");
     return {} as any;
   });
 }
 
+/** Simulate a 401 auth error from the real-API probe (BEC-244). */
 function simulateCliFailure() {
   mockExecFile.mockImplementation((_cmd, _args, _opts, cb: any) => {
-    cb(new Error("auth failed"));
+    cb(new Error("Command failed"), "", "Error: Invalid authentication credentials (401)");
     return {} as any;
   });
 }
@@ -67,14 +68,14 @@ describe("resolveClaudeAuth", () => {
     expect(result.method).toBe("oauth-token");
   });
 
-  it("returns session method when neither env var is set", () => {
+  it("returns mounted-session method when neither env var is set", () => {
     delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
     delete process.env.ANTHROPIC_API_KEY;
     const result = resolveClaudeAuth();
-    expect(result.method).toBe("session");
+    expect(result.method).toBe("mounted-session");
   });
 
-  it("precedence order: CLAUDE_CODE_OAUTH_TOKEN > ANTHROPIC_API_KEY > session", () => {
+  it("precedence order: CLAUDE_CODE_OAUTH_TOKEN > ANTHROPIC_API_KEY > mounted-session", () => {
     // All set — oauth token wins
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-x";
     process.env.ANTHROPIC_API_KEY = "sk-ant-api03-y";
@@ -84,9 +85,9 @@ describe("resolveClaudeAuth", () => {
     delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
     expect(resolveClaudeAuth().method).toBe("api-key");
 
-    // Neither — session
+    // Neither — mounted-session
     delete process.env.ANTHROPIC_API_KEY;
-    expect(resolveClaudeAuth().method).toBe("session");
+    expect(resolveClaudeAuth().method).toBe("mounted-session");
   });
 });
 
@@ -134,9 +135,10 @@ describe("isClaudeAuthValid env-var short-circuit", () => {
     const result = await isClaudeAuthValid();
     expect(result).toBe(true);
     expect(mockExecFile).toHaveBeenCalledTimes(1);
+    // Must use the real-API probe, NOT claude auth status (BEC-244)
     expect(mockExecFile).toHaveBeenCalledWith(
       "claude",
-      ["auth", "status"],
+      ["-p", "ok"],
       { timeout: 10_000 },
       expect.any(Function),
     );

@@ -9,7 +9,9 @@ import type {
   DailyTokenSummary,
   PipelineRunStatus,
   ReviewFinding,
+  ResumePayload,
 } from "../types.js";
+import { ResumePayloadSchema } from "../types.js"; // value import — cannot be `import type`
 import type { Db, AnyDb } from "../db/client.js";
 import { pipelineRuns, stageRuns, reviewModelRuns } from "../db/schema.js";
 import {
@@ -17,12 +19,17 @@ import {
   type StageCostBreakdown,
 } from "./cost-summary.js";
 import { executeStage } from "../executor/executor.js";
-import { validateHandoff } from "../executor/validate.js";
+import { validateHandoff, type ValidateRunMode } from "../executor/validate.js";
 import { isFeatureLicensed } from "../license.js";
 import { checkRequirements, buildRalphContext } from "../executor/ralph.js";
 import { computeEffectiveRalphIterations } from "./runner-ralph-helpers.js";
 import { checkTestQuality } from "../executor/test-quality.js";
-import { buildDeepReviewContext } from "../executor/deep-review.js";
+import {
+  buildDeepReviewContext,
+  checkDeepReviewConvergence,
+  buildFindingFingerprint,
+  buildNonConvergenceDiagnostic,
+} from "../executor/deep-review.js";
 import { getStopSignal, requestStop, clearStopSignal, type StopMode } from "./control-signals.js";
 import { setPmPaused } from "../pm/pause-state.js";
 import { runReviewProviders } from "./review-providers-runner.js";
@@ -33,7 +40,7 @@ import { DEFAULT_AGENT_CLAUDE_MD } from "../executor/agent-config.js";
 import { generatePRDescription, type TriageQualityMetric } from "./pr-description.js";
 import { maybePostChangeSummary } from "./pr-change-summary.js";
 import { access, writeFile, appendFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
@@ -55,10 +62,13 @@ import {
   getDiffLineCount,
   getChangedFiles,
   checkDuplicateBranch,
+  deleteRemoteBranch,
   branchName,
+  createWorktreeFromRemote,
   pruneWorktreesInRepoDirs,
   gitExecSafe,
 } from "../repo/git.js";
+import { classifyExistingBranch } from "./branch-classifier.js";
 import {
   addPRComment,
   createGitHubClient,
@@ -104,6 +114,9 @@ import {
 } from "../pm/coordination.js";
 import { eq, and, or, sql, gte, lt, inArray } from "drizzle-orm";
 import { nanoid } from "nanoid";
+import { randomUUID } from "node:crypto";
+import { isAgentSessionResumeEnabled, isAlwaysFreshStage } from "../executor/session-policy.js";
+import { transcriptExists, defaultProjectsRoot } from "../executor/session-store.js";
 import { createLogger, runWithLogContext } from "../logger.js";
 import { isTransientError, MAX_TRANSIENT_RETRIES } from "./error-classifier.js";
 import { evaluatePolicyGates } from "../policy/evaluate.js";
@@ -117,6 +130,9 @@ import {
   pipelineSpecVsImplFailedEvent,
   pipelineAutoDeepReviewBumpedEvent,
   pmTriageQualityScoreEvent,
+  pipelineStaleBranchRecoveredEvent,
+  pipelineSkippedExistingBranchEvent,
+  agentSessionCreatedEvent,
 } from "../audit/index.js";
 import {
   computeAffectedFilesPredictionQuality,
@@ -136,6 +152,7 @@ import {
   startFeedbackPipeline,
   type FeedbackStartContext,
 } from "./feedback-pipeline.js";
+import { runSurgicalReviewFix } from "./run-surgical-review-fix.js";
 
 // Re-export from extracted module so existing callers (including tests) still
 // find buildReviewFeedbackContext at pipeline/runner.js without changing their
@@ -144,6 +161,31 @@ export { buildReviewFeedbackContext } from "./feedback-pipeline.js";
 
 // Module-level logger (no runId yet — used for pre-run messages)
 const log = createLogger({ component: "PipelineRunner" });
+
+/**
+ * Serialise a resume payload to the JSON string stored in
+ * `pipeline_runs.resume_payload`.  Both the await-approval pause path and the
+ * transient-failure retry path use this helper so their serialization stays in
+ * sync with `ResumePayloadSchema` — a single place to update if the schema
+ * evolves.
+ */
+function buildResumePayload(
+  handoff: HandoffArtifact | null,
+  pipelineConfig: PipelineConfig,
+  repoConfig: RepoConfig,
+  sanitizedIssue: SanitizedIssue,
+  worktreePath: string,
+  currentStageIndex: number,
+): string {
+  return JSON.stringify({
+    handoff,
+    pipelineConfig,
+    repoConfig,
+    sanitizedIssue,
+    worktreePath,
+    currentStageIndex,
+  } satisfies ResumePayload);
+}
 
 export interface PipelineRunnerConfig {
   db: Db;
@@ -238,17 +280,75 @@ export class PipelineRunner {
       return;
     }
 
-    // Check for existing remote branch (issue already has a PR/branch)
+    // Check for existing remote branch and classify its state (BEC-222).
     const existingBranch = await checkDuplicateBranch(repoConfig.url, issue.identifier);
+    // Track whether we recovered a stale branch; if so emit audit event after
+    // the runId is created.
+    let staleBranchToAudit: string | undefined;
+
     if (existingBranch) {
+      const db_ = this.db as AnyDb;
+      const classification = await classifyExistingBranch(repoConfig, existingBranch, db_);
+
+      if (classification.state === "active-run") {
+        // A live run holds this branch — preserve existing skip behaviour.
+        log.info(
+          { issueId: issue.identifier, existingBranch, activeRunId: classification.runId },
+          "skipping — active run already holds this branch",
+        );
+        await logAuditEvent(db_, pipelineSkippedExistingBranchEvent({
+          issueId: issue.identifier,
+          branch: existingBranch,
+          reason: "active-run",
+          activeRunId: classification.runId,
+        }));
+        return;
+      }
+
+      if (classification.state === "open-pr") {
+        // An open PR already exists — the issue is in review.  Don't restart
+        // from scratch; wait for a PR review comment to trigger feedback run.
+        log.info(
+          { issueId: issue.identifier, existingBranch, prNumber: classification.prNumber },
+          "skipping — open PR already exists for this branch",
+        );
+        await logAuditEvent(db_, pipelineSkippedExistingBranchEvent({
+          issueId: issue.identifier,
+          branch: existingBranch,
+          reason: "open-pr",
+          prNumber: classification.prNumber,
+        }));
+        return;
+      }
+
+      // state === "stale": dead branch from a prior failed/cancelled run.
+      // Delete it and proceed with a fresh pipeline start.
       log.info(
         { issueId: issue.identifier, existingBranch },
-        "skipping — remote branch already exists for this issue",
+        "stale remote branch detected — deleting and retrying from scratch",
       );
-      return;
+      const cloneUrlForDelete = (repoConfig.provider === "gitlab" && this.gitlabConfig)
+        ? buildAuthenticatedUrl(repoConfig.url, this.gitlabConfig)
+        : (repoConfig.provider === "bitbucket" && this.bitbucketConfig)
+          ? buildBitbucketAuthenticatedUrl(repoConfig.url, this.bitbucketConfig)
+          : repoConfig.url;
+      try {
+        await deleteRemoteBranch(cloneUrlForDelete, existingBranch);
+      } catch (err) {
+        // Best-effort: if delete fails (e.g. auth not available for plain URL),
+        // log and continue.  pushBranchForce will overwrite the stale branch
+        // via --force-with-lease at push time.
+        log.warn({ err, branch: existingBranch }, "deleteRemoteBranch failed — will overwrite via force-push");
+      }
+      staleBranchToAudit = existingBranch;
     }
 
     const runId = nanoid();
+    // BEC-227: mint a per-run agent session UUID when the flag is on. The
+    // first resumable stage opens its SDK session with this id; downstream
+    // stages reuse it via `resume:`. Read env at call time so flipping the
+    // var takes effect on the next pipeline run without a daemon restart.
+    const agentSessionId = isAgentSessionResumeEnabled() ? randomUUID() : null;
     const branch = branchName(issue.identifier, sanitizedIssue.slug);
     const db = this.db as AnyDb;
     const runLog = createLogger({ component: "PipelineRunner", runId, issueId: issue.identifier });
@@ -265,8 +365,29 @@ export class PipelineRunner {
         branch,
         status: "queued",
         linearTeamId,
+        agentSessionId, // null when flag is off; UUID when BEC-227 is enabled
       });
     runLog.info({ branch }, "run queued");
+
+    // Emit stale-branch recovery audit event now that we have a runId.
+    if (staleBranchToAudit) {
+      await logAuditEvent(db, pipelineStaleBranchRecoveredEvent({
+        issueId: issue.identifier,
+        branch: staleBranchToAudit,
+        runId,
+      }));
+    }
+
+    if (agentSessionId !== null) {
+      void logAuditEvent(
+        db,
+        agentSessionCreatedEvent({
+          runId,
+          issueId: issue.identifier,
+          sessionId: agentSessionId,
+        }),
+      );
+    }
 
     const run = this.buildPipelineRun(
       runId,
@@ -293,6 +414,8 @@ export class PipelineRunner {
             repoConfig,
             sanitizedIssue,
             branch,
+            undefined,
+            agentSessionId,
           )
         );
       } catch (err) {
@@ -322,7 +445,8 @@ export class PipelineRunner {
       return;
     }
 
-    // Look up a paused run in the DB for this issue
+    // Look up a paused or retriable run in the DB for this issue.
+    // "paused" = awaiting approval; "retriable" = transient failure awaiting manual retry.
     const db = this.db as AnyDb;
     const rows = await db
       .select()
@@ -330,13 +454,13 @@ export class PipelineRunner {
       .where(
         and(
           eq(pipelineRuns.issueId, issueId),
-          eq(pipelineRuns.status, "paused"),
+          inArray(pipelineRuns.status, ["paused", "retriable"]),
         ),
       )
       .limit(1);
 
     if (rows.length === 0) {
-      resumeLog.info("resume() called but no paused run found in DB — no-op");
+      resumeLog.info("resume() called but no paused or retriable run found in DB — no-op");
       return;
     }
 
@@ -346,6 +470,16 @@ export class PipelineRunner {
 
     // Claim the slot immediately to prevent concurrent resume() calls
     this.activeRuns.set(issueId, runId);
+
+    // For retriable runs: flip status to "paused" so the PM tick's
+    // recoverRetriableRuns() won't find and double-recover this run while
+    // execution is queued. The paused-run execution path is identical.
+    if (pausedRun.status === "retriable") {
+      await db
+        .update(pipelineRuns)
+        .set({ status: "paused" })
+        .where(eq(pipelineRuns.id, runId));
+    }
 
     // Validate that the run has a full resume payload (saved at await-approval)
     if (pausedRun.currentStageIndex == null || !pausedRun.resumePayload) {
@@ -364,16 +498,22 @@ export class PipelineRunner {
       return;
     }
 
-    let payload: {
-      handoff: HandoffArtifact | null;
-      pipelineConfig: PipelineConfig;
-      repoConfig: RepoConfig;
-      sanitizedIssue: SanitizedIssue;
-      worktreePath: string;
-    };
-
+    // Parse and validate the resume payload using the Zod schema.
+    // This replaces the former hand-rolled property-existence checks and catches
+    // schema mismatches from older DB rows (e.g. missing handoff, wrong types)
+    // before any git or executor operations run.
+    //
+    // BC: paused runs created before currentStageIndex was added to the payload
+    // schema (BEC-192) only have it on the DB row. Inject it from the DB column
+    // so those existing in-flight runs don't get falsely failed on first resume
+    // after deploy.
+    let parsed: ReturnType<typeof ResumePayloadSchema.safeParse>;
     try {
-      payload = JSON.parse(pausedRun.resumePayload);
+      const raw = JSON.parse(pausedRun.resumePayload) as Record<string, unknown>;
+      if (raw.currentStageIndex === undefined && pausedRun.currentStageIndex != null) {
+        raw.currentStageIndex = pausedRun.currentStageIndex;
+      }
+      parsed = ResumePayloadSchema.safeParse(raw);
     } catch {
       runLog.error("resume payload is invalid JSON — failing run");
       await db
@@ -388,30 +528,35 @@ export class PipelineRunner {
       return;
     }
 
-    const { handoff, pipelineConfig, repoConfig, sanitizedIssue, worktreePath } = payload;
-
-    // Structural validation of deserialized payload
-    if (
-      typeof worktreePath !== "string" ||
-      !pipelineConfig?.stages ||
-      !sanitizedIssue?.id
-    ) {
-      runLog.error("resume payload has invalid structure — failing run");
+    if (!parsed.success) {
+      const zodErrors = parsed.error.issues
+        .map((e) => `${e.path.join(".") || "(root)"}: ${e.message}`)
+        .join("; ");
+      runLog.error({ zodErrors }, "resume payload failed schema validation — failing run");
       await db
         .update(pipelineRuns)
         .set({
           status: "failed",
           completedAt: new Date(),
-          errorMessage: "Invalid resume payload structure — cannot resume",
+          errorMessage: `Invalid resume payload structure — cannot resume: ${zodErrors}`,
         })
         .where(eq(pipelineRuns.id, runId));
       this.activeRuns.delete(issueId);
       return;
     }
 
-    // Path containment check — worktreePath must be within agentRunDir
+    const { handoff, pipelineConfig, repoConfig, sanitizedIssue, worktreePath, currentStageIndex } = parsed.data;
+
+    // Path containment check — worktreePath must be within agentRunDir.
+    // We append sep to agentRunDir before the startsWith check so that a
+    // crafted path like /home/ura/data/runs-evil cannot slip past as a prefix match
+    // of /home/ura/data/runs.  An exact match (resolvedPath === this.agentRunDir)
+    // is also accepted for symmetry, even though real worktrees are always subdirs.
     const resolvedPath = resolve(worktreePath); // canonicalize — collapses .. segments
-    if (!resolvedPath.startsWith(this.agentRunDir)) {
+    const normalizedBase = this.agentRunDir.endsWith(sep)
+      ? this.agentRunDir
+      : this.agentRunDir + sep;
+    if (!resolvedPath.startsWith(normalizedBase) && resolvedPath !== this.agentRunDir) {
       runLog.error({ worktreePath, agentRunDir: this.agentRunDir }, "resume: worktreePath outside agentRunDir — failing run");
       await db
         .update(pipelineRuns)
@@ -455,7 +600,7 @@ export class PipelineRunner {
       startedAt: pausedRun.startedAt ?? new Date(),
       totalInputTokens: pausedRun.totalInputTokens ?? 0,
       totalOutputTokens: pausedRun.totalOutputTokens ?? 0,
-      retryCount: (pausedRun as any).retryCount ?? 0,
+      retryCount: pausedRun.retryCount ?? 0,
     };
 
     // Validate branch is present
@@ -474,7 +619,7 @@ export class PipelineRunner {
     }
 
     runLog.info(
-      { stageIndex: pausedRun.currentStageIndex, worktreePath },
+      { stageIndex: currentStageIndex, worktreePath },
       "resuming pipeline — re-queuing execution from stage after await-approval",
     );
 
@@ -491,9 +636,13 @@ export class PipelineRunner {
             sanitizedIssue,
             pausedRun.branch,
             {
-              startStageIndex: pausedRun.currentStageIndex!,
+              startStageIndex: currentStageIndex,
               worktreePath,
               initialHandoff: handoff ?? undefined,
+              // BEC-227 — carry the per-run SDK session id across the
+              // await-approval pause so the post-resume stages keep
+              // talking to the same transcript.
+              agentSessionId: pausedRun.agentSessionId ?? null,
             },
           )
         );
@@ -527,6 +676,7 @@ export class PipelineRunner {
       .update(pipelineRuns)
       .set({ status: "aborted", completedAt: new Date() })
       .where(eq(pipelineRuns.id, runId));
+    await this.cancelRunningStageRuns(db, runId);
     this.activeRuns.delete(issueId);
   }
 
@@ -619,10 +769,28 @@ export class PipelineRunner {
         completedAt: new Date(),
       })
       .where(eq(pipelineRuns.id, runId));
+    await this.cancelRunningStageRuns(db, runId);
     run.status = "cancelled";
     this.activeRuns.delete(run.issueId);
     if (feedbackPrUrl) this.activeFeedbackRuns.delete(feedbackPrUrl);
     clearStopSignal(runId);
+  }
+
+  /**
+   * BEC-250 — Cancel any stage_runs still in status='running' for the given
+   * pipeline run. Called from every terminal-state transition so that orphaned
+   * in-flight stage rows don't accumulate as permanent false positives in
+   * dashboard / quality-observer queries.
+   *
+   * Idempotent: rows already in a terminal state are unaffected by the WHERE
+   * clause. The PM sweep (sweepOrphanStageRuns) handles any that slip through
+   * (e.g. process crash between the pipeline_run update and this call).
+   */
+  private async cancelRunningStageRuns(db: AnyDb, runId: string): Promise<void> {
+    await (db as any)
+      .update(stageRuns)
+      .set({ status: "cancelled", completedAt: new Date() })
+      .where(and(eq(stageRuns.pipelineRunId, runId), eq(stageRuns.status, "running")));
   }
 
   isActive(issueId: string): boolean {
@@ -709,10 +877,53 @@ export class PipelineRunner {
       worktreePath: string;
       /** Handoff artifact from the last completed stage before the pause. */
       initialHandoff: HandoffArtifact | undefined;
+      /**
+       * BEC-227 — per-run SDK session UUID carried across resume boundaries.
+       * Null when the flag is off (or the original run was started before
+       * BEC-227 was enabled). The resume path always re-reads it from the
+       * paused pipeline_runs row so the same session id continues across
+       * await-approval pauses.
+       */
+      agentSessionId: string | null;
     },
+    /**
+     * BEC-227 — per-run SDK session UUID minted at start(). Null when the
+     * `URATEAM_ENABLE_AGENT_SESSION_RESUME` flag is off. On the resume path
+     * this is ignored in favour of `resumeOptions.agentSessionId`.
+     */
+    agentSessionId: string | null = null,
   ): Promise<void> {
     const db = this.db as AnyDb;
     const runLog = createLogger({ component: "PipelineRunner", runId, issueId: run.issueId });
+
+    // BEC-227 — resolve the session id from the resume path (preferred) or
+    // the start() path. Tracks whether the first resumable stage in this run
+    // has already opened the SDK session so subsequent stages switch from
+    // `sessionId` (create) to `resume` (reuse). The flag stays scoped to a
+    // single executePipeline() invocation: on resume after await-approval the
+    // SDK session created in the pre-pause run has already been initiated, so
+    // we start this second invocation with `hasInitiatedSession = true` —
+    // every resumable stage uses the `resume:` shape, never re-creates the
+    // session.
+    const runAgentSessionId = resumeOptions
+      ? resumeOptions.agentSessionId
+      : agentSessionId;
+    let hasInitiatedSession = !!resumeOptions;
+
+    /**
+     * Returns `true` for the first non-fresh stage in this run, flips the
+     * `hasInitiatedSession` flag as a side effect. Always-fresh stages
+     * (validate, ralph-check) never count as the first resumable stage —
+     * they don't take a session id. Returns false when the flag is off
+     * (`runAgentSessionId === null`).
+     */
+    const claimFirstResumableStage = (stage: string): boolean => {
+      if (runAgentSessionId === null) return false;
+      if (hasInitiatedSession) return false;
+      if (isAlwaysFreshStage(stage)) return false;
+      hasInitiatedSession = true;
+      return true;
+    };
 
     let handoff: HandoffArtifact | undefined;
     let worktreePath: string | undefined;
@@ -833,6 +1044,29 @@ export class PipelineRunner {
         "tech stack detected",
       );
 
+      // BEC-252 — persist an initial resume context right after worktree setup
+      // (fresh start only). currentStageIndex = -1 so resume() restarts from
+      // stage 0 on recovery; BEC-227 JSONL session resume provides agent
+      // continuity across the restart boundary. This ensures recoverStuckRuns
+      // can hand the run back to runner.resume() even when the server restarts
+      // before any transient-failure or await-approval path stores a payload.
+      if (!resumeOptions) {
+        await db
+          .update(pipelineRuns)
+          .set({
+            currentStageIndex: -1,
+            resumePayload: buildResumePayload(
+              null,
+              config,
+              repoConfig,
+              sanitizedIssue,
+              worktreePath,
+              -1,
+            ),
+          })
+          .where(eq(pipelineRuns.id, runId));
+      }
+
       // Determine which stages to execute:
       // - Fresh start: all configured stages in order.
       // - Resume after await-approval: only stages after the paused index.
@@ -897,13 +1131,14 @@ export class PipelineRunner {
           // Save the full resume context so resume() can re-attach the worktree
           // and continue from the next stage with the correct handoff artifact.
           const stageIndex = config.stages.indexOf(stage);
-          const resumePayload = JSON.stringify({
-            handoff: handoff ?? null,
-            pipelineConfig: config,
+          const resumePayload = buildResumePayload(
+            handoff ?? null,
+            config,
             repoConfig,
             sanitizedIssue,
-            worktreePath: worktreePath!,
-          });
+            worktreePath!,
+            stageIndex,
+          );
           await db
             .update(pipelineRuns)
             .set({
@@ -945,6 +1180,7 @@ export class PipelineRunner {
           }
         }
 
+        const isFirstResumableStageForMain = claimFirstResumableStage(stageType);
         let result = await executeStage({
           runId,
           issueId: sanitizedIssue.id,
@@ -957,6 +1193,8 @@ export class PipelineRunner {
           techStack,
           devcontainerSession,
           stageModels: config.stageModels,
+          agentSessionId: runAgentSessionId,
+          isFirstResumableStage: isFirstResumableStageForMain,
         });
 
         // Operator stop check (cancel path) — the AbortController inside the
@@ -1053,6 +1291,18 @@ export class PipelineRunner {
 
             const ralphContext = buildRalphContext(iteration, check, handoffResult.artifact);
 
+            // BEC-227 — RALPH re-implement runs inside the implement stage's
+            // main invocation, which already claimed the first-resumable slot
+            // if eligible. Re-claim is a no-op (returns false) so this call
+            // takes the `resume` shape when the flag is on.
+            const isFirstResumableStageForRalph = claimFirstResumableStage(stageType);
+            // BEC-227 — when this RALPH iteration is a resumed call (session
+            // active AND not the first resumable stage), the prior handoff is
+            // already in the agent's resumed SDK transcript. Suppress the
+            // `<previous-stage-context>` block to avoid duplicating that
+            // context as prompt input tokens.
+            const suppressRalphHandoff =
+              runAgentSessionId !== null && !isFirstResumableStageForRalph;
             result = await executeStage({
               runId,
               issueId: sanitizedIssue.id,
@@ -1066,6 +1316,14 @@ export class PipelineRunner {
               devcontainerSession,
               ralphContext,
               stageModels: config.stageModels,
+              agentSessionId: runAgentSessionId,
+              isFirstResumableStage: isFirstResumableStageForRalph,
+              suppressHandoff: suppressRalphHandoff,
+              // BEC-227 Phase 4 / Track D — RALPH iteration counter (1..N)
+              // surfaces in pipeline_run_decisions.iteration so operators
+              // can correlate persisted decisions with the RALPH loop pass
+              // that produced them.
+              iteration,
             });
 
             // Accumulate each RALPH iteration's tokens
@@ -1108,6 +1366,9 @@ export class PipelineRunner {
               );
               run.stageRetries ??= {};
               run.stageRetries[stageType] = (run.stageRetries[stageType] ?? 0) + 1;
+              // BEC-227 — retry of an already-attempted stage. If the main
+              // invocation above claimed the session, this is a no-op.
+              const isFirstResumableStageForRetry = claimFirstResumableStage(stageType);
               result = await executeStage({
                 runId,
                 issueId: sanitizedIssue.id,
@@ -1120,6 +1381,8 @@ export class PipelineRunner {
                 techStack,
                 devcontainerSession,
                 stageModels: config.stageModels,
+                agentSessionId: runAgentSessionId,
+                isFirstResumableStage: isFirstResumableStageForRetry,
               });
               if (result.status === "completed") break;
             } else if (config.retry.strategy === "escalate") {
@@ -1184,15 +1447,31 @@ export class PipelineRunner {
         ) {
           runLog.info({ stage }, "validating handoff");
           let validationPassed = false;
+          // BEC-227 — runMode tells the validator whether this stage is the
+          // first resumable stage of the run (paranoia check still runs),
+          // a subsequent resumable stage (skip — agent inherits context),
+          // or a non-session run (validate as before).
+          const mainStageRunMode: ValidateRunMode =
+            runAgentSessionId === null
+              ? "fallback"
+              : isFirstResumableStageForMain
+                ? "first-resumed"
+                : "resumed";
           const validation = await validateHandoff(
             stage,
             {
               artifact: result.handoffArtifact,
               structured: result.handoffIsStructured ?? false,
+              // BEC-227 Phase 4 / Track D — validator doesn't consume the
+              // decisions artifact (Track B's review-fix loop does). The
+              // executor already persisted it before returning; we don't
+              // need to thread it through validateHandoff.
+              decisions: null,
             },
             sanitizedIssue,
             repoConfig,
             worktreePath,
+            mainStageRunMode,
           );
           validationPassed = validation.valid;
 
@@ -1206,6 +1485,9 @@ export class PipelineRunner {
             // Retry with the last known-good handoff (not the failed artifact)
             if (config.retry.strategy === "fix-and-retry") {
               for (let attempt = 0; attempt < config.retry.maxAttempts; attempt++) {
+                // BEC-227 — validation-failed retry. Same stage as the main
+                // invocation; claim is a no-op when the session is open.
+                const isFirstResumableStageForValRetry = claimFirstResumableStage(stageType);
                 result = await executeStage({
                   runId,
                   issueId: sanitizedIssue.id,
@@ -1218,17 +1500,31 @@ export class PipelineRunner {
                   techStack,
                   devcontainerSession,
                   stageModels: config.stageModels,
+                  agentSessionId: runAgentSessionId,
+                  isFirstResumableStage: isFirstResumableStageForValRetry,
                 });
                 if (result.status === "completed" && result.handoffArtifact) {
+                  // BEC-227 — `isFirstResumableStageForValRetry` reflects the
+                  // retry execution that just produced `result`. Same formula
+                  // as the main-loop validation.
+                  const valRetryRunMode: ValidateRunMode =
+                    runAgentSessionId === null
+                      ? "fallback"
+                      : isFirstResumableStageForValRetry
+                        ? "first-resumed"
+                        : "resumed";
                   const retryValidation = await validateHandoff(
                     stage,
                     {
                       artifact: result.handoffArtifact,
                       structured: result.handoffIsStructured ?? false,
+                      // BEC-227 Phase 4 / Track D — see main-stage call above.
+                      decisions: null,
                     },
                     sanitizedIssue,
                     repoConfig,
                     worktreePath,
+                    valRetryRunMode,
                   );
                   if (retryValidation.valid) {
                     validationPassed = true;
@@ -1366,6 +1662,36 @@ export class PipelineRunner {
           for (const fixStage of fixStages) {
             runLog.info({ stage: fixStage, rfIteration }, "review-fix: executing stage");
 
+            // BEC-227 Phase 4 / Track B — for the implement fixStage, decide
+            // surgical vs legacy review-fix. Surgical = the per-run SDK session
+            // is intact (JSONL on disk) so we can send a focused
+            // findings-plus-prior-decisions prompt instead of re-running the
+            // full implement template. The audit event fires inside
+            // runSurgicalReviewFix for BOTH paths so operators can monitor
+            // fallback rates.
+            let surgicalPrompt: string | undefined;
+            let surgicalSuppressHandoff = false;
+            if (fixStage === "implement") {
+              const blocking = (handoff?.context?.reviewFindings ?? []).filter(
+                (f) => f.severity === "blocking",
+              );
+              if (blocking.length > 0) {
+                const decision = await runSurgicalReviewFix({
+                  db: this.db as AnyDb,
+                  runId,
+                  issueId: sanitizedIssue.id,
+                  agentSessionId: runAgentSessionId,
+                  worktreePath,
+                  blockingFindings: blocking,
+                });
+                if (decision.path === "surgical") {
+                  surgicalPrompt = decision.prompt;
+                  surgicalSuppressHandoff = true;
+                }
+              }
+            }
+
+            const isFirstResumableStageForFix = claimFirstResumableStage(fixStage);
             const fixResult = await executeStage({
               runId,
               issueId: sanitizedIssue.id,
@@ -1378,6 +1704,18 @@ export class PipelineRunner {
               techStack,
               devcontainerSession,
               stageModels: config.stageModels,
+              agentSessionId: runAgentSessionId,
+              isFirstResumableStage: isFirstResumableStageForFix,
+              // BEC-227 Phase 4 / Track D — review-fix iteration counter
+              // (1..N) for the implement fixStage's decision artifact. Other
+              // fixStages (test/review) don't emit decisions, so the value
+              // is harmless when unused.
+              iteration: rfIteration,
+              // BEC-227 Phase 4 / Track B — undefined when the surgical
+              // decision returned `legacy` (or fixStage !== "implement"),
+              // which preserves the legacy assembled-prompt path.
+              promptOverride: surgicalPrompt,
+              suppressHandoff: surgicalSuppressHandoff,
             });
 
             // BEC-134: track latest review stage_run id for fanout persistence.
@@ -1412,12 +1750,28 @@ export class PipelineRunner {
 
             // Validate handoff (same as main stage loop)
             if (fixResult.handoffArtifact && config.validateHandoffs === true) {
+              // BEC-227 — runMode derived from the review-fix executeStage
+              // claim. The review-fix loop runs after the main stage loop,
+              // so `isFirstResumableStageForFix` is virtually always false
+              // (session already initiated). Formula is the same.
+              const fixStageRunMode: ValidateRunMode =
+                runAgentSessionId === null
+                  ? "fallback"
+                  : isFirstResumableStageForFix
+                    ? "first-resumed"
+                    : "resumed";
               const validation = await validateHandoff(
                 fixStage,
-                { artifact: fixResult.handoffArtifact, structured: fixResult.handoffIsStructured ?? false },
+                {
+                  artifact: fixResult.handoffArtifact,
+                  structured: fixResult.handoffIsStructured ?? false,
+                  // BEC-227 Phase 4 / Track D — see main-stage call above.
+                  decisions: null,
+                },
                 sanitizedIssue,
                 repoConfig,
                 worktreePath,
+                fixStageRunMode,
               );
               if (!validation.valid) {
                 runLog.warn({ stage: fixStage, rfIteration, issues: validation.issues }, "review-fix: handoff validation failed");
@@ -1588,10 +1942,16 @@ export class PipelineRunner {
       const maxDeepReviewPasses = config.maxDeepReviewPasses ?? 3;
 
       if (deepReviewPasses > 0 && hasReview && hasImplement) {
-        // Cap deep review iterations against maxReviewPasses
+        // Cap deep review iterations against maxDeepReviewPasses
         const passLimit = Math.min(deepReviewPasses, maxDeepReviewPasses);
 
         let previousFindingsCount = Infinity;
+        let previousFingerprints = new Set<string>();
+        // Tracks the last convergence check so we can emit a diagnostic after
+        // the loop when the pass limit is reached without full convergence.
+        let lastConvergenceCheck: ReturnType<typeof checkDeepReviewConvergence> | null = null;
+        let drPassFinal = 0;
+        let finalFindingsCount = 0;
 
         for (let drPass = 1; drPass <= passLimit; drPass++) {
           if (!handoff) {
@@ -1607,13 +1967,27 @@ export class PipelineRunner {
           // review stage_run row (from the main stage loop or review-fix loop).
           // PR doesn't exist yet here, so prNumber stays null; the runner posts
           // fanout PR comments after PR creation using `pendingFanoutRuns`.
+          //
+          // BEC-227 Task 11 — thread agent-session info through so the
+          // agentic deep-review provider can resume the per-run SDK session
+          // in its 3 parallel sub-agents. `claimFirstResumableStage` flips
+          // the runner-level latch exactly once across the whole run; deep
+          // review may be the first resumable consumer (e.g. when the main
+          // review stage was skipped or used a fresh model).
+          const isFirstResumableStageForDeepReview =
+            claimFirstResumableStage("review");
           const reviewCtx = {
             runId,
+            issueId: sanitizedIssue.id,
             stageRunId: lastReviewStageRunId,
             workdir: worktreePath,
             handoff,
             baseRef: repoConfig.defaultBranch ?? "main",
             prNumber: null,
+            agentSessionId: runAgentSessionId,
+            isFirstResumableStage: isFirstResumableStageForDeepReview,
+            reviewModel: config.stageModels?.["review"],
+            db: this.db as AnyDb,
           };
           const reviewResult = await runReviewProviders(reviewCtx, {
             env: drPass === 1 ? process.env : ({} as NodeJS.ProcessEnv),
@@ -1646,19 +2020,38 @@ export class PipelineRunner {
             "deep review: sub-agents complete",
           );
 
-          // Convergence: stop when no findings or count didn't change
-          if (findingsCount === 0) {
+          // BEC-212: content-aware convergence check — compares finding
+          // fingerprints (not just counts) to detect cycling/contradictory-
+          // requirement patterns and emit structured diagnostics.
+          const convergence = checkDeepReviewConvergence(
+            previousFingerprints,
+            deepResult.findings,
+            previousFindingsCount,
+          );
+          lastConvergenceCheck = convergence;
+          drPassFinal = drPass;
+          finalFindingsCount = findingsCount;
+
+          if (convergence.converged) {
             runLog.info({ drPass }, "deep review: no findings — converged");
             break;
           }
-          if (findingsCount >= previousFindingsCount) {
+          if (convergence.shouldStop) {
             runLog.info(
-              { drPass, findingsCount, previousFindingsCount },
-              "deep review: findings count did not decrease — stopping to prevent loop",
+              {
+                drPass,
+                findingsCount,
+                previousFindingsCount,
+                reason: convergence.reason,
+                findingsDiff: convergence.findingsDiff,
+              },
+              "deep review: convergence check stopped loop",
             );
             break;
           }
+
           previousFindingsCount = findingsCount;
+          previousFingerprints = new Set(deepResult.findings.map(buildFindingFingerprint));
 
           // Re-run implement stage with deep review context. The agentic
           // review provider already converts DeepReviewFinding -> ReviewFinding
@@ -1682,6 +2075,7 @@ export class PipelineRunner {
           const deepReviewContext = buildDeepReviewContext(drPass, deepFindingsForContext, handoff);
           runLog.info({ drPass }, "deep review: re-running implement stage");
 
+          const isFirstResumableStageForDrImpl = claimFirstResumableStage("implement");
           const drImplementResult = await executeStage({
             runId,
             issueId: sanitizedIssue.id,
@@ -1695,6 +2089,8 @@ export class PipelineRunner {
             devcontainerSession,
             ralphContext: deepReviewContext,
             stageModels: config.stageModels,
+            agentSessionId: runAgentSessionId,
+            isFirstResumableStage: isFirstResumableStageForDrImpl,
           });
 
           run.totalInputTokens += drImplementResult.inputTokens;
@@ -1725,6 +2121,7 @@ export class PipelineRunner {
 
           // Re-run review stage to verify fixes
           runLog.info({ drPass }, "deep review: re-running review stage");
+          const isFirstResumableStageForDrReview = claimFirstResumableStage("review");
           const drReviewResult = await executeStage({
             runId,
             issueId: sanitizedIssue.id,
@@ -1737,6 +2134,8 @@ export class PipelineRunner {
             techStack,
             devcontainerSession,
             stageModels: config.stageModels,
+            agentSessionId: runAgentSessionId,
+            isFirstResumableStage: isFirstResumableStageForDrReview,
           });
 
           // BEC-134: refresh latest review stage_run id for any subsequent
@@ -1800,6 +2199,36 @@ export class PipelineRunner {
               );
             }
           }
+        }
+
+        // BEC-212: emit structured diagnostic when the loop exhausts all
+        // passes without converging to zero findings.
+        if (
+          lastConvergenceCheck !== null &&
+          !lastConvergenceCheck.converged &&
+          !lastConvergenceCheck.shouldStop
+        ) {
+          // Loop exited because drPass > passLimit (not via a break).
+          const diffStat = worktreePath
+            ? await gitExecSafe(["diff", "--stat", "HEAD"], worktreePath)
+            : "";
+          const diagnostic = buildNonConvergenceDiagnostic(
+            passLimit,
+            drPassFinal,
+            finalFindingsCount,
+            "pass-limit",
+            lastConvergenceCheck.findingsDiff,
+            diffStat,
+          );
+          runLog.warn(
+            {
+              diagnostic,
+              runId,
+              passLimit,
+              finalFindingsCount,
+            },
+            "deep review: pass limit reached without convergence — review findings remain unresolved; consider increasing deepReviewPasses or investigating contradictory requirements",
+          );
         }
       }
 
@@ -2150,6 +2579,13 @@ export class PipelineRunner {
           } else {
             runLog.warn("push queue: rebase conflicts detected, running implement pass to resolve");
 
+            // Abort the in-progress rebase so the worktree HEAD returns to the
+            // named branch ref before the agent starts writing new commits.
+            // Without this, HEAD stays detached on the tentative rebase commit
+            // and verifyBranchMatch() (BEC-99 guard) will reject the push.
+            await abortRebase(wtPath);
+
+            const isFirstResumableStageForResolve = claimFirstResumableStage("implement");
             const resolveResult = await executeStage({
               runId,
               issueId: sanitizedIssue.id,
@@ -2163,14 +2599,15 @@ export class PipelineRunner {
               devcontainerSession,
               mergeConflictContext: { defaultBranch: repoConfig.defaultBranch },
               stageModels: config.stageModels,
+              agentSessionId: runAgentSessionId,
+              isFirstResumableStage: isFirstResumableStageForResolve,
             });
 
             run.totalInputTokens += resolveResult.inputTokens;
             run.totalOutputTokens += resolveResult.outputTokens;
 
             if (resolveResult.status !== "completed") {
-              runLog.warn("push queue: conflict resolution failed — aborting rebase and force-pushing for human review");
-              await abortRebase(wtPath);
+              runLog.warn("push queue: conflict resolution failed — force-pushing for human review");
               rebaseConflict = true;
             } else {
               runLog.info("push queue: conflict resolution succeeded");
@@ -2205,9 +2642,11 @@ export class PipelineRunner {
         const [qualityResult, agentCommits] = await Promise.all([
           (async () => {
             try {
-              const stored = await getTriageResult(this.db as AnyDb, sanitizedIssue.id);
+              const [stored, actualFiles] = await Promise.all([
+                getTriageResult(this.db as AnyDb, sanitizedIssue.id),
+                getChangedFiles(wtPath, repoConfig.defaultBranch),
+              ]);
               const predicted = stored?.affectedFiles;
-              const actualFiles = await getChangedFiles(wtPath, repoConfig.defaultBranch);
               const quality = computeAffectedFilesPredictionQuality(predicted, actualFiles);
               await logAuditEvent(
                 this.db as AnyDb,
@@ -2671,6 +3110,7 @@ export class PipelineRunner {
           autoCommitted: run.autoCommitted ?? null,
         })
         .where(eq(pipelineRuns.id, runId));
+      await this.cancelRunningStageRuns(db, runId);
       run.status = "completed";
 
       const totalStageRetries = run.stageRetries
@@ -2971,14 +3411,6 @@ export class PipelineRunner {
       context.repoConfig &&
       context.sanitizedIssue
     ) {
-      const resumePayload = JSON.stringify({
-        handoff: context.handoff ?? null,
-        pipelineConfig: context.pipelineConfig,
-        repoConfig: context.repoConfig,
-        sanitizedIssue: context.sanitizedIssue,
-        worktreePath: context.worktreePath,
-      });
-
       // Store currentStageIndex - 1 so the existing resume path's
       // `slice(startStageIndex + 1)` lands back on the failed stage.
       // (await-approval stores the completed stage index; we need to re-run the failed one.)
@@ -2986,6 +3418,15 @@ export class PipelineRunner {
       // re-runs the full stage list. The await-approval path stores the completed
       // stage index; we store failedIndex - 1 so the same +1 offset re-runs the failed stage.
       const resumeStageIndex = (context.currentStageIndex ?? 0) - 1;
+
+      const resumePayload = buildResumePayload(
+        context.handoff ?? null,
+        context.pipelineConfig,
+        context.repoConfig,
+        context.sanitizedIssue,
+        context.worktreePath,
+        resumeStageIndex,
+      );
 
       await db
         .update(pipelineRuns)
@@ -3015,6 +3456,7 @@ export class PipelineRunner {
         errorMessage: errorMsg,
       })
       .where(eq(pipelineRuns.id, runId));
+    await this.cancelRunningStageRuns(db, runId);
     run.status = "failed";
     await this.notifier.onPipelineFailed(run, {
       stage,
@@ -3070,9 +3512,16 @@ export class PipelineRunner {
    * currently tracked in the in-memory activeRuns map (i.e. they belong to a
    * previous process). For each such run the method:
    *   1. Checks whether the worktree still exists on disk.
-   *   2. Marks the run as 'failed' with a descriptive error message.
-   *   3. Removes the corresponding active_work coordination row.
-   *   4. Emits a structured warning log entry.
+   *   2. Checks whether the agent-session JSONL transcript is on disk (BEC-227).
+   *   3. Looks up the most-recent stage_runs row to detect non-idempotent stages.
+   *   4a. If worktree + transcript exist AND last stage is NOT non-idempotent:
+   *       marks the run `retriable` (BEC-252) so `recoverRetriableRuns` auto-resumes it.
+   *   4b. Otherwise: marks the run `failed` with a descriptive error message.
+   *   5. Removes the corresponding active_work coordination row.
+   *   6. Emits a structured warning log entry.
+   *
+   * Non-idempotent stages (push, await-approval) are excluded from auto-resume
+   * because re-running them risks double-pushes or approval-loop side effects.
    *
    * After processing all stuck runs the method runs `git worktree prune` on
    * every repository clone directory to remove stale worktree administrative
@@ -3083,6 +3532,12 @@ export class PipelineRunner {
    */
   async recoverStuckRuns(): Promise<void> {
     const db = this.db as AnyDb;
+
+    // Stages that mutate external state in a non-idempotent way.
+    // Restarting mid-stage risks double-pushes, duplicate PRs, or approval loops.
+    const NON_IDEMPOTENT_STAGES = new Set(["push", "await-approval"]);
+
+    const projectsRoot = defaultProjectsRoot();
 
     // Collect runIds that are actively managed by this process.
     const activeRunIds = new Set(this.activeRuns.values());
@@ -3124,29 +3579,87 @@ export class PipelineRunner {
             // Worktree directory is gone — expected after a container restart.
           }
 
-          const errorMsg = worktreeExists
-            ? `Pipeline interrupted by server restart; worktree present at ${expectedWorktreePath}`
-            : `Pipeline interrupted by server restart; worktree not found at ${expectedWorktreePath}`;
+          // Check whether the agent session JSONL transcript survived the restart.
+          const sessionId = (run as any).agentSessionId as string | null;
+          const transcriptOnDisk = sessionId != null && transcriptExists({
+            projectsRoot,
+            cwd: expectedWorktreePath,
+            sessionId,
+          });
 
-          log.warn(
-            {
-              runId: run.id,
-              issueId: run.issueId,
-              priorStatus: run.status,
-              worktreeExists,
-            },
-            "recovering stuck pipeline run from previous restart",
-          );
+          // Look up the most-recent stage_runs row to detect non-idempotent stages.
+          const lastStageRows = await db
+            .select({ stage: stageRuns.stage })
+            .from(stageRuns)
+            .where(eq(stageRuns.pipelineRunId, run.id))
+            .orderBy(sql`${stageRuns.startedAt} DESC`)
+            .limit(1);
+          const lastStage = lastStageRows[0]?.stage ?? null;
+          const isNonIdempotent = lastStage !== null && NON_IDEMPOTENT_STAGES.has(lastStage);
 
-          await db
-            .update(pipelineRuns)
-            .set({
-              status: "failed",
-              errorMessage: errorMsg,
-            })
-            .where(eq(pipelineRuns.id, run.id));
+          const now = new Date();
 
-          await removeActiveWork(db, run.id);
+          if (worktreeExists && transcriptOnDisk && !isNonIdempotent) {
+            // BEC-252 — run is resumable: worktree + transcript are intact and
+            // the last stage is safe to re-enter. Mark retriable so
+            // recoverRetriableRuns() auto-resumes it on the next PM tick.
+            // Do NOT cancel stage_runs here — preserve stage state for resume.
+            const retriableMsg = `Pipeline interrupted by server restart; worktree present at ${expectedWorktreePath}`;
+            log.warn(
+              {
+                runId: run.id,
+                issueId: run.issueId,
+                priorStatus: run.status,
+                worktreeExists,
+                transcriptOnDisk,
+                lastStage,
+              },
+              "restart-interrupted run is retriable — marking for auto-resume",
+            );
+            await db
+              .update(pipelineRuns)
+              .set({
+                status: "retriable",
+                completedAt: now,
+                errorMessage: retriableMsg,
+              })
+              .where(eq(pipelineRuns.id, run.id));
+            await removeActiveWork(db, run.id);
+          } else {
+            // Worktree gone, transcript missing, or non-idempotent stage —
+            // cannot safely auto-resume; mark permanently failed AND cancel
+            // any still-running child stage_runs (BEC-250).
+            const errorMsg = isNonIdempotent
+              ? `interrupted mid-${lastStage} — not safe to auto-resume; manual ura retry required`
+              : worktreeExists
+                ? `Pipeline interrupted by server restart; worktree present at ${expectedWorktreePath}`
+                : `Pipeline interrupted by server restart; worktree not found at ${expectedWorktreePath}`;
+
+            log.warn(
+              {
+                runId: run.id,
+                issueId: run.issueId,
+                priorStatus: run.status,
+                worktreeExists,
+                transcriptOnDisk,
+                lastStage,
+                isNonIdempotent,
+              },
+              "recovering stuck pipeline run from previous restart",
+            );
+            await Promise.all([
+              db
+                .update(pipelineRuns)
+                .set({
+                  status: "failed",
+                  completedAt: now,
+                  errorMessage: errorMsg,
+                })
+                .where(eq(pipelineRuns.id, run.id)),
+              this.cancelRunningStageRuns(db, run.id),
+              removeActiveWork(db, run.id),
+            ]);
+          }
         }),
     );
 

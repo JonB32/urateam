@@ -1,20 +1,9 @@
--- Enterprise feature 4.1: SSO via WorkOS
-CREATE TABLE IF NOT EXISTS dashboard_users (
-  id TEXT PRIMARY KEY,
-  email TEXT NOT NULL UNIQUE,
-  name TEXT,
-  workos_user_id TEXT,
-  created_at INTEGER NOT NULL,
-  last_login_at INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS dashboard_sessions (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL REFERENCES dashboard_users(id),
-  created_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL,
-  last_seen_at INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_user_id ON dashboard_sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_expires_at ON dashboard_sessions(expires_at);
+-- BEC-149: This migration was renumbered to 008_sso to fix a duplicate prefix
+-- (007_cost_rollups and 007_sso shared prefix 007).
+--
+-- This file is retained for git history only. The migrator skips it based on
+-- the SQLITE_MIGRATION_RENAMES map in migrator.ts, which also renames any
+-- existing "007_sso" entries in schema_migrations to "008_sso" so that
+-- existing deployments do not re-run this migration.
+--
+-- Active migration: packages/core/src/db/migrations/sqlite/008_sso.sql

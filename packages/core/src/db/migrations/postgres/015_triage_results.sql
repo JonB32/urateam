@@ -1,11 +1,9 @@
--- 015_triage_results.sql
--- BEC-223: persist triage v2 prediction at triage time so the runner Tier 6e
--- hook reads from DB instead of parsing the description (which gets truncated
--- by mapIssueToSchema at 4000 chars, slicing off the appended v2 sections for
--- realistic issues).
-
-CREATE TABLE IF NOT EXISTS triage_results (
-  issue_id TEXT PRIMARY KEY,
-  v2_prediction TEXT NOT NULL DEFAULT '{}',
-  triaged_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+-- BEC-149: This migration was renumbered to 016_triage_results to follow the
+-- 014_stage_runs_cache_tokens and 015_missing_indexes renumberings.
+--
+-- This file is retained for git history only. The migrator skips it based on
+-- the POSTGRES_MIGRATION_RENAMES map in migrator.ts, which also renames any
+-- existing "015_triage_results" entries in schema_migrations to
+-- "016_triage_results" so existing deployments do not re-run this migration.
+--
+-- Active migration: packages/core/src/db/migrations/postgres/016_triage_results.sql

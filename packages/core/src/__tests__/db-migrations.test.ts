@@ -45,12 +45,14 @@ describe("database migrations", () => {
   it("includes the new missing_indexes migration", () => {
     const migrations = loadMigrationFiles("sqlite");
     const migrationNames = migrations.map(m => m.name);
-    expect(migrationNames).toContain("013_missing_indexes");
+    // BEC-149: missing_indexes was renumbered from 013 to 014 to fix a
+    // prefix collision with 013_triage_results.
+    expect(migrationNames).toContain("014_missing_indexes");
   });
 
   it("migration file contains CREATE INDEX IF NOT EXISTS statements", () => {
     const migrations = loadMigrationFiles("sqlite");
-    const missingIndexesMigration = migrations.find(m => m.name === "013_missing_indexes");
+    const missingIndexesMigration = migrations.find(m => m.name === "014_missing_indexes");
 
     expect(missingIndexesMigration).toBeDefined();
     expect(missingIndexesMigration!.sql).toContain("CREATE INDEX IF NOT EXISTS");
@@ -260,7 +262,9 @@ describe("database migrations", () => {
 
   it("postgres migration file also includes all 5 indexes", async () => {
     const pgMigrations = loadMigrationFiles("postgres");
-    const missingIndexesMigration = pgMigrations.find(m => m.name === "014_missing_indexes");
+    // BEC-149: missing_indexes was renumbered from 014 to 015 in Postgres to
+    // fix a prefix collision with 014_stage_runs_cache_tokens.
+    const missingIndexesMigration = pgMigrations.find(m => m.name === "015_missing_indexes");
 
     expect(missingIndexesMigration).toBeDefined();
     expect(missingIndexesMigration!.sql).toContain("CREATE INDEX IF NOT EXISTS");

@@ -39,7 +39,7 @@ export class CompositeNotifier implements Notifier {
 
   async onPRMerged(run: PipelineRun): Promise<void> {
     await Promise.allSettled(
-      this.notifiers.filter(n => n.onPRMerged).map(n => n.onPRMerged!(run)),
+      this.notifiers.map(n => n.onPRMerged?.(run)),
     );
   }
 }

@@ -10,7 +10,7 @@ import type {
   MergeConflictContext,
   AgentProfile,
 } from "../types.js";
-import type { Db, AnyDb } from "../db/client.js";
+import type { AnyDb } from "../db/client.js";
 import { stageRuns, agentLogs } from "../db/schema.js";
 import { getAgentProfiles } from "./profiles.js";
 import { assemblePrompt } from "./prompt/assembler.js";
@@ -22,6 +22,9 @@ import type { DevcontainerSession } from "../repo/devcontainer.js";
 import { createLogger } from "../logger.js";
 import { consumeAgentStream, StagePreStreamStalledError, type StreamMessage } from "./agent-stream.js";
 import { isClaudeAuthValid, resolveClaudeAuth } from "./auth-check.js";
+import { detectStageHang, HANG_DETECTION_INTERVAL_MS } from "./hang-detection.js";
+import { resolveSessionOpts } from "./session-resolver.js";
+import { persistDecisionArtifact } from "../db/decisions-store.js";
 
 /**
  * BEC-183: wall-clock stage timeouts. Independent of the in-stream watchdog
@@ -31,13 +34,16 @@ import { isClaudeAuthValid, resolveClaudeAuth } from "./auth-check.js";
  * firstMessageTimeoutMs timer inside consumeAgentStream somehow fails to fire.
  * Default: 60 min for implement (longest legitimate stage), 30 min for others.
  */
-const WALL_CLOCK_STAGE_TIMEOUT_MS: Partial<Record<string, number>> = {
+const WALL_CLOCK_STAGE_TIMEOUT_MS: Partial<Record<StageType, number>> = {
   implement: 60 * 60_000, // 60 min — longest legitimate stage
 };
 const DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS = 30 * 60_000; // 30 min for all others
 
 /** First-message timeout passed to consumeAgentStream (BEC-183). */
 const FIRST_MESSAGE_TIMEOUT_MS = 5 * 60_000; // 5 min
+
+/** Max bytes stored per log entry in agent_logs (tool messages + error messages). */
+const LOG_CONTENT_MAX_BYTES = 2048;
 
 /**
  * BEC-182: review-feedback runs are bounded — N comments, push, done.
@@ -65,7 +71,7 @@ export interface ExecuteStageContext {
   repoConfig: RepoConfig;
   handoff?: HandoffArtifact;
   workdir: string;
-  db: Db;
+  db: AnyDb;
   techStack?: TechStackProfile;
   devcontainerSession?: DevcontainerSession;
   /** RALPH iteration context — appended to prompt when re-running implement. */
@@ -82,6 +88,60 @@ export interface ExecuteStageContext {
    *  continuing the rebase — no issue re-implementation, no build/test runs.
    *  Takes precedence over `reviewFeedback` if both are set. */
   mergeConflictContext?: MergeConflictContext;
+  /**
+   * BEC-227 — agent session continuity.
+   *
+   * UUID of the per-run SDK session, or `null` when the
+   * `URATEAM_ENABLE_AGENT_SESSION_RESUME` flag is off. Runner mints this once
+   * at start() and threads it through every executeStage() call so resumable
+   * stages share one SDK transcript across the pipeline.
+   *
+   * When `null` (flag off) no session options are added to the SDK call.
+   * When non-null AND `isResumable(stage, model)` is true:
+   *   - first resumable stage → `options.sessionId = agentSessionId` (creates)
+   *   - subsequent resumable stages → `options.resume = agentSessionId` (reuses)
+   *
+   * Optional for backwards compatibility with existing callers and tests; the
+   * runner always sets it. Defaults to `null` (no session opts).
+   */
+  agentSessionId?: string | null;
+  /**
+   * BEC-227 — true only on the first resumable stage of the run. Runner
+   * tracks this via a `hasInitiatedSession` flag and flips it once on the
+   * first resumable-stage call. Required to disambiguate the SDK call shape:
+   * sessionId on create vs. resume on reuse. Defaults to `false`.
+   */
+  isFirstResumableStage?: boolean;
+  /**
+   * BEC-227 — when `true`, the rendered prompt omits the
+   * `<previous-stage-context>` block. Runner sets this on resumed RALPH
+   * re-implement iterations: the agent already received the same handoff in
+   * the initial turn (now visible in the resumed SDK session's transcript),
+   * so re-injecting it as prompt text would waste input tokens and risk
+   * confusing the model with duplicated context. Defaults to `false`.
+   */
+  suppressHandoff?: boolean;
+  /**
+   * BEC-227 Phase 4 / Track D. RALPH iteration index (0 = initial implement,
+   * 1..N = re-implement after RALPH gap check) used as the persistence
+   * iteration column for `pipeline_run_decisions`. Other implement-stage
+   * re-entries (e.g. review-fix loop) may pass their own iteration index
+   * when relevant. Purely informational; Track B's surgical-review-fix
+   * path reads only the highest-iteration row, but stages logging different
+   * iterations creates a useful audit trail. Defaults to 0.
+   */
+  iteration?: number;
+  /**
+   * BEC-227 Phase 4 / Track B. When set, replaces the prompt that
+   * `assemblePrompt()` + RALPH-context + devcontainer-context would
+   * produce. Used by the surgical-review-fix path: the resumed agent
+   * already has full context in its SDK transcript, so we send only the
+   * focused findings-plus-prior-decisions prompt. Always combine with
+   * `suppressHandoff: true` for clarity — the override skips the existing
+   * prompt entirely; suppressing the handoff doc-string is logically
+   * redundant but makes the call-site intent explicit.
+   */
+  promptOverride?: string;
 }
 
 export async function executeStage(
@@ -125,6 +185,7 @@ export async function executeStage(
     handoff,
     context.reviewFeedback,
     context.mergeConflictContext,
+    { suppressHandoff: context.suppressHandoff ?? false },
   );
 
   // When a devcontainer is active, instruct the agent to run shell commands inside it
@@ -143,6 +204,13 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
     prompt += `\n\n${context.ralphContext}`;
   }
 
+  // BEC-227 Phase 4 / Track B — `promptOverride` replaces the assembled prompt
+  // entirely. Used by the surgical-review-fix path; the resumed SDK session
+  // already carries all upstream context.
+  if (context.promptOverride) {
+    prompt = context.promptOverride;
+  }
+
   await db.insert(stageRuns).values({
     id: stageRunId,
     pipelineRunId: runId,
@@ -157,10 +225,34 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
   let cacheCreationInputTokens = 0;
   let cacheReadInputTokens = 0;
 
+  // BEC-249: wall-clock timer started BEFORE any pre-flight await so it
+  // covers resolveSessionOpts (which calls countLines via createReadStream
+  // and can hang on an unresponsive Docker volume). Declared outside try so
+  // the finally block can always cancel it regardless of which exit path runs.
+  const stageTimeoutMs = WALL_CLOCK_STAGE_TIMEOUT_MS[stage] ?? DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS;
+  let stageTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  const stageTimeoutPromise = new Promise<never>((_, reject) => {
+    stageTimeoutTimer = setTimeout(() => {
+      reject(new StagePreStreamStalledError(stageTimeoutMs));
+    }, stageTimeoutMs);
+  });
+  // Suppress Node.js PromiseRejectionHandledWarning: rejection is always consumed
+  // by the Promise.race calls below; no-op handler marks it "handled" for the
+  // unhandledRejection machinery without affecting race or error semantics.
+  stageTimeoutPromise.catch(() => {});
+
+  // BEC-251: diagnostic state captured for error enrichment in the catch block.
+  // Declared outside try so the catch block can read whatever was set before the throw.
+  const stageStartMs = Date.now();
+  let capturedStderr = "";
+  let claudeAuthMethod = "unknown";
+  let sessionType: "fresh" | "resumed" | "none" = "none";
+
   try {
     // Resolve auth method before any SDK call (BEC-207). Logs which path is
-    // active (oauth-token / api-key / session) alongside the run context.
+    // active (oauth-token / api-key / mounted-session) alongside the run context.
     const claudeAuth = resolveClaudeAuth();
+    claudeAuthMethod = claudeAuth.method;
     log.info({ authMethod: claudeAuth.method }, "Claude auth method resolved");
 
     // Pre-flight auth check — fail fast with a clear message rather than
@@ -172,7 +264,10 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       );
     }
 
-    // Import Agent SDK dynamically to allow mocking in tests
+    // Import Agent SDK dynamically to allow mocking in tests.
+    // The SDK reads CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY from the
+    // process environment — no explicit passing needed when auth.method is
+    // "oauth-token" or "api-key".
     log.info({ workdir }, "importing Agent SDK");
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
     log.info({ workdir }, "starting agent query");
@@ -190,6 +285,37 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       log.info({ plugins: tooling.plugins.map((p) => p.path) }, "plugins resolved");
     }
 
+    // BEC-228 — resolve per-stage session opts via shared helper (extracted
+    // from the ~70-line inline block that was duplicated in deep-review.ts).
+    // BEC-231 — session-resolver derives the shape from on-disk state, not
+    // from `isFirstResumableStage` (which flipped before the SDK wrote
+    // anything; first-stage failures left the session lost forever).
+    // BEC-249 — raced against stageTimeoutPromise so a hung countLines call
+    // (unresponsive Docker volume) is cut by the wall-clock guard.
+    const resolvedModel = context.stageModels?.[stage] ?? effectiveProfile.model;
+    const agentSessionId = context.agentSessionId ?? null;
+    const sessionOpts = await Promise.race([
+      resolveSessionOpts({
+        stage,
+        model: resolvedModel,
+        agentSessionId,
+        workdir,
+        runId,
+        issueId,
+        db,
+      }),
+      stageTimeoutPromise,
+    ]);
+
+    // BEC-251: determine session type for error enrichment.
+    if ("resume" in sessionOpts) {
+      sessionType = "resumed";
+    } else if ("sessionId" in sessionOpts) {
+      sessionType = "fresh";
+    } else {
+      sessionType = "none";
+    }
+
     const messages = query({
       prompt,
       options: {
@@ -197,14 +323,48 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
         maxTurns: effectiveProfile.maxTurns,
         cwd: workdir,
         ...buildStagePermissionOptions(stage),
-        ...(context.stageModels?.[stage] ?? effectiveProfile.model
-          ? { model: context.stageModels?.[stage] ?? effectiveProfile.model! }
-          : {}),
+        ...(resolvedModel ? { model: resolvedModel } : {}),
         ...(mcpServerNames.length > 0 ? { mcpServers: tooling.mcpServers } : {}),
         ...(tooling.plugins.length > 0 ? { plugins: tooling.plugins } : {}),
+        ...sessionOpts,
+        // BEC-227 Track C-1: strip per-session dynamic sections (cwd, git
+        // status) from the claude_code preset so the system prompt is
+        // stable across stages. Improves cache hit rate even when no SDK
+        // session is involved, so we ship it on unconditionally in Phase 1.
+        systemPrompt: {
+          type: "preset" as const,
+          preset: "claude_code" as const,
+          excludeDynamicSections: true,
+        },
+        // BEC-251: capture stderr from the Claude Code child process so it is
+        // available for error enrichment if the process exits non-zero. The SDK
+        // only pipes stderr when this callback is provided (otherwise it is
+        // "ignore"). We keep at most 2 KB — the tail is most relevant.
+        stderr: (chunk: string) => {
+          capturedStderr += chunk;
+          if (capturedStderr.length > 2000) {
+            capturedStderr = capturedStderr.slice(-2000);
+          }
+        },
       },
     });
     log.info("iterating agent messages");
+
+    // Track last progress timestamp for hang detection (BEC-209).
+    // Updated on every tool message and every onProgress tick so the
+    // HANG_DETECTION_INTERVAL_MS setInterval below has a fresh reference.
+    let lastProgressAt = new Date();
+
+    // BEC-209: start a 5-minute hang-detection interval for the implement stage.
+    // detectStageHang() logs an ERROR when no progress has been observed for
+    // 30+ minutes. This is a LOGGING mechanism only — termination is handled by
+    // the existing StageStalledError / WALL_CLOCK_STAGE_TIMEOUT_MS guards.
+    let hangCheckInterval: ReturnType<typeof setInterval> | undefined;
+    if (stage === "implement") {
+      hangCheckInterval = setInterval(() => {
+        detectStageHang(runId, stage, lastProgressAt);
+      }, HANG_DETECTION_INTERVAL_MS);
+    }
 
     // Batch agent_logs inserts for throughput
     const BATCH_SIZE = 20;
@@ -212,8 +372,11 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
 
     async function flushLogBatch() {
       if (logBatch.length === 0) return;
-      await db.insert(agentLogs).values(logBatch);
+      // Swap the array before inserting so new items pushed during the async
+      // insert are not lost when the original flush completes.
+      const itemsToInsert = logBatch;
       logBatch = [];
+      await db.insert(agentLogs).values(itemsToInsert);
     }
 
     // BEC-183: capture the iterator that consumeAgentStream will create so we
@@ -233,25 +396,28 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
     // BEC-183: wall-clock stage timeout — second defensive layer independent
     // of the in-stream watchdog. Fires as StagePreStreamStalledError so the
     // catch block below sets status=failed with a clear message.
-    const stageTimeoutMs = WALL_CLOCK_STAGE_TIMEOUT_MS[stage] ?? DEFAULT_WALL_CLOCK_STAGE_TIMEOUT_MS;
-    let stageTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
-    const stageTimeoutPromise = new Promise<never>((_, reject) => {
-      stageTimeoutTimer = setTimeout(() => {
-        reject(new StagePreStreamStalledError(stageTimeoutMs));
-      }, stageTimeoutMs);
-    });
-
+    // BEC-249: stageTimeoutPromise is created before the try block; same
+    // instance reused here so the wall-clock covers pre-flight + stream.
     const result = await Promise.race([
       consumeAgentStream(messagesWithCapture, {
         onProgress: (stats) => {
+          // BEC-209: update progress timestamp for hang detection, then
+          // write to DB (fire-and-forget, rate-limited by progressIntervalMs).
+          lastProgressAt = new Date();
+          db.update(stageRuns)
+            .set({ lastProgressAt })
+            .where(eq(stageRuns.id, stageRunId))
+            .catch((err: unknown) => log.warn({ err }, "lastProgressAt DB update failed"));
           log.info(stats, "stage still in progress");
         },
         onToolMessage: (msg: StreamMessage) => {
+          // BEC-209: any tool message counts as progress.
+          lastProgressAt = new Date();
           logBatch.push({
             id: nanoid(),
             stageRunId: stageRunId,
             type: msg.type!,
-            content: JSON.stringify(msg).slice(0, 2048),
+            content: JSON.stringify(msg).slice(0, LOG_CONTENT_MAX_BYTES),
           });
           if (logBatch.length >= BATCH_SIZE) {
             flushLogBatch().catch((err) => log.warn({ err }, "mid-stream log batch flush failed"));
@@ -274,6 +440,8 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       // or throws any other error — prevents the timer from dangling after the
       // stage exits the happy path.
       if (stageTimeoutTimer) clearTimeout(stageTimeoutTimer);
+      // BEC-209: clear hang-detection interval for implement stage.
+      if (hangCheckInterval) clearInterval(hangCheckInterval);
     });
 
     // Flush remaining log entries
@@ -300,6 +468,25 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       workdir,
       `origin/${repoConfig.defaultBranch}`,
     );
+
+    // BEC-227 Phase 4 / Track D — persist the agent's decision artifact when
+    // the implement stage emitted one. Fire-and-forget; persistDecisionArtifact
+    // already swallows errors internally (best-effort by design), but we still
+    // wrap in try/catch to defend against an unexpected throw outside the
+    // helper's contract. Only implement-stage emits decisions — other stages'
+    // outputs aren't shaped for this artifact.
+    if (stage === "implement" && handoffResult.decisions) {
+      try {
+        await persistDecisionArtifact(db, {
+          pipelineRunId: runId,
+          iteration: context.iteration ?? 0,
+          stage: "implement",
+          payload: handoffResult.decisions,
+        });
+      } catch (err) {
+        log.warn({ err }, "persistDecisionArtifact threw despite internal swallow — ignoring");
+      }
+    }
 
     await db
       .update(stageRuns)
@@ -330,11 +517,41 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       error instanceof Error ? error.message : String(error);
     log.error({ err: error }, "stage failed");
 
+    const exitCodeMatch = errorMessage.match(/exited with code (\d+)/);
+    const exitCode: number | null = exitCodeMatch ? Number(exitCodeMatch[1]) : null;
+    const stderrBounded = capturedStderr.slice(-500);
+
+    const durationMs = Date.now() - stageStartMs;
+
+    const enrichedContext: Record<string, unknown> = {
+      message: errorMessage,
+      exitCode,
+      authMethod: claudeAuthMethod,
+      sessionType,
+      durationMs,
+    };
+    if (stderrBounded) {
+      enrichedContext.stderr = stderrBounded;
+    }
+
+    // agent_logs.content: structured JSON, bounded at 2 KB (no stack trace).
+    const enrichedJson = JSON.stringify(enrichedContext).slice(0, 2048);
+
+    // pipeline_runs.error_message (via stage_runs.errorMessage and StageResult):
+    // a compact one-liner with key fields inline so it reads at a glance.
+    const summaryParts = [
+      `exitCode=${exitCode ?? "?"}`,
+      `auth=${claudeAuthMethod}`,
+      `session=${sessionType}`,
+      `duration=${durationMs}ms`,
+    ];
+    const enrichedMessage = `${errorMessage} [${summaryParts.join(", ")}]`;
+
     await db.insert(agentLogs).values({
       id: nanoid(),
       stageRunId: stageRunId,
       type: "error",
-      content: errorMessage.slice(0, 2048),
+      content: enrichedJson,
     });
 
     await db
@@ -347,7 +564,7 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
         cacheCreationInputTokens,
         cacheReadInputTokens,
         turns,
-        errorMessage,
+        errorMessage: enrichedMessage,
       })
       .where(eq(stageRuns.id, stageRunId));
 
@@ -356,8 +573,12 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       inputTokens,
       outputTokens,
       turns,
-      errorMessage,
+      errorMessage: enrichedMessage,
       stageRunId,
     };
+  } finally {
+    // Always cancel the wall-clock timer regardless of exit path (BEC-249).
+    // Clearing an already-fired timer is a no-op, so this is always safe.
+    if (stageTimeoutTimer) clearTimeout(stageTimeoutTimer);
   }
 }

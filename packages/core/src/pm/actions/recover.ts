@@ -1,8 +1,9 @@
 import type { AnyDb } from "../../db/client.js";
-import { pipelineRuns } from "../../db/schema.js";
-import { eq } from "drizzle-orm";
+import { pipelineRuns, stageRuns } from "../../db/schema.js";
+import { eq, sql } from "drizzle-orm";
 import { createLogger } from "../../logger.js";
 import { MAX_TRANSIENT_RETRIES } from "../../pipeline/error-classifier.js";
+import { logAuditEventUnchecked, restartInterruptRecoveredEvent } from "../../audit/index.js";
 
 const log = createLogger({ component: "PmAgent:recover" });
 
@@ -52,6 +53,37 @@ export async function recoverRetriableRuns(input: RecoverInput): Promise<Recover
       continue;
     }
 
+    // BEC-252 — emit audit event for runs that were interrupted by a server
+    // restart (detected via error message prefix). Both worktree and JSONL
+    // transcript were confirmed present at interrupt-detection time.
+    const isRestartInterrupt = (run.errorMessage ?? "").startsWith(
+      "Pipeline interrupted by server restart",
+    );
+    if (isRestartInterrupt) {
+      const lastStageRows = await db
+        .select({ stage: stageRuns.stage })
+        .from(stageRuns)
+        .where(eq(stageRuns.pipelineRunId, run.id))
+        .orderBy(sql`${stageRuns.startedAt} DESC`)
+        .limit(1);
+      const lastStage = lastStageRows[0]?.stage ?? "unknown";
+      const completedAtMs = run.completedAt instanceof Date
+        ? run.completedAt.getTime()
+        : Number(run.completedAt) * 1000;
+      const restartGapMs = isFinite(completedAtMs) ? Date.now() - completedAtMs : 0;
+      void logAuditEventUnchecked(
+        db,
+        restartInterruptRecoveredEvent({
+          runId: run.id,
+          issueId: run.issueId,
+          stage: lastStage,
+          worktreeExisted: true,
+          transcriptExisted: true,
+          restartGapMs,
+        }),
+      );
+    }
+
     try {
       // Set status back to "paused" so runner.resume() can pick it up
       // (resume() queries for status === "paused")
@@ -63,7 +95,7 @@ export async function recoverRetriableRuns(input: RecoverInput): Promise<Recover
       await runner.resume(run.issueId);
       recovered.push(run.issueId);
       log.info(
-        { runId: run.id, issueId: run.issueId, retryCount },
+        { runId: run.id, issueId: run.issueId, retryCount, isRestartInterrupt },
         "retriable run requeued for resume",
       );
     } catch (err) {
