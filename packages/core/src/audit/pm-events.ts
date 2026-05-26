@@ -338,6 +338,24 @@ export function pmTriageQualityScoreEvent(args: {
   });
 }
 
+/** BEC-262 — `recoverStuckInProgressIssues` detected an issue in "In Progress"
+ *  whose most-recent pipeline run completed with `auto_merged=true`. The issue
+ *  was skipped without any Linear state transition — work was already shipped,
+ *  and the "In Progress" state was set by an external source (e.g. Linear
+ *  PR-automation triggered by a sidecar PR mentioning the issue ID). */
+export function pmSkippedAlreadyShippedEvent(args: {
+  issueId: string;
+  prUrl?: string;
+}): AuditEvent {
+  return base({
+    eventType: "pm.skipped_already_shipped",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    issueId: args.issueId,
+    payload: { prUrl: args.prUrl ?? null },
+  });
+}
+
 /** BEC-253 — `ura tick` CLI command invoked. */
 export function pmManualTickInvokedEvent(args: {
   actor: string;

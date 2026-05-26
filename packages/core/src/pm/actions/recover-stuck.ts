@@ -5,7 +5,11 @@ import { getActiveAndRecentIssueIds } from "./db-queries.js";
 import { resolveWorkflowStates } from "../linear-helpers.js";
 import { resolveIssueRelations } from "../../util/linear.js";
 import { createLogger } from "../../logger.js";
-import { logAuditEventUnchecked, pmRecoveredLongRunningEvent } from "../../audit/index.js";
+import {
+  logAuditEventUnchecked,
+  pmRecoveredLongRunningEvent,
+  pmSkippedAlreadyShippedEvent,
+} from "../../audit/index.js";
 import type { LinearClient } from "@linear/sdk";
 
 const log = createLogger({ component: "PmAgent:recoverStuck" });
@@ -143,6 +147,7 @@ export async function recoverStuckInProgressIssues(
   const lastRunPrUrlMap = new Map<string, string | null>();
   const lastRunIdMap = new Map<string, string | null>();
   const lastRunStartedAtMap = new Map<string, Date | null>();
+  const lastRunAutoMergedMap = new Map<string, boolean>();
   if (stuckIdentifiers.length > 0) {
     const runs = await db
       .select({
@@ -151,6 +156,7 @@ export async function recoverStuckInProgressIssues(
         status: pipelineRuns.status,
         startedAt: pipelineRuns.startedAt,
         prUrl: pipelineRuns.prUrl,
+        autoMerged: pipelineRuns.autoMerged,
       })
       .from(pipelineRuns)
       .where(inArray(pipelineRuns.issueId, stuckIdentifiers));
@@ -172,6 +178,7 @@ export async function recoverStuckInProgressIssues(
           run.issueId,
           run.startedAt ? new Date(run.startedAt as any) : null,
         );
+        lastRunAutoMergedMap.set(run.issueId, run.autoMerged === true);
       }
     }
   }
@@ -195,6 +202,23 @@ export async function recoverStuckInProgressIssues(
     const lastRunPrUrl = lastRunPrUrlMap.get(issue.identifier) ?? null;
     const lastRunId = lastRunIdMap.get(issue.identifier) ?? null;
     const lastRunStartedAt = lastRunStartedAtMap.get(issue.identifier) ?? null;
+    const lastRunAutoMerged = lastRunAutoMergedMap.get(issue.identifier) ?? false;
+
+    // BEC-262: If the most-recent run completed AND was auto-merged, the work
+    // is already shipped. Any "In Progress" state here was set by an external
+    // source (e.g. Linear PR-automation triggered by a sidecar PR mentioning
+    // the issue ID). Don't transition state or post a comment — the issue is done.
+    if (lastRunStatus === "completed" && lastRunAutoMerged) {
+      log.info(
+        { identifier: issue.identifier, prUrl: lastRunPrUrl },
+        "skipping already-shipped issue — last run auto-merged, In Progress set by external source",
+      );
+      void logAuditEventUnchecked(
+        db,
+        pmSkippedAlreadyShippedEvent({ issueId: issue.identifier, prUrl: lastRunPrUrl ?? undefined }),
+      );
+      continue;
+    }
 
     // BEC-184: Detect zombie (long-running) runs. When the most recent run has
     // status='running' but is NOT in activeIssueIds, it means getActiveAndRecentIssueIds
