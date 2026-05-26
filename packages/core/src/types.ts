@@ -545,6 +545,11 @@ export const AuditEventTypeSchema = z.enum([
   "pm.agent_branch_swept",
   "pm.skipped_circuit_breaker",
   "pm.recovered_long_running",
+  /** BEC-262 — recoverStuckInProgressIssues skipped an issue because its
+   *  most-recent pipeline run completed with auto_merged=true (work shipped).
+   *  The "In Progress" state was set by an external source and is not a signal
+   *  of a stuck run. Payload: issueId, prUrl (nullable). */
+  "pm.skipped_already_shipped",
   "budget.alert_fired", "budget.run_refused",
   "license.validation_failed", "config.loaded",
   /** Claude CLI session credentials have expired (BEC-207). Operational
