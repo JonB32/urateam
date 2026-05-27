@@ -2,15 +2,12 @@ import { existsSync } from "node:fs";
 import type { ConflictCheckResult } from "./types.js";
 import { parseJsonObject } from "../executor/agent-stream.js";
 import { createLogger } from "../logger.js";
+import { parseGitLines, parseStatusPaths } from "../repo/git.js";
 
 const log = createLogger({ component: "PmAgent:conflict" });
 
 /** Max file path length passed to Claude in conflict-prediction prompts. */
 const MAX_FILE_PATH_LENGTH = 500;
-
-function parseGitLines(output: string): string[] {
-  return output.split("\n").map((f) => f.trim()).filter(Boolean);
-}
 
 export interface ActiveRun {
   issueId: string;
@@ -23,7 +20,7 @@ export interface GetActiveFileMapsInput {
   activeRuns: ActiveRun[];
   defaultBranch: string;
   repoDir: string;
-  execGit: (args: string[], cwd: string) => Promise<string>;
+  execGit: (args: string[], cwd: string, timeoutMs?: number, expectFailure?: boolean) => Promise<string>;
   /** Injected for testability; defaults to `fs.existsSync`. */
   pathExists?: (p: string) => boolean;
 }
@@ -42,12 +39,12 @@ export async function getActiveFileMaps(
     log.warn("git fetch failed, proceeding with local refs");
   }
 
-  for (const run of activeRuns) {
+  await Promise.all(activeRuns.map(async (run) => {
     // Deterministically check whether the branch exists on origin before diffing.
     // This avoids conflating "branch not yet pushed" with genuine git failures.
     let branchOnOrigin = false;
     try {
-      await execGit(["rev-parse", "--verify", "--quiet", `origin/${run.branch}`], repoDir);
+      await execGit(["rev-parse", "--verify", "--quiet", `origin/${run.branch}`], repoDir, undefined, true);
       branchOnOrigin = true;
     } catch {
       // Branch not on origin yet — expected for in-flight runs that haven't pushed.
@@ -71,7 +68,7 @@ export async function getActiveFileMaps(
       log.debug({ issueId: run.issueId, branch: run.branch }, "branch not yet on origin, reading worktree for conflict detection");
       fileMaps.set(run.issueId, await getWorktreeFiles(run, defaultBranch, execGit, pathExists));
     }
-  }
+  }));
 
   return fileMaps;
 }
@@ -112,12 +109,8 @@ async function getWorktreeFiles(
   }
 
   if (statusResult.status === "fulfilled") {
-    for (const line of statusResult.value.split("\n")) {
-      if (line.length < 4) continue; // min: 2 status chars + 1 space + 1 filename char
-      const path = line.slice(3).trim();
-      // Renamed files appear as "old -> new"; take the destination name.
-      const parts = path.split(" -> ");
-      files.add(parts[parts.length - 1]);
+    for (const path of parseStatusPaths(statusResult.value)) {
+      files.add(path);
     }
   } else {
     log.warn(
