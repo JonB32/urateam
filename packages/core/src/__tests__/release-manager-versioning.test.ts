@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { bumpFromConfigAndCommits } from "../release-manager/versioning.js";
+import { bumpFromConfigAndCommits, isPrereleaseTag } from "../release-manager/versioning.js";
 
 describe("bumpFromConfigAndCommits", () => {
   describe("policy=patch", () => {
@@ -84,5 +84,86 @@ describe("bumpFromConfigAndCommits", () => {
       expect(bumpFromConfigAndCommits("1.2.3", [], "patch")).toBe("v1.2.4");
       expect(bumpFromConfigAndCommits("v1.2.3", [], "patch")).toBe("v1.2.4");
     });
+  });
+
+  describe("prereleaseChannel=beta", () => {
+    it("starts at .1 when current tag is plain semver", () => {
+      expect(bumpFromConfigAndCommits("v1.2.3", [], "patch", "beta")).toBe("v1.2.4-beta.1");
+    });
+    it("increments N on consecutive fires with same channel", () => {
+      expect(bumpFromConfigAndCommits("v1.2.4-beta.1", [], "patch", "beta")).toBe("v1.2.4-beta.2");
+      expect(bumpFromConfigAndCommits("v1.2.4-beta.2", [], "patch", "beta")).toBe("v1.2.4-beta.3");
+      expect(bumpFromConfigAndCommits("v1.2.4-beta.9", [], "patch", "beta")).toBe("v1.2.4-beta.10");
+    });
+    it("bumps from null to v0.0.1-beta.1", () => {
+      expect(bumpFromConfigAndCommits(null, [], "patch", "beta")).toBe("v0.0.1-beta.1");
+    });
+    it("respects minor policy when starting a new prerelease series", () => {
+      expect(bumpFromConfigAndCommits("v1.2.3", [], "minor", "beta")).toBe("v1.3.0-beta.1");
+    });
+    it("respects conventional-commits minor when starting a prerelease series", () => {
+      expect(
+        bumpFromConfigAndCommits("v1.2.3", [{ message: "feat: new feature" }], "conventional-commits", "beta"),
+      ).toBe("v1.3.0-beta.1");
+    });
+  });
+
+  describe("prereleaseChannel=rc", () => {
+    it("starts at .1 when current tag is plain semver", () => {
+      expect(bumpFromConfigAndCommits("v2.0.0", [], "patch", "rc")).toBe("v2.0.1-rc.1");
+    });
+    it("increments N on consecutive fires", () => {
+      expect(bumpFromConfigAndCommits("v2.0.1-rc.1", [], "patch", "rc")).toBe("v2.0.1-rc.2");
+      expect(bumpFromConfigAndCommits("v2.0.1-rc.2", [], "patch", "rc")).toBe("v2.0.1-rc.3");
+    });
+  });
+
+  describe("prereleaseChannel=alpha", () => {
+    it("starts at .1 when current tag is plain semver", () => {
+      expect(bumpFromConfigAndCommits("v0.5.0", [], "patch", "alpha")).toBe("v0.5.1-alpha.1");
+    });
+    it("increments N on consecutive fires", () => {
+      expect(bumpFromConfigAndCommits("v0.5.1-alpha.1", [], "patch", "alpha")).toBe("v0.5.1-alpha.2");
+    });
+  });
+
+  describe("promotion (prerelease → none)", () => {
+    it("strips beta suffix, emitting plain base version", () => {
+      expect(bumpFromConfigAndCommits("v1.2.4-beta.5", [], "patch", "none")).toBe("v1.2.4");
+    });
+    it("strips rc suffix", () => {
+      expect(bumpFromConfigAndCommits("v2.0.1-rc.3", [], "patch", "none")).toBe("v2.0.1");
+    });
+    it("strips alpha suffix", () => {
+      expect(bumpFromConfigAndCommits("v0.5.1-alpha.2", [], "patch", "none")).toBe("v0.5.1");
+    });
+    it("normal plain bump after promotion (last tag is now plain)", () => {
+      // After promoting v1.2.4-beta.5 → v1.2.4 the tag in the repo is v1.2.4
+      // The next plain bump should be v1.2.5.
+      expect(bumpFromConfigAndCommits("v1.2.4", [], "patch", "none")).toBe("v1.2.5");
+    });
+  });
+
+  describe("channel switch (different channel on existing prerelease)", () => {
+    it("bumps the base and starts new channel at .1", () => {
+      // Switching from beta to rc bumps the base and restarts at .1
+      expect(bumpFromConfigAndCommits("v1.2.4-beta.5", [], "patch", "rc")).toBe("v1.2.5-rc.1");
+    });
+  });
+});
+
+describe("isPrereleaseTag", () => {
+  it("returns true for prerelease tags", () => {
+    expect(isPrereleaseTag("v1.2.3-beta.1")).toBe(true);
+    expect(isPrereleaseTag("v0.0.1-rc.2")).toBe(true);
+    expect(isPrereleaseTag("v10.20.30-alpha.99")).toBe(true);
+  });
+  it("returns false for plain semver tags", () => {
+    expect(isPrereleaseTag("v1.2.3")).toBe(false);
+    expect(isPrereleaseTag("1.2.3")).toBe(false);
+  });
+  it("returns false for empty or malformed strings", () => {
+    expect(isPrereleaseTag("")).toBe(false);
+    expect(isPrereleaseTag("v1.2")).toBe(false);
   });
 });

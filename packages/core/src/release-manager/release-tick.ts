@@ -29,7 +29,7 @@ import {
 } from "../audit/events.js";
 import { collectState } from "./state.js";
 import { decide } from "./decide.js";
-import { bumpFromConfigAndCommits } from "./versioning.js";
+import { bumpFromConfigAndCommits, isPrereleaseTag } from "./versioning.js";
 import { createTagAndRelease, parseRepoFromUrl } from "./github.js";
 import type { ReleaseManagerConfig } from "./types.js";
 import { triggerWorkflow, pollWorkflowRun, workflowFileExists } from "../qa/github.js";
@@ -271,10 +271,12 @@ export async function tick(ctx: TickContext): Promise<void> {
 
   // 3. Decision.
   const result = decide(state, config.triggers, undefined, qaState);
+  const prereleaseChannel = config.prereleaseChannel ?? "none";
   const proposedVersion = bumpFromConfigAndCommits(
     state.lastTag,
     state.commitsSinceLastTag,
     config.versionBump,
+    prereleaseChannel,
   );
 
   if (result.kind === "skip") {
@@ -425,6 +427,7 @@ export async function tick(ctx: TickContext): Promise<void> {
     ...parseRepoFromUrl(repoUrl),
     tag: proposedVersion,
     sha: state.headSha,
+    isPrerelease: isPrereleaseTag(proposedVersion),
   });
 
   if (githubResult.kind === "tag_exists") {

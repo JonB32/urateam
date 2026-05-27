@@ -8,6 +8,9 @@ import type { CollectedState } from "./types.js";
 
 const log = createLogger({ component: "ReleaseManager:state" });
 
+/** Matches both plain (v1.2.3) and prerelease (v1.2.3-beta.1) semver tags. */
+export const RELEASE_TAG_RE = /^v?\d+\.\d+\.\d+(-[a-z]+\.\d+)?$/;
+
 export interface CollectStateInput {
   octokit: Octokit;
   db: AnyDb;
@@ -36,7 +39,7 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
   let lastTagAt: Date | null = null;
   try {
     const tagsRes = await octokit.repos.listTags({ owner, repo, per_page: 30 });
-    const candidate = (tagsRes as any).data.find((t: any) => /^v?\d+\.\d+\.\d+$/.test(t.name));
+    const candidate = (tagsRes as any).data.find((t: any) => /^v?\d+\.\d+\.\d+(-[a-z]+\.\d+)?$/.test(t.name));
     if (candidate) {
       lastTag = candidate.name.startsWith("v") ? candidate.name : `v${candidate.name}`;
       lastTagSha = candidate.commit.sha;

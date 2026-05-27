@@ -25,6 +25,8 @@ export const ReleaseManagerConfigSchema = z
     branch: z.string().default("main"),
     /** Optional path globs — only fire if PRs since last tag touched these files. v2 may add this. */
     paths: z.array(z.string()).optional(),
+    /** BEC-143: pre-release channel. "none" = standard semver. Others emit vX.Y.Z-<channel>.N tags. */
+    prereleaseChannel: z.enum(["beta", "rc", "alpha", "none"]).default("none").optional(),
   })
   .superRefine((cfg, ctx) => {
     const t = cfg.triggers;
