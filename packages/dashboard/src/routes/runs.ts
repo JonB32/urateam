@@ -10,15 +10,22 @@ import {
   dashboardRetryRunEvent,
   runCancelledEvent,
   systemHaltedEvent,
+  pmManualTickInvokedEvent,
   isFeatureLicensed,
   canAccess,
+  createLogger,
+  getSessionMessages,
   type Role,
   type StopMode,
+  type SessionMessage,
 } from "@urateam/core";
 import { layout } from "../views/layout.js";
 import { runFeedView, type RunRow } from "../views/run-feed.js";
 import { runDetailView, type RunInfo, type StageInfo, type LogEntry } from "../views/run-detail.js";
+import { runTranscriptView, type TranscriptMessage } from "../views/run-transcript.js";
 import { requirePermission } from "../middleware/rbac.js";
+
+const log = createLogger({ component: "dashboard.runs" });
 
 type AnyDb = any;
 
@@ -27,6 +34,10 @@ type AnyDb = any;
  * possible and stop/cancel signals are a no-op.
  */
 const TERMINAL_RUN_STATUSES = ["completed", "failed", "aborted", "cancelled"] as const;
+type TerminalRunStatus = typeof TERMINAL_RUN_STATUSES[number];
+
+/** Default page size for the runs feed list. */
+const DEFAULT_RUNS_LIMIT = 50;
 
 /** Returns true when a run status is eligible for retry. */
 function isRetryableStatus(status: string): boolean {
@@ -54,6 +65,12 @@ export interface RunsRouterDeps {
     /** Container-wide halt: pauses PM Agent + cancels every active run. */
     haltAll?: () => { cancelledRunIds: string[] };
   };
+  /**
+   * Optional callback to trigger a PM scheduler tick on demand. When provided,
+   * `POST /cli/pm/tick` awaits this and responds with timing + error info.
+   * When absent, the route returns 503 (PM Agent not configured).
+   */
+  triggerPmTick?: () => Promise<void>;
   basePath?: string;
 }
 
@@ -64,6 +81,7 @@ export function createRunsRouter(
   // Backwards-compatible: accept either (db, basePath) or a deps object.
   let db: Db;
   let runner: RunsRouterDeps["runner"];
+  let triggerPmTick: RunsRouterDeps["triggerPmTick"];
   let effectiveBasePath: string;
   if (
     dbOrDeps &&
@@ -73,11 +91,15 @@ export function createRunsRouter(
     const deps = dbOrDeps as RunsRouterDeps;
     db = deps.db;
     runner = deps.runner;
+    triggerPmTick = deps.triggerPmTick;
     effectiveBasePath = deps.basePath ?? "";
   } else {
     db = dbOrDeps as Db;
     effectiveBasePath = basePath;
   }
+
+  // Mutex for /cli/pm/tick — prevents overlapping concurrent ticks.
+  let tickInProgress = false;
 
   const router = new Hono();
   const d = db as AnyDb;
@@ -124,7 +146,8 @@ export function createRunsRouter(
           "Linear or trigger a fresh pipeline run from the webhook.",
       );
     }
-    await runner!.resume(id);
+    // Pass issueId, not the run primary key — runner.resume() queries by issueId.
+    await runner!.resume(run.issueId);
   }
 
   /**
@@ -171,7 +194,7 @@ export function createRunsRouter(
       .select()
       .from(pipelineRuns)
       .orderBy(desc(pipelineRuns.startedAt))
-      .limit(50) as RunRow[];
+      .limit(DEFAULT_RUNS_LIMIT) as RunRow[];
 
     const content = runFeedView(runs);
 
@@ -189,7 +212,7 @@ export function createRunsRouter(
       .select()
       .from(pipelineRuns)
       .orderBy(desc(pipelineRuns.startedAt))
-      .limit(50) as RunRow[];
+      .limit(DEFAULT_RUNS_LIMIT) as RunRow[];
 
     return c.html(runFeedView(runs));
   });
@@ -255,6 +278,64 @@ export function createRunsRouter(
     });
     return c.html(layout(`Run ${id}`, content, effectiveBasePath, { userEmail: user?.email }));
   });
+
+  /**
+   * BEC-227 — render the SDK session transcript for a run, when one exists.
+   *
+   * Read-only view: requires only `runs.view` (same gate as the run-detail
+   * page). Fail-open semantics: if the SDK can't locate or parse the session
+   * file (e.g. transcript pruned, volume mount missing on a new container),
+   * the page still renders with an empty-state message — operators see "no
+   * transcript" instead of a 500. No audit event beyond the implicit route
+   * logging — this is purely diagnostic.
+   */
+  router.get(
+    "/runs/:id/transcript",
+    requirePermission("runs.view"),
+    async (c) => {
+      const id = c.req.param("id");
+      const user = c.get("user" as never) as
+        | { id: string; email: string; role?: Role }
+        | undefined;
+
+      const run = await fetchRunById(id);
+      if (!run) {
+        return c.html(
+          layout("Not Found", "<p>Run not found</p>", effectiveBasePath, {
+            userEmail: user?.email,
+          }),
+          404,
+        );
+      }
+
+      let messages: SessionMessage[] = [];
+      if (run.agentSessionId) {
+        try {
+          messages = await getSessionMessages(run.agentSessionId);
+        } catch (err) {
+          log.warn(
+            {
+              runId: id,
+              sessionId: run.agentSessionId,
+              err: (err as Error).message,
+            },
+            "failed to read session messages — rendering empty transcript",
+          );
+        }
+      }
+
+      const content = runTranscriptView(
+        id,
+        messages as TranscriptMessage[],
+        effectiveBasePath,
+      );
+      return c.html(
+        layout(`Transcript ${id}`, content, effectiveBasePath, {
+          userEmail: user?.email,
+        }),
+      );
+    },
+  );
 
   router.post(
     "/runs/:id/retry",
@@ -324,7 +405,7 @@ export function createRunsRouter(
     const id = c.req.param("id");
     const run = await fetchRunById(id);
     if (!run) return c.text("Run not found", 404);
-    if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(run.status)) {
+    if (TERMINAL_RUN_STATUSES.includes(run.status as TerminalRunStatus)) {
       return c.text(`Cannot stop a run in status ${run.status}`, 409);
     }
 
@@ -427,7 +508,7 @@ export function createRunsRouter(
     const id = c.req.param("id");
     const run = await fetchRunById(id);
     if (!run) return c.text("Run not found", 404);
-    if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(run.status)) {
+    if (TERMINAL_RUN_STATUSES.includes(run.status as TerminalRunStatus)) {
       return c.json({ error: `Cannot stop a run in status ${run.status}` }, 409);
     }
     if (!runner?.requestStop) return c.text("Runner not configured", 500);
@@ -496,6 +577,30 @@ export function createRunsRouter(
     // Per-run audit trail — batched to avoid N+1 queries.
     void auditCancelledRunsBatch(cancelledRunIds, actor, "cli");
     return c.json({ cancelledRunIds });
+  });
+
+  router.post("/cli/pm/tick", requireCliToken, async (c) => {
+    if (!triggerPmTick) return c.text("PM scheduler not configured", 503);
+    if (tickInProgress) return c.json({ error: "PM tick already in progress" }, 409);
+    tickInProgress = true;
+    const triggeredAt = new Date().toISOString();
+    const t0 = Date.now();
+    const errors: string[] = [];
+    try {
+      await triggerPmTick();
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    } finally {
+      tickInProgress = false;
+    }
+    const completedAt = new Date().toISOString();
+    const durationMs = Date.now() - t0;
+    const actor = cliActor(c);
+    void logAuditEvent(
+      db as any,
+      pmManualTickInvokedEvent({ actor, durationMs, errors }),
+    );
+    return c.json({ triggeredAt, completedAt, errors });
   });
 
   return router;

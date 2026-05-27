@@ -1,4 +1,4 @@
-import { and, eq, isNull, isNotNull, desc, gte } from "drizzle-orm";
+import { and, eq, isNull, desc, gte, or, isNotNull, type SQL } from "drizzle-orm";
 import type { Octokit } from "@octokit/rest";
 import type { AnyDb } from "../db/client.js";
 import { releaseApprovals, releaseDecisions } from "../db/schema.js";
@@ -10,6 +10,32 @@ const log = createLogger({ component: "ReleaseManager:state" });
 
 /** Matches both plain (v1.2.3) and prerelease (v1.2.3-beta.1) semver tags. */
 export const RELEASE_TAG_RE = /^v?\d+\.\d+\.\d+(-[a-z]+\.\d+)?$/;
+
+const CI_STATUS = {
+  GREEN: "green" as const,
+  NOT_GREEN: "not-green" as const,
+  UNAVAILABLE: "unavailable" as const,
+} as const;
+
+/**
+ * Shared helper: fetch the latest single row from `releaseDecisions` filtered by
+ * repo/branch plus an additional predicate, ordered by `decidedAt DESC`.
+ * Both the `lastFired` and `latestQaRun` queries share this structure.
+ */
+async function queryLatestReleaseDecision(
+  db: AnyDb,
+  repoUrl: string,
+  branch: string,
+  additionalCondition: SQL<unknown> | undefined,
+  selectFields: Record<string, unknown>,
+): Promise<unknown[]> {
+  return (db as any)
+    .select(selectFields)
+    .from(releaseDecisions)
+    .where(and(eq(releaseDecisions.repoUrl, repoUrl), eq(releaseDecisions.branch, branch), additionalCondition))
+    .orderBy(desc(releaseDecisions.decidedAt))
+    .limit(1);
+}
 
 export interface CollectStateInput {
   octokit: Octokit;
@@ -29,43 +55,50 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
   const { octokit, db, repoUrl, branch, approvalTtlMs } = input;
   const { owner, repo } = parseRepoFromUrl(repoUrl);
 
-  // 1. HEAD SHA of the configured branch
-  const branchRes = await octokit.repos.getBranch({ owner, repo, branch });
+  // 1 & 2. HEAD SHA and latest tags — independent API calls, run in parallel.
+  const [branchRes, tagsResOrNull] = await Promise.all([
+    octokit.repos.getBranch({ owner, repo, branch }),
+    octokit.repos.listTags({ owner, repo, per_page: 30 }).catch((err: unknown) => {
+      log.warn({ err, repoUrl, branch }, "listTags failed — treating as no-tag");
+      return null;
+    }),
+  ]);
   const headSha: string = (branchRes as any).data.commit.sha;
 
-  // 2. Latest tag (matching v*.*.* convention).
+  // Latest tag (matching v*.*.* convention).
   let lastTag: string | null = null;
   let lastTagSha: string | null = null;
   let lastTagAt: Date | null = null;
   try {
-    const tagsRes = await octokit.repos.listTags({ owner, repo, per_page: 30 });
-    const candidate = (tagsRes as any).data.find((t: any) => RELEASE_TAG_RE.test(t.name));
+    const tagsData = tagsResOrNull ? ((tagsResOrNull as any).data ?? []) : [];
+    const candidate = tagsData.find((t: any) => RELEASE_TAG_RE.test(t.name));
     if (candidate) {
       lastTag = candidate.name.startsWith("v") ? candidate.name : `v${candidate.name}`;
       lastTagSha = candidate.commit.sha;
       // Tag commit timestamp — use the commit's committer date for a wall-clock anchor.
       const commit = await octokit.repos.getCommit({ owner, repo, ref: lastTagSha! });
-      const dateStr = (commit as any).data?.commit?.committer?.date ?? (commit as any).data?.commit?.author?.date;
+      const commitData = (commit as any).data?.commit;
+      const dateStr = commitData?.committer?.date ?? commitData?.author?.date;
       lastTagAt = dateStr ? new Date(dateStr) : null;
     }
   } catch (err) {
-    log.warn({ err, repoUrl, branch }, "listTags failed — treating as no-tag");
+    log.warn({ err, repoUrl, branch }, "tag/commit fetch failed — treating as no-tag");
   }
 
-  // 3. Manual-tag detection: did any release_decisions with kind="fire" record
-  //    a fired_tag, and does the current latest tag differ from it?
-  const lastFired = await (db as any)
-    .select({ firedTag: releaseDecisions.firedTag })
-    .from(releaseDecisions)
-    .where(
-      and(
-        eq(releaseDecisions.repoUrl, repoUrl),
-        eq(releaseDecisions.branch, branch),
-        eq(releaseDecisions.decision, "fire"),
-      ),
-    )
-    .orderBy(desc(releaseDecisions.decidedAt))
-    .limit(1);
+  // 3. Manual-tag detection: did any release_decisions with kind="fire" or
+  //    "fire-pending" record a fired_tag, and does the current latest tag
+  //    differ from it? Including "fire-pending" prevents a partial-fire tag
+  //    from being misread as a human-created manual tag on the next tick.
+  const lastFired = await queryLatestReleaseDecision(
+    db,
+    repoUrl,
+    branch,
+    or(
+      eq(releaseDecisions.decision, "fire"),
+      eq(releaseDecisions.decision, "fire-pending"),
+    ),
+    { firedTag: releaseDecisions.firedTag },
+  ) as Array<{ firedTag: string | null }>;
   const lastFiredTag: string | null = lastFired?.[0]?.firedTag ?? null;
   const manualTagDetected = lastTag !== null && lastFiredTag !== null && lastTag !== lastFiredTag;
 
@@ -95,7 +128,7 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
   }
 
   // 5. CI status for headSha — aggregate check_runs.
-  let ciStatus: "green" | "not-green" | "unavailable" = "unavailable";
+  let ciStatus: "green" | "not-green" | "unavailable" = CI_STATUS.UNAVAILABLE;
   let ciGreenSince: Date | null = null;
   try {
     const checks = await octokit.checks.listForRef({ owner, repo, ref: headSha, per_page: 100 });
@@ -105,14 +138,14 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
       completed_at: string | null;
     }>;
     if (runs.length === 0) {
-      ciStatus = "unavailable";
+      ciStatus = CI_STATUS.UNAVAILABLE;
     } else {
       const allCompleted = runs.every((r) => r.status === "completed");
       const allSuccess = runs.every((r) => r.conclusion === "success");
       if (!allCompleted) {
-        ciStatus = "not-green";
+        ciStatus = CI_STATUS.NOT_GREEN;
       } else if (allSuccess) {
-        ciStatus = "green";
+        ciStatus = CI_STATUS.GREEN;
         // ciGreenSince = latest completed_at across all runs
         const completedAts = runs
           .map((r) => (r.completed_at ? new Date(r.completed_at).getTime() : null))
@@ -121,12 +154,12 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
           ciGreenSince = new Date(Math.max(...completedAts));
         }
       } else {
-        ciStatus = "not-green";
+        ciStatus = CI_STATUS.NOT_GREEN;
       }
     }
   } catch (err) {
     log.warn({ err }, "checks.listForRef failed — ciStatus unavailable");
-    ciStatus = "unavailable";
+    ciStatus = CI_STATUS.UNAVAILABLE;
   }
 
   // 6. Fresh approval lookup. "Fresh" = consumed_at IS NULL AND approved_at within approvalTtlMs.
@@ -150,23 +183,20 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
   const freshApprovalApprover = hasFreshApproval ? freshRows[0].approvedBy : null;
 
   // 7. BEC-136: most-recent in-flight QA run snapshot.
-  const qaRunRows = await (db as any)
-    .select({
+  // Uses the partial index idx_release_decisions_qa_run_id (WHERE qa_run_id IS NOT NULL)
+  // created in migrations 010_qa_run_columns.sql (SQLite) / 011_qa_run_columns.sql (Postgres).
+  const latestQaRows = await queryLatestReleaseDecision(
+    db,
+    repoUrl,
+    branch,
+    isNotNull(releaseDecisions.qaRunId),
+    {
       qaRunId: releaseDecisions.qaRunId,
       qaRunSha: releaseDecisions.qaRunSha,
       decidedAt: releaseDecisions.decidedAt,
-    })
-    .from(releaseDecisions)
-    .where(
-      and(
-        eq(releaseDecisions.repoUrl, repoUrl),
-        eq(releaseDecisions.branch, branch),
-        isNotNull(releaseDecisions.qaRunId),
-      ),
-    )
-    .orderBy(desc(releaseDecisions.decidedAt))
-    .limit(1);
-  const latestQaRow = qaRunRows[0] ?? null;
+    },
+  ) as Array<{ qaRunId: number | null; qaRunSha: string | null; decidedAt: Date | number }>;
+  const latestQaRow = latestQaRows[0] ?? null;
   const qaRun = latestQaRow
     ? {
         runId: latestQaRow.qaRunId as number,

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { layout, escapeHtml, getBasePath } from "../views/layout.js";
+import { DASHBOARD_CSP } from "../csp.js";
 
 describe("layout", () => {
   const originalEnv = process.env.DASHBOARD_BASE_PATH;
@@ -150,6 +151,19 @@ describe("layout", () => {
     it("should escape in the correct order (ampersand first)", () => {
       // If we don't escape ampersand first, we might double-escape
       expect(escapeHtml("&lt;")).toBe("&amp;lt;");
+    });
+  });
+
+  describe("Content-Security-Policy meta tag", () => {
+    it("should embed the full DASHBOARD_CSP constant in the meta tag", () => {
+      const html = layout("Test", "");
+      expect(html).toContain('http-equiv="Content-Security-Policy"');
+      expect(html).toContain(DASHBOARD_CSP);
+    });
+
+    it("should retain script-src restriction to self and unpkg.com", () => {
+      expect(DASHBOARD_CSP).toContain("script-src 'self' https://unpkg.com");
+      expect(DASHBOARD_CSP).not.toContain("script-src 'unsafe-inline'");
     });
   });
 

@@ -1,11 +1,10 @@
--- 013_triage_results.sql
--- BEC-223: persist triage v2 prediction at triage time so the runner Tier 6e
--- hook reads from DB instead of parsing the description (which gets truncated
--- by mapIssueToSchema at 4000 chars, slicing off the appended v2 sections for
--- realistic issues).
-
-CREATE TABLE IF NOT EXISTS triage_results (
-  issue_id TEXT PRIMARY KEY,
-  v2_prediction TEXT NOT NULL DEFAULT '{}',
-  triaged_at INTEGER NOT NULL DEFAULT (unixepoch())
-);
+-- BEC-149: This migration was renumbered to 015_triage_results to fix a
+-- duplicate prefix (013_missing_indexes and 013_triage_results shared
+-- prefix 013).
+--
+-- This file is retained for git history only. The migrator skips it based on
+-- the SQLITE_MIGRATION_RENAMES map in migrator.ts, which also renames any
+-- existing "013_triage_results" entries in schema_migrations to
+-- "015_triage_results" so existing deployments do not re-run this migration.
+--
+-- Active migration: packages/core/src/db/migrations/sqlite/015_triage_results.sql

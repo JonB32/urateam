@@ -294,6 +294,31 @@ export const HandoffArtifactSchema = z.object({
 });
 export type HandoffArtifact = z.infer<typeof HandoffArtifactSchema>;
 
+/**
+ * BEC-227 Phase 4 / Track D. The implement agent emits this as a
+ * `<decisions>{ JSON }</decisions>` XML block at the end of its turn.
+ * Used by the review-fix loop's surgical prompt and by future Track F
+ * cross-run inheritance. Every field is optional — malformed or missing
+ * blocks degrade silently to an empty artifact.
+ */
+export const DecisionArtifactSchema = z.object({
+  decisions: z.array(
+    z.object({
+      choice: z.string(),
+      reason: z.string(),
+      alternativesConsidered: z.array(z.string()).default([]),
+    }),
+  ).default([]),
+  leftUnhandled: z.array(
+    z.object({
+      case: z.string(),
+      reason: z.string(),
+    }),
+  ).default([]),
+  keyFiles: z.array(z.string()).default([]),
+});
+export type DecisionArtifact = z.infer<typeof DecisionArtifactSchema>;
+
 // --- Review Feedback Context ---
 export const ReviewCommentSchema = z.object({
   author: z.string(),
@@ -359,15 +384,32 @@ export type StageRunStatus = "running" | "completed" | "failed" | "skipped" | "c
 export type AgentLogType = "tool_call" | "tool_result" | "message" | "error" | "cancelled";
 
 // --- Sanitized Issue ---
-export interface SanitizedIssue {
-  id: string;
-  slug: string;
-  title: string;
-  description: string;
-  acceptanceCriteria: string[];
-  labels: string[];
-  priority: number;
-}
+export const SanitizedIssueSchema = z.object({
+  id: z.string(),
+  slug: z.string(),
+  title: z.string(),
+  description: z.string(),
+  acceptanceCriteria: z.array(z.string()),
+  labels: z.array(z.string()),
+  priority: z.number(),
+});
+export type SanitizedIssue = z.infer<typeof SanitizedIssueSchema>;
+
+// --- Resume Payload ---
+// Snapshot of all context needed to restart a paused or retriable pipeline run.
+// Stored as JSON in pipeline_runs.resume_payload; validated with safeParse on
+// resume so schema mismatches from older DB rows fail gracefully (run → failed).
+// Note: currentStageIndex may be -1 for transient-failure retries (stage 0 failed;
+// slice(-1+1) = slice(0) re-runs the full stage list from the start).
+export const ResumePayloadSchema = z.object({
+  worktreePath: z.string(),
+  currentStageIndex: z.number().int(),
+  handoff: HandoffArtifactSchema.nullable(),
+  pipelineConfig: PipelineConfigSchema,
+  repoConfig: RepoConfigSchema,
+  sanitizedIssue: SanitizedIssueSchema,
+});
+export type ResumePayload = z.infer<typeof ResumePayloadSchema>;
 
 // --- Stage Result ---
 export interface StageResult {
@@ -466,10 +508,11 @@ export interface Notifier {
   /** Called by sendDailyTokenSummary() with aggregated usage for a given date. */
   onDailyTokenSummary?(summary: DailyTokenSummary): Promise<void>;
   /**
-   * BEC-186: called when a PR is merged externally — either by a human via
-   * the GitHub UI or by GitHub's "auto-merge when ready" feature — after
-   * the pipeline has already completed. Implementations should transition
-   * the Linear issue to Done.
+   * BEC-186: called when a GitHub pull_request.closed webhook arrives with
+   * merged=true — either from a human merge via the GitHub UI or from
+   * GitHub's "auto-merge when ready" feature — after the pipeline has already
+   * completed. Transitions the Linear issue to Done and posts a "PR merged"
+   * comment.
    */
   onPRMerged?(run: PipelineRun): Promise<void>;
 }
@@ -502,6 +545,11 @@ export const AuditEventTypeSchema = z.enum([
   "pm.agent_branch_swept",
   "pm.skipped_circuit_breaker",
   "pm.recovered_long_running",
+  /** BEC-262 — recoverStuckInProgressIssues skipped an issue because its
+   *  most-recent pipeline run completed with auto_merged=true (work shipped).
+   *  The "In Progress" state was set by an external source and is not a signal
+   *  of a stuck run. Payload: issueId, prUrl (nullable). */
+  "pm.skipped_already_shipped",
   "budget.alert_fired", "budget.run_refused",
   "license.validation_failed", "config.loaded",
   /** Claude CLI session credentials have expired (BEC-207). Operational
@@ -535,12 +583,41 @@ export const AuditEventTypeSchema = z.enum([
    *  deep-review fanout runs. Payload includes the diff metrics and which
    *  threshold tripped. */
   "pipeline.auto_deep_review_bumped",
+  /** BEC-222 — a stale remote branch (no active DB run, no open PR) was
+   *  detected at pipeline start. The branch was deleted and the run
+   *  proceeds from scratch. Payload: branch, issueId, runId. */
+  "pipeline.stale_branch_recovered",
+  /** BEC-222 — an existing remote branch was detected at pipeline start but
+   *  a live run or open PR already holds it. The new start was skipped to
+   *  avoid concurrent contamination or duplicate work. Payload: branch,
+   *  reason ("active-run" | "open-pr"), and (where known) activeRunId /
+   *  prNumber. */
+  "pipeline.skipped_existing_branch",
   /** Tier 5 — an issue tripped the consecutive-failures circuit breaker
    *  (≥ `maxConsecutiveFailures` failed runs in a row). The PM Agent
    *  escalated by adding the `needs-design` label, posting a Linear
    *  comment with the last failure's error message, and sending a Slack
    *  alert. Payload includes failureCount and a truncated errorMessage. */
   "pm.escalated_to_needs_design",
+  /** BEC-236 — PM tick selected this issue for a half-open circuit-breaker probe.
+   *  The breaker is currently engaged (≥ maxConsecutiveFailures), but the
+   *  cooldown window has elapsed and the per-tick probe cap allows it through.
+   *  Payload: issueId, consecutiveFailures, lastProbeAgeMin (minutes since the
+   *  previous probe; -1 for the first probe — NOT the age since the last
+   *  failure), probeAttempts. */
+  "pm.circuit_breaker_probe",
+  /** BEC-236 — A probe run reached terminal `completed` status, so the
+   *  circuit_breaker_state row was deleted and the Tier-5-added `needs-design`
+   *  label was removed. Payload: issueId, probeAttempts. */
+  "pm.circuit_breaker_recovered",
+  /** BEC-236 — `ura circuit reset` cleared the breaker for an issue. Payload:
+   *  issueId, scope ("single" | "bulk"), failedRunsDeleted (count of
+   *  pipeline_runs rows the reset deleted). */
+  "pm.circuit_breaker_reset_manual",
+  /** BEC-253 — `ura tick` invoked a PM tick on demand via the CLI. Payload:
+   *  actor (cli:<os-user>), durationMs (wall-clock time for the tick),
+   *  errors (string array, empty when tick succeeded without exceptions). */
+  "pm.manual_tick_invoked",
   /** `ura service install` succeeded — a launchd plist (macOS) or systemd-user
    *  unit (Linux) was written and the service was started. Operational signal
    *  so operators can audit unattended provisioning. */
@@ -565,6 +642,49 @@ export const AuditEventTypeSchema = z.enum([
    *  hash, so operators can audit which repos came/went without grepping
    *  the daemon log. */
   "config.reloaded",
+  /** BEC-227 — a fresh per-run Agent SDK session was created on the first
+   *  resumable stage. Payload: runId, issueId, sessionId (UUID generated
+   *  by the SDK on the first `query()` call). */
+  "pipeline.agent_session_created",
+  /** BEC-227 — a downstream stage resumed the per-run Agent SDK session via
+   *  `query({ resume: sessionId })`. Payload includes the stage name and
+   *  the prior message count read from the session JSONL transcript so
+   *  operators can see how much context was inherited. */
+  "pipeline.agent_session_resumed",
+  /** BEC-227 — a stage attempted to resume the per-run session but the
+   *  underlying JSONL transcript was missing, unreadable, or the SDK
+   *  rejected the resume. The runner fell back to a fresh session for
+   *  this stage. Payload `reason` carries the failure mode. */
+  "pipeline.agent_session_missing_fallback",
+  /** BEC-227 — at boot, the session-volume check found `~/.claude/projects`
+   *  on tmpfs, missing, or unwritable — meaning session JSONLs won't
+   *  survive container restarts. Payload carries the projectsDir path and
+   *  the failure reason so operators can fix their mount config. */
+  "system.session_volume_warning",
+  /** BEC-227 Phase 4 / Track B — the review-fix loop took the surgical path:
+   *  it resumed the per-run Agent SDK session and prompted the agent with
+   *  just the blocking review findings (plus the previously-persisted
+   *  decision artifact when available), instead of re-running the full
+   *  implement template. Payload: `runId`, `issueId`, `path` ("surgical" |
+   *  "legacy"), `findingsCount`, `decisionPayloadBytes` (0 when no
+   *  artifact was found). The `legacy` path is logged too so operators
+   *  can audit fallback rates. */
+  "pipeline.surgical_review_fix",
+  "claude.auth_expired",
+  /** BEC-252 — a pipeline run interrupted by a server restart was successfully
+   *  marked `retriable` and then recovered by `recoverRetriableRuns`. Both
+   *  the worktree and the agent session JSONL transcript were present on disk
+   *  at restart-detection time, enabling graceful resume. Payload: `runId`,
+   *  `issueId`, `stage` (last running stage at restart), `worktreeExisted`
+   *  (always true), `transcriptExisted` (always true), `restartGapMs`
+   *  (milliseconds from interrupt to recovery). */
+  "pipeline.restart_interrupt_recovered",
+  /** BEC-268 — the executor detected "Session ID X is already in use" in the
+   *  SDK's stderr. A fresh UUID was minted, persisted to
+   *  `pipeline_runs.agent_session_id`, and the stage was marked retriable so
+   *  the recovery loop retries with the new ID. Payload: `runId`, `issueId`,
+   *  `stage`, `oldSessionId`, `newSessionId`. */
+  "pipeline.agent_session_collision_recovered",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 

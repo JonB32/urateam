@@ -21,6 +21,41 @@ export interface TriagePromptInput {
   identifier: string;
   title: string;
   description: string | null | undefined;
+  /** When true, the description already contains a parsed **Acceptance Criteria:** section; prompt builders omit AC generation to avoid divergent regeneration. */
+  hasPreSuppliedACs?: boolean;
+}
+
+/**
+ * Parse hand-written acceptance criteria from a Linear issue description.
+ *
+ * Scans for the canonical `**Acceptance Criteria:**` marker and extracts
+ * following bullet items (`- [ ] text`, `- [x] text`, or `- text`).
+ * Stops at the first non-bullet, non-empty line (i.e. a new section or prose).
+ * Returns an empty array when the marker is absent or no items follow it.
+ *
+ * Only parses from the canonical marker — NOT from arbitrary free-text —
+ * so generic prose that mentions "criteria" is never accidentally harvested.
+ */
+export function parseHandWrittenACs(description: string | null | undefined): string[] {
+  if (!description) return [];
+  const marker = "**Acceptance Criteria:**";
+  const idx = description.indexOf(marker);
+  if (idx === -1) return [];
+
+  const afterMarker = description.slice(idx + marker.length);
+  const items: string[] = [];
+  for (const line of afterMarker.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed === "") continue; // blank lines between items are fine
+    const match = trimmed.match(/^-\s+(?:\[.?\]\s+)?(.+)$/);
+    if (match) {
+      const text = match[1].trim();
+      if (text.length > 0) items.push(text);
+    } else {
+      break; // non-bullet non-empty line → end of AC section
+    }
+  }
+  return items;
 }
 
 /**
@@ -44,22 +79,28 @@ export function buildTriageV1Prompt(
   sanitize: (text: string) => string,
 ): string {
   const sanitizedDesc = sanitize(issue.description ?? "");
+  const acBlock = issue.hasPreSuppliedACs
+    ? ""
+    : `IMPORTANT rules for generating acceptance criteria:\n` +
+      `1. INTEGRATION: Every new function, module, or utility MUST have a criterion that specifies where it is called from in existing code (e.g. "runner.ts calls checkFoo() after the test stage completes"). Code that is exported but never imported outside its own test file is incomplete.\n` +
+      `2. DOCUMENTATION: If the change adds new configuration, public API, CLI flags, or changes behavior, include a criterion requiring updates to relevant documentation (CLAUDE.md, README.md, deploy/README.md, or inline JSDoc).\n` +
+      `3. TESTING: Include a criterion for tests that exercise the integration path, not just the utility in isolation.\n` +
+      `4. Each criterion must be concrete and verifiable by reading the code — avoid vague criteria like "works correctly" or "is implemented".\n\n`;
+  const jsonSchema = issue.hasPreSuppliedACs
+    ? `{"priority": <1-4 where 1=urgent>, "labels": [<"bug"|"feature"|"backend"|"frontend"|"infra"|"docs">], "complexity": <"trivial"|"small"|"medium"|"large">, "rationale": "<one sentence>", "approachSummary": "<3-5 lines>", "openQuestions": [], "antiAcceptanceCriteria": ["<not-this>", ...]}`
+    : `{"priority": <1-4 where 1=urgent>, "labels": [<"bug"|"feature"|"backend"|"frontend"|"infra"|"docs">], "complexity": <"trivial"|"small"|"medium"|"large">, "rationale": "<one sentence>", "approachSummary": "<3-5 lines>", "openQuestions": [], "antiAcceptanceCriteria": ["<not-this>", ...], "acceptanceCriteria": ["<integration criterion — specifies call site in existing code>", "<behavior criterion — testable outcome>", "<documentation criterion — if applicable>", ...]}`;
   return (
-    `Classify this software issue, generate acceptance criteria, and produce a design doc. Respond with ONLY a JSON object, no other text.\n\n` +
+    `Classify this software issue${issue.hasPreSuppliedACs ? "" : ", generate acceptance criteria,"} and produce a design doc. Respond with ONLY a JSON object, no other text.\n\n` +
     `Issue: ${issue.identifier}\n` +
     `Title: ${sanitize(issue.title)}\n` +
     `Description: ${sanitizedDesc}\n\n` +
-    `IMPORTANT rules for generating acceptance criteria:\n` +
-    `1. INTEGRATION: Every new function, module, or utility MUST have a criterion that specifies where it is called from in existing code (e.g. "runner.ts calls checkFoo() after the test stage completes"). Code that is exported but never imported outside its own test file is incomplete.\n` +
-    `2. DOCUMENTATION: If the change adds new configuration, public API, CLI flags, or changes behavior, include a criterion requiring updates to relevant documentation (CLAUDE.md, README.md, deploy/README.md, or inline JSDoc).\n` +
-    `3. TESTING: Include a criterion for tests that exercise the integration path, not just the utility in isolation.\n` +
-    `4. Each criterion must be concrete and verifiable by reading the code — avoid vague criteria like "works correctly" or "is implemented".\n\n` +
+    acBlock +
     `Tier 4 — DESIGN DOC fields:\n` +
     `- approachSummary: 3-5 lines describing what the implementation will do at a level the operator can sanity-check before spending implement-stage tokens. Concrete enough that someone reading it could predict the diff shape.\n` +
     `- openQuestions: list of unknowns that the operator must answer before implement is safe — ambiguous requirements, missing API contracts, undecided trade-offs. EMPTY when the issue is clearly specified. NON-EMPTY forces routing to "needs-design" so a human answers before any implement-stage tokens are spent.\n` +
     `- antiAcceptanceCriteria: list of "things this should NOT do" — explicit out-of-scope items so the agent doesn't drift (e.g. "must NOT change other pipelines' configs", "must NOT add new dependencies"). Helps the agent stay narrow.\n\n` +
     `Respond with exactly this JSON format (no markdown, no explanation, just the JSON). The canonical form for openQuestions is the EMPTY array \`[]\` — only populate it when the issue is genuinely ambiguous and you cannot proceed without operator input. Do not invent questions for clear specs.\n` +
-    `{"priority": <1-4 where 1=urgent>, "labels": [<"bug"|"feature"|"backend"|"frontend"|"infra"|"docs">], "complexity": <"trivial"|"small"|"medium"|"large">, "rationale": "<one sentence>", "approachSummary": "<3-5 lines>", "openQuestions": [], "antiAcceptanceCriteria": ["<not-this>", ...], "acceptanceCriteria": ["<integration criterion — specifies call site in existing code>", "<behavior criterion — testable outcome>", "<documentation criterion — if applicable>", ...]}`
+    jsonSchema
   );
 }
 
@@ -169,11 +210,12 @@ The schema (every field is required unless marked optional):
                               "needs-design". Empty array (\`[]\`) is canonical
                               when the issue is clearly specified.
   antiAcceptanceCriteria:   array of strings — things the implementation must
-                              NOT do (out-of-scope items).
+                              NOT do (out-of-scope items).${issue.hasPreSuppliedACs ? `
+  (acceptanceCriteria is PRE-SUPPLIED from the issue description — omit this field)` : `
   acceptanceCriteria:       array of strings — concrete, testable behaviors.
                               Each must specify either (a) a call-site in
                               existing code, (b) a measurable outcome, or
-                              (c) a documentation update.
+                              (c) a documentation update.`}
 
   (Tier 6b — all optional, drop when not applicable to the issue:)
   assumptions:              array of strings (max 10) — what the agent will

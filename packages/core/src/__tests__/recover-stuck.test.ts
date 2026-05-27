@@ -535,6 +535,96 @@ describe("recoverStuckInProgressIssues", () => {
     expect(truncationWarningCalls).toHaveLength(0);
   });
 
+  // ---------------------------------------------------------------------------
+  // BEC-262 regression: already-shipped issues should be skipped entirely
+  // ---------------------------------------------------------------------------
+
+  it("BEC-262: skips issue when most-recent run is completed + auto_merged=true", async () => {
+    // Scenario from BEC-262:
+    //   1. urateam shipped the work (completed run, auto_merged=true, prUrl set)
+    //   2. Linear PR-automation (sidecar PR mentioning the issue ID) moved it back to In Progress
+    //   3. PM tick calls recoverStuckInProgressIssues → should do NOTHING (work already shipped)
+    const issue = {
+      id: "issue-uuid-bec262",
+      identifier: "BEC-142",
+      title: "Already-shipped issue ping-ponged by Linear PR automation",
+      team: Promise.resolve({ id: "team-1" }),
+      state: Promise.resolve({ name: "In Progress" }),
+    };
+    const linearClient = makeLinearClient([issue]);
+    const db = makeDb([], [
+      {
+        id: "run-shipped",
+        issueId: "BEC-142",
+        status: "completed",
+        autoMerged: true,
+        startedAt: new Date("2026-05-25T23:45:00Z"),
+        prUrl: "https://github.com/JonB32/urateam/pull/410",
+      },
+    ]);
+    const stateMap = new Map([
+      ["team-1:Backlog", "state-backlog-1"],
+      ["team-1:In Review", "state-in-review-1"],
+    ]);
+
+    const result = await recoverStuckInProgressIssues({
+      linearClient,
+      db: db as any,
+      teamIds: ["team-1"],
+      targetState: "Backlog",
+      maxPerTick: 5,
+      stateMap,
+    });
+
+    // Work is shipped — skip entirely, no Linear state change, no comment.
+    expect(result).toHaveLength(0);
+    expect(linearClient.updateIssue).not.toHaveBeenCalled();
+    expect(linearClient.createComment).not.toHaveBeenCalled();
+  });
+
+  it("BEC-262: BEC-165 override still fires when completed run has prUrl but auto_merged=false (PR pending review)", async () => {
+    // Distinguish from the shipped case: a PR that was created but not yet
+    // auto-merged is still awaiting human review, so moving to "In Review" is correct.
+    const issue = {
+      id: "issue-uuid-pr-pending",
+      identifier: "BEC-153",
+      title: "PR open, awaiting review",
+      team: Promise.resolve({ id: "team-1" }),
+      state: Promise.resolve({ name: "In Progress" }),
+    };
+    const linearClient = makeLinearClient([issue]);
+    const db = makeDb([], [
+      {
+        id: "run-pending",
+        issueId: "BEC-153",
+        status: "completed",
+        autoMerged: false,
+        startedAt: new Date("2026-05-25T23:45:00Z"),
+        prUrl: "https://github.com/JonB32/urateam/pull/999",
+      },
+    ]);
+    const stateMap = new Map([
+      ["team-1:Backlog", "state-backlog-1"],
+      ["team-1:In Review", "state-in-review-1"],
+    ]);
+
+    const result = await recoverStuckInProgressIssues({
+      linearClient,
+      db: db as any,
+      teamIds: ["team-1"],
+      targetState: "Backlog",
+      maxPerTick: 5,
+      stateMap,
+    });
+
+    // PR is open but not shipped — BEC-165 override should move to "In Review".
+    expect(result).toHaveLength(1);
+    expect(result[0]!.targetState).toBe("In Review");
+    expect(linearClient.updateIssue).toHaveBeenCalledWith("issue-uuid-pr-pending", {
+      stateId: "state-in-review-1",
+    });
+  });
+
   it("handles Linear updateIssue error gracefully and continues with other issues", async () => {
     const issues = [
       {

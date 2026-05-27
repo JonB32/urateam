@@ -15,9 +15,11 @@
  *   - tick              — execute a single release-manager decision cycle
  */
 import { randomUUID } from "node:crypto";
+import { and, desc, eq, lt } from "drizzle-orm";
 import type { Octokit } from "@octokit/rest";
 import type { LinearClient } from "@linear/sdk";
 import type { AnyDb } from "../db/client.js";
+import { releaseDecisions } from "../db/schema.js";
 import { createLogger } from "../logger.js";
 import { logAuditEventUnchecked } from "../audit/writer.js";
 import {
@@ -32,14 +34,17 @@ import { decide } from "./decide.js";
 import { bumpFromConfigAndCommits, isPrereleaseTag } from "./versioning.js";
 import { createTagAndRelease, parseRepoFromUrl } from "./github.js";
 import type { ReleaseManagerConfig } from "./types.js";
+import { RELEASE_APPROVE_ACTION_ID, RELEASE_SKIP_ACTION_ID } from "./types.js";
 import { triggerWorkflow, pollWorkflowRun, workflowFileExists } from "../qa/github.js";
 import { markGapResolved } from "../qa/gap.js";
+import { makeCallClaude } from "../pm/call-claude.js";
 import {
   maybePostSlack,
   persistDecision,
   consumeApprovalRow,
   getMaxAttemptCountForReason,
   tryFileQaGapIssue,
+  clearFailureRowsForSha,
   MAX_QA_RETRY_ATTEMPTS,
 } from "./release-helpers.js";
 import type { SlackPoster, SlackDedupState } from "./release-helpers.js";
@@ -54,6 +59,159 @@ const log = createLogger({ component: "ReleaseManager:scheduler" });
  * long-running deployments).
  */
 const MAX_AUDITED_RUN_IDS = 10_000;
+
+/** Maximum createRelease attempts before a fire-pending row is exhausted. */
+const MAX_FIRE_PENDING_ATTEMPTS = 3;
+
+/** Sentinel attemptCount for permanent skips (e.g. qa_dispatch_error — misconfigured workflow). */
+const PERMANENT_SKIP_ATTEMPT_COUNT = 99;
+
+/** Generate a unique ID for release decision rows. */
+function generateReleaseDecisionId(): string {
+  return `rd_${randomUUID()}`;
+}
+
+/** Stamp attemptCount on a release decision row in-place. */
+async function updateReleaseDecisionAttemptCount(db: AnyDb, rowId: string, count: number): Promise<void> {
+  await (db as any).update(releaseDecisions).set({ attemptCount: count }).where(eq(releaseDecisions.id, rowId));
+}
+
+/**
+ * Retry sweep for fire-pending rows.
+ *
+ * Called at the top of every tick, before collectState, so the state query
+ * sees the result of any successful retry (avoiding a spurious
+ * `manual_tag_detected` skip on the same tick).
+ *
+ * For each fire-pending row with attemptCount < MAX_FIRE_PENDING_ATTEMPTS:
+ *   - Verify the tag still exists in GitHub (skip if 404, fail-open on error).
+ *   - Call createRelease only (the tag already exists).
+ *   - Success → update the row to decision="fire", audit releaseFiredEvent.
+ *   - Failure → increment attemptCount. When it reaches the cap, write a new
+ *     skip row with reason="release_create_failed_after_retries" and audit
+ *     releasePartialEvent.
+ */
+async function sweepFirePendingRows(ctx: TickContext): Promise<void> {
+  const { db, octokit, repoUrl, branch, slack, mutableState, config } = ctx;
+
+  const pending = await (db as any)
+    .select()
+    .from(releaseDecisions)
+    .where(
+      and(
+        eq(releaseDecisions.repoUrl, repoUrl),
+        eq(releaseDecisions.branch, branch),
+        eq(releaseDecisions.decision, "fire-pending"),
+        lt(releaseDecisions.attemptCount, MAX_FIRE_PENDING_ATTEMPTS),
+      ),
+    )
+    .orderBy(desc(releaseDecisions.decidedAt));
+
+  if (pending.length === 0) return;
+
+  const { owner, repo } = parseRepoFromUrl(repoUrl);
+  const pendingSlackMessages: string[] = [];
+
+  for (const row of pending) {
+    if (!row.firedTag || !row.firedSha) {
+      log.warn({ repoUrl, branch, rowId: row.id }, "fire-pending: row missing firedTag or firedSha — skipping");
+      continue;
+    }
+    const tag: string = row.firedTag;
+    const sha: string = row.firedSha;
+
+    // Verify the tag still exists in GitHub before attempting createRelease.
+    try {
+      await octokit.git.getRef({ owner, repo, ref: `tags/${tag}` });
+    } catch (refErr: any) {
+      if (refErr?.status === 404) {
+        log.info({ repoUrl, branch, tag }, "fire-pending: tag no longer exists — operator cleaned up; skipping retry");
+        continue;
+      }
+      // Network/other error — fail-open and try createRelease anyway.
+      log.warn({ err: refErr, repoUrl, branch, tag }, "fire-pending: getRef failed — attempting createRelease anyway");
+    }
+
+    let releaseUrl: string | undefined;
+    let createFailed = false;
+
+    try {
+      const res = await octokit.repos.createRelease({
+        owner,
+        repo,
+        tag_name: tag,
+        target_commitish: sha,
+        generate_release_notes: true,
+      });
+      releaseUrl = (res as any)?.data?.html_url ?? `https://github.com/${owner}/${repo}/releases/tag/${tag}`;
+    } catch (releaseErr: any) {
+      createFailed = true;
+      const newAttemptCount = row.attemptCount + 1;
+
+      if (newAttemptCount >= MAX_FIRE_PENDING_ATTEMPTS) {
+        // Stamp the original row so it won't be re-selected by future sweeps
+        // (the lt(attemptCount, MAX) filter would otherwise keep matching it).
+        await updateReleaseDecisionAttemptCount(db, row.id, newAttemptCount);
+        await persistDecision(db, repoUrl, branch, {
+          id: generateReleaseDecisionId(),
+          decision: "skip",
+          reason: "release_create_failed_after_retries",
+          triggerStateJson: row.triggerStateJson,
+          proposedVersion: row.proposedVersion ?? undefined,
+          firedTag: tag,
+          firedSha: sha,
+          attemptCount: newAttemptCount,
+        });
+        void logAuditEventUnchecked(
+          db,
+          releasePartialEvent({ repoUrl, branch, tag, attemptCount: newAttemptCount }),
+        );
+        log.error(
+          { repoUrl, branch, tag, attemptCount: newAttemptCount },
+          "fire-pending: release creation exhausted retries — manual cleanup required",
+        );
+      } else {
+        await updateReleaseDecisionAttemptCount(db, row.id, newAttemptCount);
+        log.warn(
+          { repoUrl, branch, tag, attemptCount: newAttemptCount, err: releaseErr?.message },
+          "fire-pending: createRelease retry failed — will retry next tick",
+        );
+      }
+    }
+
+    if (createFailed) continue;
+
+    // Success — promote row to decision="fire".
+    await (db as any)
+      .update(releaseDecisions)
+      .set({ decision: "fire" })
+      .where(eq(releaseDecisions.id, row.id));
+
+    let mergedPrCount = 0;
+    try {
+      mergedPrCount = JSON.parse(row.triggerStateJson)?.mergedCommitsSinceLastTag ?? 0;
+    } catch {}
+
+    void logAuditEventUnchecked(
+      db,
+      releaseFiredEvent({ repoUrl, branch, tag, sha, mergedPrCount }),
+    );
+    log.info({ repoUrl, branch, tag, releaseUrl }, "fire-pending: retry succeeded");
+    pendingSlackMessages.push(
+      `:rocket: Released *${tag}* for ${repoUrl} (${branch}) — retry succeeded. ${releaseUrl}`,
+    );
+  }
+
+  // Post all retry-success Slack messages in parallel (each is dedup-independent).
+  if (pendingSlackMessages.length > 0) {
+    await Promise.all(
+      pendingSlackMessages.map((msg) =>
+        maybePostSlack(slack, config.slackChannel, db, mutableState.slackDedup, msg, null),
+      ),
+    );
+    mutableState.slackDedup.lastSkipReason = null;
+  }
+}
 
 /**
  * Mutable per-instance state that persists across tick invocations.
@@ -145,25 +303,6 @@ function generateDecisionId(): string {
   return `rd_${randomUUID()}`;
 }
 
-/** File a QA gap issue via Linear when the workflow is missing, and return the resolved reason + attemptCount. */
-async function applyQaGapIssueFiling(
-  db: AnyDb,
-  linear: LinearClient | undefined,
-  repoUrl: string,
-  branch: string,
-  workflowPath: string,
-  linearTeamId: string,
-): Promise<{ finalReason: string; attemptCount: number }> {
-  if (!linear) {
-    log.error({ repoUrl, branch }, "qaCheck requires Linear client but none configured — skipping gap-issue file");
-    return { finalReason: "qa_no_workflow", attemptCount: 0 };
-  }
-  const gapResult = await tryFileQaGapIssue({
-    db, linear, repoUrl, branch, workflowPath, linearTeamId,
-  });
-  return { finalReason: gapResult.finalReason, attemptCount: gapResult.attemptCount };
-}
-
 /**
  * Execute a single release-manager decision cycle.
  *
@@ -182,6 +321,31 @@ async function applyQaGapIssueFiling(
  *
  * @param ctx - All dependencies and mutable state for this tick invocation.
  */
+// Lazy singleton — created once per process, not per tick (avoids re-importing on every call).
+const callClaude = makeCallClaude();
+
+/**
+ * Shared gap-filing step: call tryFileQaGapIssue when a Linear client is available,
+ * log an error and return a no-op result when it isn't.
+ * Eliminates the verbatim duplication between the dispatch_404 and qa_no_workflow paths.
+ */
+async function fileGapOrLog(
+  linear: LinearClient | undefined,
+  params: {
+    db: AnyDb;
+    repoUrl: string;
+    branch: string;
+    workflowPath: string;
+    linearTeamId: string;
+  },
+): Promise<{ finalReason: string; attemptCount: number }> {
+  if (!linear) {
+    log.error({ repoUrl: params.repoUrl, branch: params.branch }, "qaCheck requires Linear client but none configured — skipping gap-issue file");
+    return { finalReason: "qa_no_workflow", attemptCount: 0 };
+  }
+  return tryFileQaGapIssue({ ...params, linear, callClaude });
+}
+
 export async function tick(ctx: TickContext): Promise<void> {
   const { config, db, octokit, linear, repoUrl, branch, isLicensed, slack, mutableState } = ctx;
   const slackChannel = config.slackChannel;
@@ -196,6 +360,15 @@ export async function tick(ctx: TickContext): Promise<void> {
   if (Date.now() < mutableState.pausedUntilTs) {
     log.info({ pausedUntilTs: mutableState.pausedUntilTs }, "scheduler paused (via /release skip) — skipping tick");
     return;
+  }
+
+  // Retry any fire-pending rows before collecting state so that a successfully
+  // retried tag is reflected in the state query (preventing spurious
+  // manual_tag_detected on the same tick).
+  try {
+    await sweepFirePendingRows(ctx);
+  } catch (sweepErr) {
+    log.error({ err: sweepErr, repoUrl, branch }, "sweepFirePendingRows failed — continuing tick");
   }
 
   let state;
@@ -221,7 +394,7 @@ export async function tick(ctx: TickContext): Promise<void> {
 
   // 1. Manual-tag detection — re-baseline counters.
   if (state.manualTagDetected) {
-    const id = generateDecisionId();
+    const id = generateReleaseDecisionId();
     await persistDecision(db, repoUrl, branch, {
       id,
       decision: "skip",
@@ -281,7 +454,7 @@ export async function tick(ctx: TickContext): Promise<void> {
               qaRunCompletedEvent({
                 repoUrl, branch,
                 runId: state.qaRun.runId,
-                conclusion: polled.conclusion as any,
+                conclusion: polled.conclusion as "success" | "failure" | "cancelled" | "timed_out" | "action_required" | "skipped" | "stale" | "neutral",
                 durationMs: polled.durationMs,
               }),
             );
@@ -306,7 +479,7 @@ export async function tick(ctx: TickContext): Promise<void> {
   );
 
   if (result.kind === "skip") {
-    const id = generateDecisionId();
+    const id = generateReleaseDecisionId();
 
     // Compute attempt count for retry handling on qa_dispatch_error path.
     let attemptCount = 0;
@@ -315,40 +488,52 @@ export async function tick(ctx: TickContext): Promise<void> {
     let finalReason = result.reason;
 
     if (result.qaActionNeeded?.reason === "qa_needs_trigger") {
+      // Parallelize: DB read (attempt count) and GitHub API call (dispatch) are independent.
       // Look up the highest attempt count across all qa_needs_trigger rows for this
       // (branch, sha) pair. Using MAX instead of ORDER BY + LIMIT 1 to be stable
       // when multiple rows share the same decidedAt timestamp.
-      attemptCount = await getMaxAttemptCountForReason(
-        db, repoUrl, branch, "qa_needs_trigger", state.headSha,
-      );
-
-      const dispatch = await triggerWorkflow({
-        octokit, db, owner, repo, repoUrl, branch,
-        workflow: config.triggers.qaCheck!.workflow,
-        ref: state.headSha,
-        inputs: config.triggers.qaCheck!.workflowInputs,
-      });
+      const { owner, repo } = parseRepoFromUrl(repoUrl);
+      const [prevAttemptCount, dispatch] = await Promise.all([
+        getMaxAttemptCountForReason(db, repoUrl, branch, "qa_needs_trigger", state.headSha),
+        triggerWorkflow({
+          octokit, db, owner, repo, repoUrl, branch,
+          workflow: config.triggers.qaCheck!.workflow,
+          ref: state.headSha,
+          inputs: config.triggers.qaCheck!.workflowInputs,
+        }),
+      ]);
+      attemptCount = prevAttemptCount;
       if (dispatch.kind === "ok") {
+        // BEC-146: clear prior failure rows for this SHA so MAX(attemptCount)
+        // naturally returns 0 if the run subsequently fails and we re-enter
+        // the dispatch path on a later tick.
+        await clearFailureRowsForSha(db, repoUrl, branch, "qa_needs_trigger", state.headSha);
         attemptCount = 0; // reset on successful dispatch
         qaRunId = dispatch.runId;
         qaRunSha = state.headSha;
       } else if (dispatch.kind === "dispatch_404") {
         // Workflow disappeared between state cache and dispatch — drop into gap-issue path.
         finalReason = "qa_no_workflow";
-        ({ finalReason, attemptCount } = await applyQaGapIssueFiling(
-          db, linear, repoUrl, branch,
-          config.triggers.qaCheck!.workflow,
-          config.triggers.qaCheck!.linearTeamId,
-        ));
+        ({ finalReason, attemptCount } = await fileGapOrLog(linear, {
+          db, repoUrl, branch,
+          workflowPath: config.triggers.qaCheck!.workflow,
+          linearTeamId: config.triggers.qaCheck!.linearTeamId,
+        }));
       } else if (dispatch.kind === "dispatch_422") {
         finalReason = "qa_dispatch_error";
-        attemptCount = 99; // permanent skip — workflow misconfigured, retrying won't help
+        attemptCount = PERMANENT_SKIP_ATTEMPT_COUNT; // permanent skip — workflow misconfigured, retrying won't help
       } else if (dispatch.kind === "dispatch_pending") {
-        // GitHub eventual-consistency window. Don't count against retry budget; next tick
-        // will re-evaluate and the run should be findable by then.
-        // Tag with qaRunSha so the per-SHA retry counter query can find these rows.
+        // GitHub eventual-consistency window. The HTTP dispatch DID succeed (204 OK), so
+        // reset the retry counter to 0 — a successful dispatch is not a failure.
+        // BEC-146: clear prior failure rows for this SHA so MAX(attemptCount) returns 0
+        // for subsequent ticks. Without this, old dispatch_error rows (attemptCount=1,2)
+        // would cause MAX to keep returning their high-water mark and the next failure
+        // would immediately escalate to qa_dispatch_error, bypassing the retry budget.
+        await clearFailureRowsForSha(db, repoUrl, branch, "qa_needs_trigger", state.headSha);
+        attemptCount = 0;
+        // Tag with qaRunSha so the per-SHA retry counter query can find this row.
         qaRunSha = state.headSha;
-        // attemptCount stays as-is; finalReason stays as "qa_needs_trigger" for next tick to retry.
+        // finalReason stays as "qa_needs_trigger" for next tick to retry.
       } else {
         // dispatch_error — increment attempt counter.
         // Tag with qaRunSha so the per-SHA retry counter query can find these rows.
@@ -359,11 +544,11 @@ export async function tick(ctx: TickContext): Promise<void> {
         }
       }
     } else if (result.qaActionNeeded?.reason === "qa_no_workflow") {
-      ({ finalReason, attemptCount } = await applyQaGapIssueFiling(
-        db, linear, repoUrl, branch,
-        config.triggers.qaCheck!.workflow,
-        config.triggers.qaCheck!.linearTeamId,
-      ));
+      ({ finalReason, attemptCount } = await fileGapOrLog(linear, {
+        db, repoUrl, branch,
+        workflowPath: config.triggers.qaCheck!.workflow,
+        linearTeamId: config.triggers.qaCheck!.linearTeamId,
+      }));
     }
 
     if (result.qaActionNeeded?.reason === "qa_timed_out" && !result.qaActionNeeded.pass && state.qaRun) {
@@ -408,7 +593,7 @@ export async function tick(ctx: TickContext): Promise<void> {
   }
 
   if (result.kind === "awaiting-approval") {
-    const id = generateDecisionId();
+    const id = generateReleaseDecisionId();
     await persistDecision(db, repoUrl, branch, {
       id,
       decision: "awaiting-approval",
@@ -425,10 +610,36 @@ export async function tick(ctx: TickContext): Promise<void> {
     // Always post on first transition to awaiting-approval (bypass dedup).
     // Reset lastSkipReason so a subsequent regular-skip will re-post.
     mutableState.slackDedup.lastSkipReason = null;
+    const approvalText = `:hourglass_flowing_sand: Release ready for *${repoUrl}* (${branch}): bumping ${proposedVersion} (${state.mergedCommitsSinceLastTag} commits since last tag). Click Approve or run \`/release approve\` to fire.`;
+    // BEC-142: Block Kit message with interactive Approve/Skip buttons.
+    const approvalBlocks = [
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: approvalText },
+      },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "✅ Approve", emoji: true },
+            action_id: RELEASE_APPROVE_ACTION_ID,
+            style: "primary",
+          },
+          {
+            type: "button",
+            text: { type: "plain_text", text: "⏭ Skip", emoji: true },
+            action_id: RELEASE_SKIP_ACTION_ID,
+            value: "Skipped via button",
+          },
+        ],
+      },
+    ];
     await maybePostSlack(
       slack, slackChannel, db, mutableState.slackDedup,
-      `:hourglass_flowing_sand: Release ready for *${repoUrl}* (${branch}): bumping ${proposedVersion} (${state.mergedCommitsSinceLastTag} commits since last tag). Run \`/release approve\` to fire.`,
+      approvalText,
       null,
+      approvalBlocks,
     );
     return;
   }
@@ -462,29 +673,23 @@ export async function tick(ctx: TickContext): Promise<void> {
   }
 
   if (githubResult.kind === "release_create_failed") {
-    // Tag was created; release-creation failed. Write a single skip row with the
-    // partial-fire details so an operator can see what happened and clean up the
-    // orphaned tag manually. v1 does NOT retry release-creation across ticks
-    // (the tag is now committed, so the next tick would hit `tag_exists` and
-    // skip again — see plan §"Known v1 simplifications"). Proper retry is a v2
-    // feature requiring a tick-start sweep that calls only `createRelease` for
-    // matching fire-pending rows.
+    // Tag was created but release-creation failed. Write a fire-pending row so
+    // the tick-start sweep can retry createRelease on subsequent ticks (up to
+    // MAX_FIRE_PENDING_ATTEMPTS total). No releasePartialEvent is emitted here;
+    // that fires only after all retry attempts are exhausted.
     await persistDecision(db, repoUrl, branch, {
       id,
-      decision: "skip",
+      decision: "fire-pending",
       reason: "release_create_failed",
       triggerStateJson,
       proposedVersion,
       firedTag: proposedVersion,
       firedSha: state.headSha,
+      attemptCount: 1,
     });
-    void logAuditEventUnchecked(
-      db,
-      releasePartialEvent({ repoUrl, branch, tag: proposedVersion, attemptCount: 1 }),
-    );
-    log.error(
+    log.warn(
       { repoUrl, branch, tag: proposedVersion, msg: githubResult.message },
-      "release create failed — tag exists in GitHub but release page not created; manual cleanup required",
+      "release create failed after tag was created — will retry release creation next tick",
     );
     return;
   }

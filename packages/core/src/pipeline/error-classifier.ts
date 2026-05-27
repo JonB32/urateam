@@ -14,6 +14,10 @@ const TRANSIENT_PATTERNS = [
   /network.?timeout/i,
   /fetch failed/i,
   /unable to access/i,
+  // BEC-268: session-ID collision — SDK registered the ID before writing any
+  // JSONL; executor minted a fresh UUID and marks the run retriable so the
+  // recovery loop retries without hitting the same wall.
+  /session-id-collision-recovered/i,
 ];
 
 /**

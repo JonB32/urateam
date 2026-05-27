@@ -143,6 +143,11 @@ describe("/users routes (licensed)", () => {
 });
 
 describe("/users routes (unlicensed)", () => {
+  beforeEach(async () => {
+    // Ensure license is not set before the unlicensed test runs
+    await restoreLicense();
+  });
+
   it("GET /users → 404", async () => {
     const res = await appWith("admin").request("/users");
     expect(res.status).toBe(404);

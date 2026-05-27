@@ -7,7 +7,7 @@ urateam stack in a single command. It handles:
 2. **GitHub App creation** — manifest flow: opens your browser, captures
    credentials via a local callback server, no manual copy-paste.
 3. **Linear webhook registration** — registers the webhook via GraphQL.
-4. **File generation** — writes `.env` and `docker-compose.dogfood.yml`.
+4. **File generation** — writes `.env` and `docker-compose.yml`.
 5. **Reverse-proxy config** — writes a `Caddyfile` or prints the `cloudflared` command.
 6. **Validation** — optionally POSTs a synthetic webhook to confirm the stack is live.
 
@@ -40,6 +40,10 @@ npx @urateam/cli bootstrap
 | `--output-dir <dir>` | Directory to write generated files | current directory |
 | `--port <port>` | Webhook server port for validation | `3000` |
 
+> **urateam contributors only:** `ura bootstrap --dogfood` emits the internal
+> soak harness filenames (`docker-compose.dogfood.yml`). This flag is not shown
+> in `--help` and is not intended for consumer deployments.
+
 ## What Gets Generated
 
 ### `.env`
@@ -70,7 +74,7 @@ CLAUDE_CODE_OAUTH_TOKEN=...
 
 See [`deploy/CLAUDE_AUTH.md`](./CLAUDE_AUTH.md) for details on which path to choose.
 
-### `docker-compose.dogfood.yml`
+### `docker-compose.yml`
 
 Two services sharing the `.env` file:
 
@@ -80,7 +84,7 @@ Two services sharing the `.env` file:
 Start the stack:
 
 ```bash
-docker compose -f docker-compose.dogfood.yml up -d
+docker compose up -d
 ```
 
 ### `Caddyfile` (when `--proxy caddy`)
@@ -112,7 +116,7 @@ Then configure your domain in the Cloudflare Zero Trust dashboard.
 ## After Bootstrap
 
 1. Edit `.env` and add your Claude credential (see above).
-2. `docker compose -f docker-compose.dogfood.yml up -d`
+2. `docker compose up -d`
 3. Set your Linear webhook URL to `https://<domain>/webhooks/linear`.
 4. Move a Linear issue to **Todo** — the pipeline runs automatically.
 
@@ -139,7 +143,7 @@ Pass `--validate` to confirm the webhook server is responding after you bring
 the stack up:
 
 ```bash
-docker compose -f docker-compose.dogfood.yml up -d
+docker compose up -d
 ura bootstrap --skip-github-app --skip-linear --validate
 ```
 

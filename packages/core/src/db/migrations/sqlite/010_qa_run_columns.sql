@@ -1,9 +1,9 @@
--- BEC-136: QA agent — track in-flight workflow runs on the release_decisions table.
-
-ALTER TABLE release_decisions ADD COLUMN qa_run_id INTEGER;
-ALTER TABLE release_decisions ADD COLUMN qa_run_sha TEXT;
-
--- Index for collectState's qaRun lookup: fastest path for "most recent decision with non-null qa_run_id"
-CREATE INDEX IF NOT EXISTS idx_release_decisions_qa_run_id
-  ON release_decisions(repo_url, branch, qa_run_id, decided_at DESC)
-  WHERE qa_run_id IS NOT NULL;
+-- BEC-149: This migration was renumbered to 011_qa_run_columns to fix cascading
+-- prefix collision introduced when 007_sso was renumbered to 008_sso.
+--
+-- This file is retained for git history only. The migrator skips it based on
+-- the SQLITE_MIGRATION_RENAMES map in migrator.ts, which also renames any
+-- existing "010_qa_run_columns" entries in schema_migrations to
+-- "011_qa_run_columns" so that existing deployments do not re-run this migration.
+--
+-- Active migration: packages/core/src/db/migrations/sqlite/011_qa_run_columns.sql

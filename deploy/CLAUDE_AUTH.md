@@ -45,13 +45,23 @@ CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-...
 > **Why not just mount `~/.config/claude/` like before?**
 > That directory holds the interactive-session credential from `claude login`. It silently expires every ~7 days. Your next webhook hits a 401, the pipeline fails, the Linear ticket gets marked failed, and you have to manually re-auth. The `setup-token` flow exists specifically to avoid this for headless deployments.
 
+### Monitoring — expiry detection (BEC-237 / BEC-244)
+
+Unlike `ANTHROPIC_API_KEY` (a static key that never expires on its own), OAuth tokens **can be revoked or expire**. The AuthMonitor probes `CLAUDE_CODE_OAUTH_TOKEN` validity every 6 hours by making a **real API call** (`claude -p "ok"`):
+
+- **On expiry/revocation**: a `claude.auth_expired` audit event fires with `authMethod: "oauth-token"` in the payload, and a Slack alert posts to your error channel (if configured).
+- The alert instructs the operator to run `claude setup-token` and restart the container — since the token lives in an env var, a new value requires a container restart.
+- To fix: regenerate with `claude setup-token`, update `CLAUDE_CODE_OAUTH_TOKEN` in your `.env`, and restart the container.
+
+> **Important:** `claude auth status` is **not** a reliable health check — it only inspects whether a credential is locally present, not whether it is accepted by the Anthropic API. A revoked or expired token will pass `claude auth status` while every pipeline stage fails with `401 Invalid authentication credentials`. The AuthMonitor uses a real API call specifically to avoid this false-positive (BEC-244).
+
 ---
 
 ## Option 3 — Local `claude login` session (dev only)
 
 Only recommended for local development. Run `claude login` in the same shell or container where `ura dev` runs. The credentials are stored in `~/.config/claude/`.
 
-This path is gated by `preflightClaudeAuth` (`packages/cli/src/lib/preflight-claude-auth.ts`), which checks `claude auth status` at startup and refuses to boot if expired. It does **not** monitor mid-run expiry — if the session expires while a pipeline is running, that run will fail.
+This path is gated by `preflightClaudeAuth` (`packages/cli/src/lib/preflight-claude-auth.ts`), which uses `isClaudeAuthValid` (a real API probe) at startup and refuses to boot if expired. It does **not** monitor mid-run expiry — if the session expires while a pipeline is running, that run will fail.
 
 If you must use this path in production (e.g., legacy deployment), mount the credentials directory as a Docker volume:
 
@@ -83,4 +93,4 @@ After deploy, check the runner logs for a successful Claude call (any pipeline r
 If something's wrong:
 - API key invalid → `401 Unauthorized` errors with the key visible (redacted) in logs
 - OAuth token invalid → same `401` shape; regenerate with `claude setup-token`
-- Session expired → `preflightClaudeAuth` should have caught this at boot; if it didn't, file an issue
+- Session expired → `preflightClaudeAuth` should have caught this at boot (it runs a real API probe, not `claude auth status`); if it didn't, file an issue

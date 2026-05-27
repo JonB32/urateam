@@ -17,6 +17,17 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+### Changed
+- **BEC-267: `ura bootstrap` now emits consumer-named artifacts** — `docker-compose.yml` and `.env` (no "dogfood" in filenames). Previously the wizard wrote `docker-compose.dogfood.yml`, which confused self-hosted operators who aren't running urateam's internal QA soak.
+  - **Migration:** existing deployments are unaffected (the Docker stack keeps running). If you re-run `ura bootstrap`, it will detect the legacy `docker-compose.dogfood.yml` and print a one-line `cp` migration command. To migrate manually: `cp docker-compose.dogfood.yml docker-compose.yml && docker compose up -d`.
+  - **urateam contributors:** `ura bootstrap --dogfood` (hidden flag, not in `--help`) still emits the dogfood-named files for the internal soak harness.
+
+### Added (OSS+)
+- **BEC-203: Sentry + CloudWatch webhook integrations** — two new observability webhook integrations that bridge external alerting systems to the urateam autonomous pipeline:
+  - **Sentry integration** (`packages/core/src/integrations/sentry.ts`): `POST /webhooks/sentry` handler verifies `X-Sentry-Hook-Signature` HMAC-SHA256, parses Sentry issue alert payloads (stack trace, breadcrumbs, affected files, triggered rule), maps Sentry level (`critical/error/warning/info`) to Linear priority (`1/2/3/4`), and creates a Linear ticket in Triage state with `bug` + `auto-implement` labels. Idempotent: queries Linear for existing `[Sentry#<id>]`-prefixed ticket within a configurable window (default 24h).
+  - **CloudWatch integration** (`packages/core/src/integrations/cloudwatch.ts`): `POST /webhooks/cloudwatch` handler processes AWS SNS messages. Auto-confirms `SubscriptionConfirmation` by fetching `SubscribeURL`. Verifies `Notification` messages via RSA-SHA1/SHA256 using the cert at `SigningCertURL` (must be `*.amazonaws.com`; cert is cached). Parses CloudWatch alarm state changes, extracts alarm name, metric values, state change details, and generates a CloudWatch Logs Insights link. Only `ALARM` state transitions create tickets. Idempotent: queries Linear for existing `[CW:<alarm-name>]`-prefixed ticket within the window.
+  - Both handlers are mounted in `createApp()` when `sentryIntegration` / `cloudwatchIntegration` is set in `ServerConfig`.
+  - Setup docs: `deploy/SENTRY_INTEGRATION_SETUP.md`, `deploy/CLOUDWATCH_INTEGRATION_SETUP.md`.
 ### Added (BEC-206)
 - **Complete GitLab parity**: `repo/gitlab.ts:addMRComment()` is now wired into all comment-posting code paths in `runner.ts`. The `repoConfig.provider !== "gitlab"` short-circuit guards on cost-summary and change-summary comments have been removed. GitLab users now receive per-PR cost summaries (opt-in via `URATEAM_PR_COST_SUMMARY=true`) and change-summary comments on review-feedback runs, identical to GitHub.
 - **GitLab automerge** (`merge_when_pipeline_succeeds`): `runner.ts` now calls the new `mergeMRWhenPipelineSucceeds()` function when `autoMerge: true` and `repoConfig.provider === "gitlab"`. The GitLab API queues the MR for merge once all CI pipelines succeed.
@@ -27,6 +38,231 @@ notes call out when a change affects only a single package.
 - **`feedback-pipeline.ts` updated**: Bitbucket clone URLs are now authenticated via `buildBitbucketAuthenticatedUrl()` when `bitbucketConfig` is configured.
 - **`ServerConfig` additions**: `bitbucket?: BitbucketConfig`, `gitlabWebhookToken?: string`, `bitbucketWebhookSecret?: string`. Both new handlers are mounted automatically when their respective config fields are set.
 - **Provider enum expanded**: `RepoConfig.provider` now accepts `"github" | "gitlab" | "bitbucket"`.
+
+## [0.1.84] — 2026-05-27
+
+Bumps:
+- `@urateam/core`: 0.1.69 → 0.1.70
+- `@urateam/cli`: 0.1.71 → 0.1.72
+- `@urateam/dashboard`: 0.1.69 → 0.1.70
+- `create-urateam`: 0.1.72 → 0.1.73
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.83] — 2026-05-26
+
+Bumps:
+- `@urateam/core`: 0.1.68 → 0.1.69
+- `@urateam/cli`: 0.1.70 → 0.1.71
+- `@urateam/dashboard`: 0.1.68 → 0.1.69
+- `create-urateam`: 0.1.71 → 0.1.72
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.82] — 2026-05-26
+
+Bumps:
+- `@urateam/core`: 0.1.67 → 0.1.68
+- `@urateam/cli`: 0.1.69 → 0.1.70
+- `@urateam/dashboard`: 0.1.67 → 0.1.68
+- `create-urateam`: 0.1.70 → 0.1.71
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.81] — 2026-05-26
+
+Bumps:
+- `@urateam/core`: 0.1.66 → 0.1.67
+- `@urateam/cli`: 0.1.68 → 0.1.69
+- `@urateam/dashboard`: 0.1.66 → 0.1.67
+- `create-urateam`: 0.1.69 → 0.1.70
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.80] — 2026-05-25
+
+Bumps:
+- `@urateam/core`: 0.1.65 → 0.1.66
+- `@urateam/cli`: 0.1.67 → 0.1.68
+- `@urateam/dashboard`: 0.1.65 → 0.1.66
+- `create-urateam`: 0.1.68 → 0.1.69
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.79] — 2026-05-25
+
+Bumps:
+- `@urateam/core`: 0.1.64 → 0.1.65
+- `@urateam/cli`: 0.1.66 → 0.1.67
+- `@urateam/dashboard`: 0.1.64 → 0.1.65
+- `create-urateam`: 0.1.67 → 0.1.68
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.78] — 2026-05-25
+
+Bumps:
+- `@urateam/core`: 0.1.63 → 0.1.64
+- `@urateam/cli`: 0.1.65 → 0.1.66
+- `@urateam/dashboard`: 0.1.63 → 0.1.64
+- `create-urateam`: 0.1.66 → 0.1.67
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.77] — 2026-05-25
+
+Bumps:
+- `@urateam/core`: 0.1.62 → 0.1.63
+- `@urateam/cli`: 0.1.64 → 0.1.65
+- `@urateam/dashboard`: 0.1.62 → 0.1.63
+- `create-urateam`: 0.1.65 → 0.1.66
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.76] — 2026-05-24
+
+Bumps:
+- `@urateam/core`: 0.1.61 → 0.1.62
+- `@urateam/cli`: 0.1.63 → 0.1.64
+- `@urateam/dashboard`: 0.1.61 → 0.1.62
+- `create-urateam`: 0.1.64 → 0.1.65
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.75] — 2026-05-24
+
+Bumps:
+- `@urateam/core`: 0.1.60 → 0.1.61
+- `@urateam/cli`: 0.1.62 → 0.1.63
+- `@urateam/dashboard`: 0.1.60 → 0.1.61
+- `create-urateam`: 0.1.63 → 0.1.64
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.74] — 2026-05-24
+
+Bumps:
+- `@urateam/core`: 0.1.59 → 0.1.60
+- `@urateam/cli`: 0.1.61 → 0.1.62
+- `@urateam/dashboard`: 0.1.59 → 0.1.60
+- `create-urateam`: 0.1.62 → 0.1.63
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.73] — 2026-05-24
+
+Bumps:
+- `@urateam/core`: 0.1.58 → 0.1.59
+- `@urateam/cli`: 0.1.60 → 0.1.61
+- `@urateam/dashboard`: 0.1.58 → 0.1.59
+- `create-urateam`: 0.1.61 → 0.1.62
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.72] — 2026-05-23
+
+Bumps:
+- `@urateam/core`: 0.1.57 → 0.1.58
+- `@urateam/cli`: 0.1.59 → 0.1.60
+- `@urateam/dashboard`: 0.1.57 → 0.1.58
+- `create-urateam`: 0.1.60 → 0.1.61
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.71] — 2026-05-23
+
+Bumps:
+- `@urateam/core`: 0.1.56 → 0.1.57
+- `@urateam/cli`: 0.1.58 → 0.1.59
+- `@urateam/dashboard`: 0.1.56 → 0.1.57
+- `create-urateam`: 0.1.59 → 0.1.60
+
+<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+## [0.1.70] — 2026-05-22
+
+Bumps:
+- `@urateam/core`: 0.1.55 → 0.1.56
+- `@urateam/cli`: 0.1.57 → 0.1.58
+- `@urateam/dashboard`: 0.1.55 → 0.1.56
+- `create-urateam`: 0.1.58 → 0.1.59
+
+### Added
+- **BEC-227 Phase 4 — surgical review-fix + decision artifact** (#357). Implement agent emits a `<decisions>` block parsed to the new `pipeline_run_decisions` table; the review-fix loop resumes the per-run SDK session with a focused findings-plus-decisions prompt instead of re-running the full implement template. New audit event `pipeline.surgical_review_fix` (canonical count → 57).
+- **`auth-monitor` now detects `CLAUDE_CODE_OAUTH_TOKEN` expiry** (#362, BEC-237). The monitor previously skipped all env-var auth paths; it now probes whenever an OAuth token is set (only a bare `ANTHROPIC_API_KEY` static key is skipped), so `claude.auth_expired` fires with an `authMethod` discriminator.
+- **Slack `reactions:read` scope probe** (#361, BEC-238). `PmSlackNotifier.probeReactionsScope()` runs once at startup and logs an error if the scope is missing; per-tick `missing_scope` warnings are deduped.
+
+### Fixed
+- **Dashboard rate limiter counted all requests, not just failed auth** — normal HTMX traversal tripped "Too Many Requests" within a couple of clicks. Now counts only HTTP 401 responses per IP.
+- **`ura retry` silently no-op'd for `retriable` runs** (#353, BEC-229) — `runner.resume` now accepts both `paused` and `retriable`, and the dashboard retry route passes `issueId` (not the run PK).
+- **Push-queue rebase recovery** (#356, BEC-233) — aborts an in-progress rebase before the conflict-resolution implement pass, so the worktree HEAD is on the branch ref before auto-commits land.
+- **QA retry counter false escalation** (#335, BEC-146) — clears prior failure rows on dispatch reset so a successful dispatch genuinely resets the counter.
+- **Resume-payload validation** (#332, BEC-192) — replaces hand-rolled property checks with a Zod schema; pre-BEC-192 paused runs degrade gracefully.
+- **Linear stuck in "In Review" after manual PR merge** (#333, BEC-186) — `pull_request.closed` + `merged:true` now transitions the issue to Done.
+- **PM conflict detection blind to in-flight runs** (#363, BEC-239) — falls back to the run's worktree when its branch is not yet pushed.
+- **pnpm provisioned in the dogfood image** (BEC-240) — agents no longer fall back to `npm` and break the pnpm-workspace toolchain.
+- **QA Agent collectState partial-index query** (#338, BEC-145) and **migration prefix renumbering** (#334, BEC-149).
+
+### Chore
+- **`resolveSessionOpts` helper** (#342, BEC-228) extracted from `executor.ts` + `deep-review.ts`, reconciled with the BEC-231 on-disk session-shape logic.
+
+## [0.1.69] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.54 → 0.1.55
+- `@urateam/cli`: 0.1.56 → 0.1.57
+- `@urateam/dashboard`: 0.1.54 → 0.1.55
+- `create-urateam`: 0.1.57 → 0.1.58
+
+### Fixed
+- **Dogfood container: install `bash` + set `SHELL=/bin/bash`** (#351, BEC-234): two-line Dockerfile change. The Alpine base image ships only `/bin/sh` (busybox) and leaves `SHELL` empty. The Claude Agent SDK's "no suitable shell" check uses `process.env.SHELL` to decide whether to run Bash tool calls, and refuses to invoke any when it's empty. Effect: **every Bash tool call across every pipeline run silently failed** — agents ran on Read/Edit/Grep only, couldn't run tests, builds, git inspection, or any shell-mediated work. Discovered by auditing the BEC-231 run `Mvl1OtDQKbrHQMgGkwenS` JSONL transcript: 11/11 Bash attempts errored with "No suitable shell found ...", including `npx vitest`, `git status`, `git log`, `pnpm build`. The agent compensated with inspection-only verification (no real test execution), almost certainly contributing to several historical "Reached maximum number of turns" failures on the currently-circuit-broken issues. After this lands, the next pipeline run's transcript should show successful Bash tool results.
+
+## [0.1.68] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.53 → 0.1.54
+- `@urateam/cli`: 0.1.55 → 0.1.56
+- `@urateam/dashboard`: 0.1.53 → 0.1.54
+- `create-urateam`: 0.1.56 → 0.1.57
+
+### Changed
+- **Agent session continuity: Phase 3 — default ON** (#349, BEC-227): the Phase 2 dogfood soak verified session resume works end-to-end (with the BEC-231 lazy-creation fix in v0.1.66 and the BEC-232 path-encoding fix in v0.1.67). Observable signal from BEC-232's run: 1 `agent_session_created` + 3 `agent_session_resumed` events across implement/review/implement stages, `priorMessageCount: 35` on the first resume — full continuity, no synthetic handoff blob. This release flips the default from opt-in to opt-out. The new env var is `URATEAM_DISABLE_AGENT_SESSION_RESUME=true` (strict equality, matching BEC-218 precedent). The Phase-1/2 var `URATEAM_ENABLE_AGENT_SESSION_RESUME` is ignored — operators with it set in their `.env` see no behavior change since the new default is on; operators who want the legacy handoff path can set `URATEAM_DISABLE_AGENT_SESSION_RESUME=true`.
+
+## [0.1.67] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.52 → 0.1.53
+- `@urateam/cli`: 0.1.54 → 0.1.55
+- `@urateam/dashboard`: 0.1.52 → 0.1.53
+- `create-urateam`: 0.1.55 → 0.1.56
+
+### Fixed
+- **Agent session continuity: encodeCwd path encoding** (#346, BEC-232): one-line fix to `session-store.ts:encodeCwd()`. The Claude Agent SDK writes JSONL transcripts to a directory whose name is the cwd with ALL path separators (including the leading `/`) replaced with `-` — producing a LEADING-DASH directory like `-home-ura-data-runs-<run>-worktree`. The previous urateam implementation stripped the leading `/` before replacing, producing `home-...` (no leading dash). `transcriptExists()` therefore looked at the wrong path and returned false for every absolute cwd, making the BEC-231 lazy-creation fix (v0.1.66) effectively moot — every BEC-227 session-resume attempt fell back to legacy handoff despite the JSONLs being correctly written by the SDK. Verified on the dogfood instance with 268KB transcript files present at the leading-dash paths. Combined with v0.1.66, this completes the BEC-227 session-resume wiring; post-deploy the next pipeline run should produce ≥1 `pipeline.agent_session_resumed` audit event.
+
+## [0.1.66] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.51 → 0.1.52
+- `@urateam/cli`: 0.1.53 → 0.1.54
+- `@urateam/dashboard`: 0.1.51 → 0.1.52
+- `create-urateam`: 0.1.54 → 0.1.55
+
+### Fixed
+- **Agent session continuity: lazy session creation** (#343, BEC-231): the BEC-227 Phase 1 implementation used an in-memory `hasInitiatedSession` flag that flipped after the first resumable stage's CALL, regardless of whether the SDK actually wrote any JSONL message. When stage 1 failed before any SDK message (the auth 401 hit during Phase 2 soak, MCP init failure, pre-stream stall, container SIGTERM), every subsequent stage tried `query({ resume: sessionId })`, found the JSONL absent, and dropped to legacy fresh-session-no-opts. The session was lost for the run's lifetime — confirmed on BEC-228 with **1** `agent_session_created`, **8** `agent_session_missing_fallback`, **0** `agent_session_resumed` events. Fix: `executeStage()` now derives the session shape from `transcriptExists()` on every entry (JSONL present → `resume:`; JSONL absent → `sessionId:` to create or retry creation). The `isFirstResumableStage` field stays on `ExecuteStageContext` for backwards compat but its value is now ignored. The `missing_fallback` audit event is no longer emitted from the executor; the new logic always picks the correct shape based on on-disk state. New `session-lazy-creation.test.ts` covers both directions (false flag + missing JSONL → create; true flag + present JSONL → resume).
+
+## [0.1.65] — 2026-05-20
+
+Bumps:
+- `@urateam/core`: 0.1.50 → 0.1.51
+- `@urateam/cli`: 0.1.52 → 0.1.53
+- `@urateam/dashboard`: 0.1.50 → 0.1.51
+- `create-urateam`: 0.1.53 → 0.1.54
+
+### Added
+- **Agent session continuity — Phase 1** (#339, BEC-227): Claude Agent SDK session resume across pipeline stages, gated behind `URATEAM_ENABLE_AGENT_SESSION_RESUME=true` (default off). When enabled, each pipeline run mints one `agent_session_id = randomUUID()` and threads it through every `executeStage()` call. The first resumable stage creates the SDK session; subsequent stages resume it. Implement #2 in RALPH iteration 2 now sees implement #1's full transcript (tool use, edits, reasoning) instead of a synthetic handoff blob.
+  - New `agent_session_id` column on `pipeline_runs` (nullable; null = legacy / flag-off)
+  - New `isResumable(stage, model)` policy module (`executor/session-policy.ts`) — validator + Haiku ralph-check + non-Claude OpenRouter fanout providers always run fresh
+  - New `transcriptPath` / `transcriptExists` helpers (`executor/session-store.ts`)
+  - New `urateam-dogfood-agent-sessions` Docker volume mounted at `/home/ura/.claude/projects` — without this, retriable resumes silently lose memory across container restarts
+  - Boot-time `checkSessionVolume()` warning when the projects dir is missing or not writeable
+  - Fallback path: if JSONL transcript file is absent, fall back to legacy handoff + emit `pipeline.agent_session_missing_fallback` audit event
+  - Validator (`validate.ts`) gains `runMode: "first-resumed" | "resumed" | "fallback"` — skips entirely on `"resumed"` since the next agent IS the prior agent
+  - RALPH iteration suppresses the `<previous-stage-context>` XML block on resumed re-implements
+  - Dashboard run-detail page displays the truncated session ID with a link to a new `GET /runs/:id/transcript` viewer (renders the SDK `getSessionMessages()` output)
+  - 4 new audit event types: `pipeline.agent_session_created`, `pipeline.agent_session_resumed`, `pipeline.agent_session_missing_fallback`, `system.session_volume_warning`. Canonical count 52 → 56.
+- **Cache booster** (Track C-1): `excludeDynamicSections: true` on the `claude_code` SDK `systemPrompt` preset — ON for every stage regardless of resume state. Strips per-session cwd/git-status from the cached prefix, lifting cache hit rate from ~95% toward 99%. Zero behavioral risk.
+
+### Changed
+- **`PM_AGENT_STUCK_RUN_AGE_MIN` default raised 60 → 120 minutes** (BEC-227 / BEC-184 tuning): real RALPH-iterated implementation work routinely takes 60-90 min, and the prior 60-min default produced false-positive reaps on healthy long runs (observed during BEC-192 v0.1.63 verification). The env var override is still respected.
+
+### Rollout note
+Phase 1 ships the code with the flag default `false`. Phase 2 is a dogfood soak (operator sets `URATEAM_ENABLE_AGENT_SESSION_RESUME=true` in `.env.dogfood`); Phase 3 flips the default in code; Phase 4 adds Track B (surgical review-fix) + Track D (decision artifact). See `docs/superpowers/specs/2026-05-19-agent-session-continuity-design.md` for the full rollout plan.
 
 ## [0.1.64] — 2026-05-18
 
@@ -334,7 +570,8 @@ Bumps:
 - **`deploy/CLAUDE_AUTH.md`** ([#248](https://github.com/JonB32/urateam/pull/248)) — new guide covering the three Claude auth paths (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` via `claude setup-token`, and the local CLI session) with a recommendation matrix. Surfaces the long-lived programmatic OAuth token flow that we weren't previously documenting.
 - **CLAUDE.md additions** — new Claude Authentication subsection + new "Codebase Optimization Pass — In Flight" section enumerating BEC-187..207 and listing known limitations contributors should not compound.
 
-<!-- TODO: replace with ### Added / ### Fixed / ### Chore sections describing this release. -->
+### Fixed (OSS+)
+- **BEC-186** — Linear issues whose PRs were manually merged (or merged via GitHub's auto-merge-when-ready) no longer stay stuck in "In Review" indefinitely. The GitHub webhook handler now handles `pull_request.closed` with `merged: true`, looks up the originating pipeline run by PR URL or branch, marks `pipeline_runs.auto_merged = true` in the DB, and calls `notifier.onPRMerged()` which transitions the Linear issue to Done and posts a brief "PR merged" comment. Idempotent: replayed webhooks or re-deliveries are no-ops (the DB `auto_merged` flag gates the notification). The `notifier` is wired into `createGitHubWebhookHandler` from `server.ts` so all deployments with `githubWebhookSecret` configured pick this up automatically.
 ## [0.1.44] — 2026-05-11
 
 Bumps:

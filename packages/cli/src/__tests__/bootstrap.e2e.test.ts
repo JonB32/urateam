@@ -76,12 +76,12 @@ describe("Bootstrap e2e — file generation", () => {
     expect(content).toContain("\\n");
   });
 
-  it("generateDockerCompose writes a valid docker-compose.dogfood.yml", async () => {
+  it("generateDockerCompose writes a valid docker-compose.yml in consumer mode (default)", async () => {
     const ctx = makeCtx();
     await generateDockerCompose(ctx, tmpDir);
 
     const content = await fs.readFile(
-      path.join(tmpDir, "docker-compose.dogfood.yml"),
+      path.join(tmpDir, "docker-compose.yml"),
       "utf8",
     );
 
@@ -90,17 +90,61 @@ describe("Bootstrap e2e — file generation", () => {
     expect(content).toContain("dashboard:");
     expect(content).toContain("3000:3000");
     expect(content).toContain("3001:3001");
+    expect(content).toContain("PORT=3000");
+    expect(content).toContain("DASHBOARD_PORT=3001");
     expect(content).toContain("env_file: .env");
     expect(content).toContain("urateam_data:");
     expect(content).toContain("depends_on:");
+    // Consumer mode uses plain docker compose up -d, no -f flag needed.
+    expect(content).toContain("docker compose up -d");
   });
 
-  it("generateReverseProxyConfig writes a Caddyfile for 'caddy'", async () => {
+  it("generateDockerCompose writes docker-compose.dogfood.yml in dogfood mode", async () => {
+    const ctx = makeCtx();
+    await generateDockerCompose(ctx, tmpDir, undefined, true);
+
+    const content = await fs.readFile(
+      path.join(tmpDir, "docker-compose.dogfood.yml"),
+      "utf8",
+    );
+
+    expect(content).toContain("services:");
+    expect(content).toContain("docker-compose.dogfood.yml");
+  });
+
+  it("generateDockerCompose uses custom ports from ctx", async () => {
+    const ctx = { ...makeCtx(), appPort: 3010, dashboardPort: 3011 };
+    await generateDockerCompose(ctx, tmpDir);
+
+    // Default (consumer mode) writes docker-compose.yml (BEC-267 split).
+    const content = await fs.readFile(
+      path.join(tmpDir, "docker-compose.yml"),
+      "utf8",
+    );
+
+    expect(content).toContain("3010:3000");
+    expect(content).toContain("3011:3001");
+    expect(content).toContain("PORT=3010");
+    expect(content).toContain("DASHBOARD_PORT=3011");
+    // Must NOT use defaults in host-side mappings.
+    expect(content).not.toContain('"3000:3000"');
+    expect(content).not.toContain('"3001:3001"');
+  });
+
+  it("generateReverseProxyConfig writes a Caddyfile for 'caddy' with default port", async () => {
     await generateReverseProxyConfig("hooks.example.com", "caddy", tmpDir);
 
     const content = await fs.readFile(path.join(tmpDir, "Caddyfile"), "utf8");
     expect(content).toContain("hooks.example.com");
     expect(content).toContain("reverse_proxy localhost:3000");
+  });
+
+  it("generateReverseProxyConfig writes Caddyfile with custom appPort", async () => {
+    await generateReverseProxyConfig("hooks.example.com", "caddy", tmpDir, undefined, 3010);
+
+    const content = await fs.readFile(path.join(tmpDir, "Caddyfile"), "utf8");
+    expect(content).toContain("reverse_proxy localhost:3010");
+    expect(content).not.toContain("localhost:3000");
   });
 
   it("generateReverseProxyConfig does not write a file for 'cloudflared'", async () => {
@@ -114,11 +158,24 @@ describe("Bootstrap e2e — file generation", () => {
       fs.access(path.join(tmpDir, "Caddyfile")),
     ).rejects.toThrow();
 
-    // But the cloudflared command is printed.
-    expect(logs.join("\n")).toContain("cloudflared");
+    // But the cloudflared command is printed with the default port.
+    const allLogs = logs.join("\n");
+    expect(allLogs).toContain("cloudflared");
+    expect(allLogs).toContain("localhost:3000");
   });
 
-  it("all three output files coexist in the same output directory", async () => {
+  it("generateReverseProxyConfig prints custom port for 'cloudflared'", async () => {
+    const logs: string[] = [];
+    await generateReverseProxyConfig("hooks.example.com", "cloudflared", tmpDir, {
+      log: (m) => logs.push(m),
+    }, 3010);
+
+    const allLogs = logs.join("\n");
+    expect(allLogs).toContain("localhost:3010");
+    expect(allLogs).not.toContain("localhost:3000");
+  });
+
+  it("all three output files coexist in the same output directory (consumer mode)", async () => {
     const ctx = makeCtx();
     const logs: string[] = [];
 
@@ -130,7 +187,8 @@ describe("Bootstrap e2e — file generation", () => {
 
     const files = await fs.readdir(tmpDir);
     expect(files).toContain(".env");
-    expect(files).toContain("docker-compose.dogfood.yml");
+    expect(files).toContain("docker-compose.yml");
+    expect(files).not.toContain("docker-compose.dogfood.yml");
     expect(files).toContain("Caddyfile");
   });
 });

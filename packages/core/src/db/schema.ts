@@ -48,6 +48,8 @@ export const pipelineRuns = sqliteTable("pipeline_runs", {
   issueTitle: text("issue_title").notNull(),
   pipelineKey: text("pipeline_key").notNull(),
   repoUrl: text("repo_url").notNull(),
+  /** BEC-227 — Claude Agent SDK session UUID; null = legacy/flag-off, populated = SDK session UUID for resumption. */
+  agentSessionId: text("agent_session_id"),
   branch: text("branch"),
   status: text("status").notNull(),
   startedAt: crossTimestamp("started_at")
@@ -93,6 +95,10 @@ export const stageRuns = sqliteTable("stage_runs", {
   cacheCreationInputTokens: integer("cache_creation_input_tokens").notNull().default(0),
   cacheReadInputTokens: integer("cache_read_input_tokens").notNull().default(0),
   turns: integer("turns").notNull().default(0),
+  /** Timestamp of the last progress update during stage execution. Updated
+   *  periodically by the executor's onProgress/onToolMessage callbacks.
+   *  Used by detectStageHang() to identify stuck implement stages. */
+  lastProgressAt: crossTimestamp("last_progress_at"),
   handoffArtifact: text("handoff_artifact"),
   errorMessage: text("error_message"),
 });
@@ -128,6 +134,22 @@ export const webhookDedup = sqliteTable("webhook_dedup", {
   expiresAt: crossTimestamp("expires_at").notNull(),
 });
 
+/**
+ * BEC-236 — tracks Tier-5 circuit-breaker escalations so the half-open
+ * probe can distinguish them from human/triage-added `needs-design`
+ * labels. Insert on Tier-5 escalation (idempotent via the issue_id PK),
+ * update last_probe_at + probe_attempts in selectProbeCandidates, delete
+ * on probe-recovery or manual reset.
+ */
+export const circuitBreakerState = sqliteTable("circuit_breaker_state", {
+  issueId: text("issue_id").primaryKey(),
+  escalatedAt: crossTimestamp("escalated_at")
+    .notNull()
+    .$defaultFn(() => new Date()),
+  lastProbeAt: crossTimestamp("last_probe_at"),
+  probeAttempts: integer("probe_attempts").notNull().default(0),
+});
+
 export const triageResults = sqliteTable("triage_results", {
   issueId: text("issue_id").primaryKey(),
   v2Prediction: text("v2_prediction").notNull().default("{}"),
@@ -148,6 +170,22 @@ export const pmApprovals = sqliteTable("pm_approvals", {
     .$defaultFn(() => new Date()),
   resolvedAt: crossTimestamp("resolved_at"),
 });
+
+/**
+ * BEC-227 Phase 4 / Track D. Persists the `<decisions>` JSON block emitted
+ * by the implement agent at the end of each implement turn. Multiple rows
+ * per pipeline_run when RALPH iterates (one per (iteration, stage)).
+ */
+export const pipelineRunDecisions = sqliteTable("pipeline_run_decisions", {
+  id: text("id").primaryKey(),
+  pipelineRunId: text("pipeline_run_id").notNull().references(() => pipelineRuns.id),
+  iteration: integer("iteration").notNull(),
+  stage: text("stage").notNull(),
+  payload: text("payload").notNull(),
+  createdAt: crossTimestamp("created_at").notNull(),
+});
+
+export type PipelineRunDecisionRow = typeof pipelineRunDecisions.$inferSelect;
 
 /**
  * Dedup table for budget threshold alerts. One row per (date, scope, threshold)

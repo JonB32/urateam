@@ -32,14 +32,21 @@ function normalizeGitUrl(url: string): string {
  * Uses execFile (never exec) to prevent command injection.
  *
  * Per-command execution details are logged at debug level; errors at error level.
+ * Pass expectFailure=true at call sites that intentionally catch the rejection
+ * (e.g. probing whether a branch exists) — a non-zero exit is then logged at
+ * debug instead of error so genuine failures stay visible in operator logs.
  */
-export function gitExec(args: string[], cwd: string, timeoutMs = 120_000): Promise<string> {
+export function gitExec(args: string[], cwd: string, timeoutMs = 120_000, expectFailure = false): Promise<string> {
   const log = getLog();
   log.debug({ args, cwd }, "git exec");
   return new Promise((resolve, reject) => {
     const proc = execFile("git", args, { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
-        log.error({ args, cwd, stderr: stderr?.slice(0, 200) }, `git ${args[0]} failed`);
+        if (expectFailure) {
+          log.debug({ args, cwd, stderr: stderr?.slice(0, 200) }, `git ${args[0]} failed (expected)`);
+        } else {
+          log.error({ args, cwd, stderr: stderr?.slice(0, 200) }, `git ${args[0]} failed`);
+        }
         reject(new Error(`git ${args[0]} failed: ${stderr || error.message}`));
       } else {
         log.debug({ args, cwd }, `git ${args[0]} succeeded`);
@@ -95,7 +102,7 @@ export async function cloneRepo(url: string, dir: string): Promise<void> {
     await access(dir);
     // Directory exists — check if it has the correct remote
     try {
-      const remote = await gitExec(["remote", "get-url", "origin"], dir);
+      const remote = await gitExec(["remote", "get-url", "origin"], dir, undefined, true);
       if (normalizeGitUrl(remote) === normalizeGitUrl(url)) {
         await fetchLatest(dir);
         return;
@@ -153,7 +160,7 @@ async function worktreeAddWithRetry(
   const log = getLog();
   await gitExec(["worktree", "prune"], repoDir);
   try {
-    await gitExec(["worktree", "add", ...args], repoDir);
+    await gitExec(["worktree", "add", ...args], repoDir, undefined, true);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (!msg.includes("already checked out") && !msg.includes("already used by worktree")) {
@@ -168,7 +175,7 @@ async function worktreeAddWithRetry(
     if (stalePath) {
       log.warn({ stalePath, worktreePath }, "removing stale worktree blocking branch checkout");
       try {
-        await gitExec(["worktree", "remove", stalePath, "--force"], repoDir);
+        await gitExec(["worktree", "remove", stalePath, "--force"], repoDir, undefined, true);
       } catch {
         // If git worktree remove fails, force-delete the directory
         await rm(stalePath, { recursive: true, force: true });
@@ -551,11 +558,19 @@ async function findTrackedPaths(
 }
 
 /**
+ * Split newline-delimited git output (e.g. diff --name-only, log --format=%s)
+ * into a trimmed, non-empty string array.
+ */
+export function parseGitLines(output: string): string[] {
+  return output.split("\n").map((l) => l.trim()).filter(Boolean);
+}
+
+/**
  * Parse `git status --porcelain` output into worktree-relative paths.
  * Handles renames (`R old -> new`), additions, modifications, deletions,
  * and untracked files.
  */
-function parseStatusPaths(status: string): string[] {
+export function parseStatusPaths(status: string): string[] {
   const paths: string[] = [];
   for (const line of status.split("\n")) {
     if (!line.trim()) continue;
@@ -684,15 +699,13 @@ export async function getAgentCommits(
   baseBranch: string,
 ): Promise<string[]> {
   const log = getLog();
-  const parseLogOutput = (output: string) =>
-    output.split("\n").map((l) => l.trim()).filter(Boolean);
   try {
     // Try using origin first (normal case in production)
     const output = await gitExec(
       ["log", "--format=%s", "--reverse", `origin/${baseBranch}..HEAD`],
       worktreePath,
     );
-    return parseLogOutput(output);
+    return parseGitLines(output);
   } catch (originErr) {
     // Fall back to local branch (for testing or local-only repos)
     try {
@@ -700,7 +713,7 @@ export async function getAgentCommits(
         ["log", "--format=%s", "--reverse", `${baseBranch}..HEAD`],
         worktreePath,
       );
-      return parseLogOutput(output);
+      return parseGitLines(output);
     } catch {
       log.warn({ baseBranch }, "getAgentCommits failed on both origin and local branch — commit messages will be omitted from PR");
       return [];
@@ -864,6 +877,32 @@ export async function checkDuplicateBranch(
           }
         }
         resolve(null);
+      },
+    );
+  });
+}
+
+/**
+ * Delete a branch on the remote without requiring a local clone.
+ * Auth must be embedded in the URL for private repos.
+ * Throws if the push fails.
+ */
+export function deleteRemoteBranch(repoUrl: string, branch: string): Promise<void> {
+  const log = getLog();
+  return new Promise((resolve, reject) => {
+    execFile(
+      "git",
+      ["push", repoUrl, "--delete", branch],
+      { timeout: 30_000 },
+      (error, _stdout, stderr) => {
+        if (error) {
+          const safeStderr = stderr?.replace(/:\/\/[^@]+@/g, "://[redacted]@").slice(0, 200);
+          log.error({ branch, stderr: safeStderr }, "deleteRemoteBranch failed");
+          const safeMsg = (stderr || error.message).replace(/:\/\/[^@]+@/g, "://[redacted]@");
+          reject(new Error(`deleteRemoteBranch failed: ${safeMsg}`));
+        } else {
+          resolve();
+        }
       },
     );
   });
