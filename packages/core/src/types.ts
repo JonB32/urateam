@@ -679,6 +679,12 @@ export const AuditEventTypeSchema = z.enum([
    *  (always true), `transcriptExisted` (always true), `restartGapMs`
    *  (milliseconds from interrupt to recovery). */
   "pipeline.restart_interrupt_recovered",
+  /** BEC-268 — the executor detected "Session ID X is already in use" in the
+   *  SDK's stderr. A fresh UUID was minted, persisted to
+   *  `pipeline_runs.agent_session_id`, and the stage was marked retriable so
+   *  the recovery loop retries with the new ID. Payload: `runId`, `issueId`,
+   *  `stage`, `oldSessionId`, `newSessionId`. */
+  "pipeline.agent_session_collision_recovered",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 

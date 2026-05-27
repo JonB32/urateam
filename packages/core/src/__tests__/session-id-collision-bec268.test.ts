@@ -1,26 +1,20 @@
 /**
- * BEC-268 — Reproduce: Session-ID collision after partial first-stage failure.
+ * BEC-268 — regression tests for session-ID collision recovery.
  *
  * When a stage calls `query({ sessionId: X })` and fails before any JSONL
- * message is written (SDK auth-retry loop, MCP init crash, pre-stream stall),
- * the Claude SDK has already registered ID X internally. On disk, urateam sees
- * no transcript. The next stage / recovery-loop retry:
+ * message is written, the Claude SDK registers ID X internally but writes
+ * nothing to disk. Without recovery, every retry re-sends `{ sessionId: X }`
+ * and hits the same "Session ID X is already in use" wall.
  *
- *   1. `transcriptExists(X)` → false (no JSONL on disk)
- *   2. resolver returns `{ sessionId: X }` (create branch)
- *   3. SDK rejects: "Session ID X is already in use."
- *
- * This test reproduces the gap in the current executor: the catch block
- * records the failure but does NOT detect the collision substring in stderr,
- * does NOT mint a new UUID, does NOT persist it, and does NOT re-throw as a
- * transient error. Every subsequent retry hits the same wall.
- *
- * The test is deliberately written to FAIL once the fix (Option A from the
- * issue) is implemented — at that point the assertions should be inverted so
- * the test becomes the regression guard instead.
+ * Fix (Option A): executor detects the collision pattern in stderr, mints a
+ * fresh UUID, persists it to `pipeline_runs.agent_session_id`, logs a warn,
+ * emits `pipeline.agent_session_collision_recovered`, and includes a
+ * transient-matching sentinel in the errorMessage so `isTransientError()`
+ * marks the run retriable.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { isTransientError } from "../pipeline/error-classifier.js";
 
 // ── Module mocks (declared before imports) ────────────────────────────────────
 
@@ -64,11 +58,22 @@ vi.mock("../executor/session-store.js", async () => {
   };
 });
 
+// Capture logAuditEvent calls — bypasses the enterprise license gate in tests.
+const { logAuditEventMock } = vi.hoisted(() => ({
+  logAuditEventMock: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("../audit/writer.js", async () => {
+  const real = await vi.importActual<typeof import("../audit/writer.js")>(
+    "../audit/writer.js",
+  );
+  return { ...real, logAuditEvent: logAuditEventMock };
+});
+
 // ── Imports ───────────────────────────────────────────────────────────────────
 
 import { executeStage } from "../executor/executor.js";
 import { createDb, type Db } from "../db/client.js";
-import { pipelineRuns, auditEvents } from "../db/schema.js";
+import { pipelineRuns } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import type { SanitizedIssue, RepoConfig } from "../types.js";
 
@@ -78,7 +83,7 @@ const testIssue: SanitizedIssue = {
   id: "BEC-268",
   slug: "session-id-collision",
   title: "Session-ID collision after partial first-stage failure",
-  description: "Reproduce BEC-268 session collision bug",
+  description: "Regression test for BEC-268 session collision recovery",
   acceptanceCriteria: ["executor detects and recovers from session ID collision"],
   labels: ["auto-implement"],
   priority: 2,
@@ -98,7 +103,7 @@ const COLLISION_EXIT_ERROR = "Claude Code process exited with code 1";
 async function seedPipelineRunWithSession(
   db: Db,
   runId: string,
-  agentSessionId: string,
+  agentSessionId: string | null,
 ): Promise<void> {
   await (db as any).insert(pipelineRuns).values({
     id: runId,
@@ -114,25 +119,22 @@ async function seedPipelineRunWithSession(
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-describe("BEC-268 — Session-ID collision after partial first-stage failure", () => {
+describe("BEC-268 — session-ID collision recovery (Option A fix)", () => {
   let db: Db;
 
   beforeEach(async () => {
     db = await createDb({ connectionString: ":memory:" });
     vi.clearAllMocks();
-    // No JSONL on disk — executor sees transcript absent → `{ sessionId: X }`
+    logAuditEventMock.mockResolvedValue(undefined);
+    // No JSONL on disk — resolver returns { sessionId: X } (create branch).
     transcriptExistsMock.mockReturnValue(false);
   });
 
-  it("BUG: collision stderr is present in agent_logs but executor returns failed (not transient) and leaves agentSessionId unchanged", async () => {
+  it("collision detected: mints new UUID, persists it, emits audit event, errorMessage is transient", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
-    // Simulate the SDK registering the ID, calling stderr, then throwing.
-    // This is exactly what the Claude Code subprocess does when it rejects
-    // a session ID that is already claimed in its local state.
     (query as any).mockImplementation(({ options }: { options: { stderr?: (chunk: string) => void } }) => {
       return (async function* () {
-        // SDK writes collision message to stderr before the process exits.
         options.stderr?.(COLLISION_STDERR);
         throw new Error(COLLISION_EXIT_ERROR);
       })();
@@ -141,9 +143,6 @@ describe("BEC-268 — Session-ID collision after partial first-stage failure", (
     const runId = "run-bec268-collision";
     await seedPipelineRunWithSession(db, runId, COLLISION_SESSION_ID);
 
-    // executeStage should (ideally) throw a transient error so the recovery
-    // loop retries with a fresh session ID. Currently it does not — it absorbs
-    // the error and returns { status: "failed" }.
     const result = await executeStage({
       runId,
       issueId: testIssue.id,
@@ -156,51 +155,56 @@ describe("BEC-268 — Session-ID collision after partial first-stage failure", (
       isFirstResumableStage: true,
     });
 
-    // BUG CONFIRMED: executor returns "failed" — it does not re-throw a
-    // transient error that would trigger the recovery loop with a new UUID.
+    // Stage returns "failed" — the agent invocation did fail.
     expect(result.status).toBe("failed");
 
-    // Verify the collision message propagated into the enriched error context.
-    // This shows the executor DID see the stderr — it just didn't act on it.
-    expect(result.errorMessage).toContain(COLLISION_EXIT_ERROR);
+    // errorMessage contains the transient sentinel so isTransientError() marks
+    // the run retriable and the recovery loop retries with the new UUID.
+    expect(result.errorMessage).toContain("session-id-collision-recovered");
+    expect(isTransientError(result.errorMessage!)).toBe(true);
 
-    // BUG CONFIRMED: pipeline_runs.agent_session_id is UNCHANGED —
-    // the executor never minted a fresh UUID or persisted it.
+    // A fresh UUID is persisted — the recovery loop reads this new ID from DB.
     const rows = await (db as any)
       .select({ agentSessionId: pipelineRuns.agentSessionId })
       .from(pipelineRuns)
       .where(eq(pipelineRuns.id, runId));
-
     expect(rows).toHaveLength(1);
-    expect(rows[0].agentSessionId).toBe(COLLISION_SESSION_ID);
-    // ^ Still the old (poisoned) UUID — every retry will collide again.
+    const newSessionId = rows[0].agentSessionId as string;
+    expect(newSessionId).toBeTruthy();
+    expect(newSessionId).not.toBe(COLLISION_SESSION_ID);
 
-    // BUG CONFIRMED: no collision-recovery audit event was emitted.
-    const recoveryEvents = await (db as any)
-      .select()
-      .from(auditEvents)
-      .where(eq(auditEvents.eventType, "pipeline.agent_session_collision_recovered" as any));
-
-    expect(recoveryEvents).toHaveLength(0);
-    // ^ When the fix ships, this should be 1 (and the assertions above should flip).
+    // logAuditEvent called with the collision-recovered event.
+    expect(logAuditEventMock).toHaveBeenCalledOnce();
+    const [, event] = logAuditEventMock.mock.calls[0] as [unknown, { eventType: string; payload: Record<string, unknown> }];
+    expect(event.eventType).toBe("pipeline.agent_session_collision_recovered");
+    expect(event.payload.oldSessionId).toBe(COLLISION_SESSION_ID);
+    expect(event.payload.newSessionId).toBe(newSessionId);
+    expect(event.payload.stage).toBe("triage");
+    expect(event.payload.runId).toBe(runId);
   });
 
-  it("BUG: retry with the same agentSessionId hits the same collision — no session refresh occurs", async () => {
+  it("recovery loop reads fresh UUID from DB on retry — no second collision", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
-    // Always fail with the collision error, simulating what happens on every
-    // retry since the session ID is never refreshed.
+    let callCount = 0;
     (query as any).mockImplementation(({ options }: { options: { stderr?: (chunk: string) => void } }) => {
+      callCount++;
+      if (callCount === 1) {
+        return (async function* () {
+          options.stderr?.(COLLISION_STDERR);
+          throw new Error(COLLISION_EXIT_ERROR);
+        })();
+      }
+      // Second attempt (with fresh UUID): succeeds
       return (async function* () {
-        options.stderr?.(COLLISION_STDERR);
-        throw new Error(COLLISION_EXIT_ERROR);
+        yield { type: "assistant", content: [{ type: "text", text: "done" }] };
       })();
     });
 
-    const runId = "run-bec268-retry";
+    const runId = "run-bec268-recovery-loop";
     await seedPipelineRunWithSession(db, runId, COLLISION_SESSION_ID);
 
-    // First attempt
+    // First attempt — collision handled, new UUID persisted.
     const result1 = await executeStage({
       runId,
       issueId: testIssue.id,
@@ -213,16 +217,17 @@ describe("BEC-268 — Session-ID collision after partial first-stage failure", (
       isFirstResumableStage: true,
     });
     expect(result1.status).toBe("failed");
+    expect(result1.errorMessage).toContain("session-id-collision-recovered");
 
-    // Check agentSessionId unchanged after first attempt
-    const rowsAfterFirst = await (db as any)
+    // Simulate recovery loop: read the new agentSessionId from DB.
+    const afterFirst = await (db as any)
       .select({ agentSessionId: pipelineRuns.agentSessionId })
       .from(pipelineRuns)
       .where(eq(pipelineRuns.id, runId));
-    expect(rowsAfterFirst[0].agentSessionId).toBe(COLLISION_SESSION_ID);
+    const freshSessionId = afterFirst[0].agentSessionId as string;
+    expect(freshSessionId).not.toBe(COLLISION_SESSION_ID);
 
-    // Second attempt (simulating what the recovery loop does — uses the same
-    // agentSessionId from pipeline_runs.agent_session_id)
+    // Second attempt uses the fresh UUID — succeeds.
     const result2 = await executeStage({
       runId,
       issueId: testIssue.id,
@@ -231,36 +236,25 @@ describe("BEC-268 — Session-ID collision after partial first-stage failure", (
       repoConfig: testRepoConfig,
       workdir: "/tmp/bec268-workdir",
       db,
-      agentSessionId: COLLISION_SESSION_ID, // same poisoned UUID
+      agentSessionId: freshSessionId,
       isFirstResumableStage: true,
     });
-
-    // BUG CONFIRMED: second attempt also fails with the same collision.
-    // Without a fix, every retry hits this wall indefinitely.
-    expect(result2.status).toBe("failed");
-
-    // Still no refresh
-    const rowsAfterSecond = await (db as any)
-      .select({ agentSessionId: pipelineRuns.agentSessionId })
-      .from(pipelineRuns)
-      .where(eq(pipelineRuns.id, runId));
-    expect(rowsAfterSecond[0].agentSessionId).toBe(COLLISION_SESSION_ID);
+    expect(result2.status).toBe("completed");
   });
 
-  it("non-collision failure: stderr without collision substring — behavior unchanged (baseline)", async () => {
+  it("non-collision stderr — agentSessionId unchanged, no audit event, not transient", async () => {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
-    // Regular non-collision failure (auth error, build error, etc.)
     (query as any).mockImplementation(({ options }: { options: { stderr?: (chunk: string) => void } }) => {
       return (async function* () {
         options.stderr?.("Error: ANTHROPIC_API_KEY is not set\n");
-        throw new Error("Claude Code process exited with code 1");
+        throw new Error(COLLISION_EXIT_ERROR);
       })();
     });
 
     const runId = "run-bec268-non-collision";
-    const DIFFERENT_SESSION_ID = "aaaa-bbbb-cccc-dddd-eeee";
-    await seedPipelineRunWithSession(db, runId, DIFFERENT_SESSION_ID);
+    const OTHER_SESSION_ID = "aaaa-bbbb-cccc-dddd-eeee";
+    await seedPipelineRunWithSession(db, runId, OTHER_SESSION_ID);
 
     const result = await executeStage({
       runId,
@@ -270,19 +264,56 @@ describe("BEC-268 — Session-ID collision after partial first-stage failure", (
       repoConfig: testRepoConfig,
       workdir: "/tmp/bec268-workdir",
       db,
-      agentSessionId: DIFFERENT_SESSION_ID,
+      agentSessionId: OTHER_SESSION_ID,
       isFirstResumableStage: true,
     });
 
-    // Non-collision failures still return "failed" — behavior unchanged.
     expect(result.status).toBe("failed");
+    // No collision sentinel in the errorMessage.
+    expect(result.errorMessage).not.toContain("session-id-collision-recovered");
+    // Not transient — regular (non-auth, non-network) failure.
+    expect(isTransientError(result.errorMessage!)).toBe(false);
 
-    // agentSessionId also unchanged — this is the expected behavior for
-    // non-collision failures (no UUID refresh needed).
+    // agentSessionId in DB is unchanged — no collision recovery triggered.
     const rows = await (db as any)
       .select({ agentSessionId: pipelineRuns.agentSessionId })
       .from(pipelineRuns)
       .where(eq(pipelineRuns.id, runId));
-    expect(rows[0].agentSessionId).toBe(DIFFERENT_SESSION_ID);
+    expect(rows[0].agentSessionId).toBe(OTHER_SESSION_ID);
+
+    // No audit event for non-collision failures.
+    expect(logAuditEventMock).not.toHaveBeenCalled();
+  });
+
+  it("agentSessionId=null — collision not applicable, no recovery attempted", async () => {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+
+    // Even with collision stderr, recovery requires a non-null agentSessionId.
+    (query as any).mockImplementation(({ options }: { options: { stderr?: (chunk: string) => void } }) => {
+      return (async function* () {
+        options.stderr?.(COLLISION_STDERR);
+        throw new Error(COLLISION_EXIT_ERROR);
+      })();
+    });
+
+    const runId = "run-bec268-null-session";
+    await seedPipelineRunWithSession(db, runId, null);
+
+    const result = await executeStage({
+      runId,
+      issueId: testIssue.id,
+      stage: "triage",
+      sanitizedIssue: testIssue,
+      repoConfig: testRepoConfig,
+      workdir: "/tmp/bec268-workdir",
+      db,
+      agentSessionId: null,
+      isFirstResumableStage: false,
+    });
+
+    // Returns failed without collision recovery (agentSessionId was null).
+    expect(result.status).toBe("failed");
+    expect(result.errorMessage).not.toContain("session-id-collision-recovered");
+    expect(logAuditEventMock).not.toHaveBeenCalled();
   });
 });
