@@ -140,6 +140,30 @@ function approvalTtlMs(config: ReleaseManagerConfig): number {
   return 24 * 3600 * 1000;
 }
 
+/** Generate a unique release-decision row ID. */
+function generateDecisionId(): string {
+  return `rd_${randomUUID()}`;
+}
+
+/** File a QA gap issue via Linear when the workflow is missing, and return the resolved reason + attemptCount. */
+async function applyQaGapIssueFiling(
+  db: AnyDb,
+  linear: LinearClient | undefined,
+  repoUrl: string,
+  branch: string,
+  workflowPath: string,
+  linearTeamId: string,
+): Promise<{ finalReason: string; attemptCount: number }> {
+  if (!linear) {
+    log.error({ repoUrl, branch }, "qaCheck requires Linear client but none configured — skipping gap-issue file");
+    return { finalReason: "qa_no_workflow", attemptCount: 0 };
+  }
+  const gapResult = await tryFileQaGapIssue({
+    db, linear, repoUrl, branch, workflowPath, linearTeamId,
+  });
+  return { finalReason: gapResult.finalReason, attemptCount: gapResult.attemptCount };
+}
+
 /**
  * Execute a single release-manager decision cycle.
  *
@@ -192,9 +216,12 @@ export async function tick(ctx: TickContext): Promise<void> {
     hasFreshApproval: state.hasFreshApproval,
   });
 
+  // Parse once — reused by qaCheck, skip/trigger, and fire paths.
+  const { owner, repo } = parseRepoFromUrl(repoUrl);
+
   // 1. Manual-tag detection — re-baseline counters.
   if (state.manualTagDetected) {
-    const id = `rd_${randomUUID()}`;
+    const id = generateDecisionId();
     await persistDecision(db, repoUrl, branch, {
       id,
       decision: "skip",
@@ -209,7 +236,6 @@ export async function tick(ctx: TickContext): Promise<void> {
   // 2. BEC-136: Compute QA state when qaCheck is configured.
   let qaState: { workflowFileExists: boolean; runConclusion: string | null } | undefined;
   if (config.triggers.qaCheck) {
-    const { owner, repo } = parseRepoFromUrl(repoUrl);
     let wfExists = false;
     try {
       wfExists = await workflowFileExists({
@@ -280,7 +306,7 @@ export async function tick(ctx: TickContext): Promise<void> {
   );
 
   if (result.kind === "skip") {
-    const id = `rd_${randomUUID()}`;
+    const id = generateDecisionId();
 
     // Compute attempt count for retry handling on qa_dispatch_error path.
     let attemptCount = 0;
@@ -296,7 +322,6 @@ export async function tick(ctx: TickContext): Promise<void> {
         db, repoUrl, branch, "qa_needs_trigger", state.headSha,
       );
 
-      const { owner, repo } = parseRepoFromUrl(repoUrl);
       const dispatch = await triggerWorkflow({
         octokit, db, owner, repo, repoUrl, branch,
         workflow: config.triggers.qaCheck!.workflow,
@@ -310,17 +335,11 @@ export async function tick(ctx: TickContext): Promise<void> {
       } else if (dispatch.kind === "dispatch_404") {
         // Workflow disappeared between state cache and dispatch — drop into gap-issue path.
         finalReason = "qa_no_workflow";
-        if (linear) {
-          const gapResult = await tryFileQaGapIssue({
-            db, linear, repoUrl, branch,
-            workflowPath: config.triggers.qaCheck!.workflow,
-            linearTeamId: config.triggers.qaCheck!.linearTeamId,
-          });
-          finalReason = gapResult.finalReason;
-          attemptCount = gapResult.attemptCount;
-        } else {
-          log.error({ repoUrl, branch }, "qaCheck requires Linear client but none configured — skipping gap-issue file");
-        }
+        ({ finalReason, attemptCount } = await applyQaGapIssueFiling(
+          db, linear, repoUrl, branch,
+          config.triggers.qaCheck!.workflow,
+          config.triggers.qaCheck!.linearTeamId,
+        ));
       } else if (dispatch.kind === "dispatch_422") {
         finalReason = "qa_dispatch_error";
         attemptCount = 99; // permanent skip — workflow misconfigured, retrying won't help
@@ -340,17 +359,11 @@ export async function tick(ctx: TickContext): Promise<void> {
         }
       }
     } else if (result.qaActionNeeded?.reason === "qa_no_workflow") {
-      if (linear) {
-        const gapResult = await tryFileQaGapIssue({
-          db, linear, repoUrl, branch,
-          workflowPath: config.triggers.qaCheck!.workflow,
-          linearTeamId: config.triggers.qaCheck!.linearTeamId,
-        });
-        finalReason = gapResult.finalReason;
-        attemptCount = gapResult.attemptCount;
-      } else {
-        log.error({ repoUrl, branch }, "qaCheck requires Linear client but none configured — skipping gap-issue file");
-      }
+      ({ finalReason, attemptCount } = await applyQaGapIssueFiling(
+        db, linear, repoUrl, branch,
+        config.triggers.qaCheck!.workflow,
+        config.triggers.qaCheck!.linearTeamId,
+      ));
     }
 
     if (result.qaActionNeeded?.reason === "qa_timed_out" && !result.qaActionNeeded.pass && state.qaRun) {
@@ -395,7 +408,7 @@ export async function tick(ctx: TickContext): Promise<void> {
   }
 
   if (result.kind === "awaiting-approval") {
-    const id = `rd_${randomUUID()}`;
+    const id = generateDecisionId();
     await persistDecision(db, repoUrl, branch, {
       id,
       decision: "awaiting-approval",
@@ -421,10 +434,11 @@ export async function tick(ctx: TickContext): Promise<void> {
   }
 
   // Fire — create tag + release.
-  const id = `rd_${randomUUID()}`;
+  const id = generateDecisionId();
   const githubResult = await createTagAndRelease({
     octokit,
-    ...parseRepoFromUrl(repoUrl),
+    owner,
+    repo,
     tag: proposedVersion,
     sha: state.headSha,
     isPrerelease: isPrereleaseTag(proposedVersion),

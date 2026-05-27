@@ -1,4 +1,4 @@
-import { and, eq, isNull, desc, gte } from "drizzle-orm";
+import { and, eq, isNull, isNotNull, desc, gte } from "drizzle-orm";
 import type { Octokit } from "@octokit/rest";
 import type { AnyDb } from "../db/client.js";
 import { releaseApprovals, releaseDecisions } from "../db/schema.js";
@@ -161,12 +161,12 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
       and(
         eq(releaseDecisions.repoUrl, repoUrl),
         eq(releaseDecisions.branch, branch),
+        isNotNull(releaseDecisions.qaRunId),
       ),
     )
     .orderBy(desc(releaseDecisions.decidedAt))
-    .limit(20);
-  // Take the most recent row that actually has a qa_run_id.
-  const latestQaRow = qaRunRows.find((r: any) => r.qaRunId !== null && r.qaRunId !== undefined);
+    .limit(1);
+  const latestQaRow = qaRunRows[0] ?? null;
   const qaRun = latestQaRow
     ? {
         runId: latestQaRow.qaRunId as number,
