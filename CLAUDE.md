@@ -257,7 +257,7 @@ budget check → **recover retriable runs** → recover stuck In Progress → **
 - Postgres SQL helpers: `sqlDateGroup(db, col)` ('YYYY-MM-DD'), `sqlDaysAgoFilter(db, col, days)`. Both driver-aware — no `isPostgres()` branching in app code.
 
 ### Git Operations
-- `gitExec()` — throwing, with structured logging + timeout
+- `gitExec()` — throwing, with structured logging + timeout. Optional 4th param `expectFailure?: boolean`: when `true`, a non-zero exit is logged at `debug` instead of `error` (promise still rejects). Use at call sites that intentionally catch and ignore the rejection (e.g. branch-existence probes, `remote get-url` pre-clone checks). Default `false` preserves ERROR-level logging for all other callers.
 - `gitExecSafe()` — non-throwing, returns "" on failure
 - `gitExecRaw()` — preserves leading whitespace (porcelain output)
 - `checkDuplicateBranch()` — server-side filtered ls-remote
@@ -310,7 +310,7 @@ All gated by `isFeatureLicensed(<feature>)`. Routes 404 when unlicensed.
 DB-backed `active_work` table tracks files modified by in-flight runs. `upsertActiveWork` uses atomic `onConflictDoUpdate` (requires UNIQUE on `run_id`). `removeActiveWork` called in runner's `finally` block + `abort()`. `checkFileOverlap` compares candidate files against active runs.
 
 ### Bootstrap Command (`packages/cli/src/commands/bootstrap.ts`, BEC-205)
-`ura bootstrap` — one-command self-hosted onboarding wizard. Flow: preflight (Docker, ports 3000/3001, tools) → optional GitHub App manifest flow → optional Linear webhook registration → generate `.env` + `docker-compose.dogfood.yml` + `Caddyfile` (or cloudflared command) → optional validate via synthetic webhook to `http://localhost:{port}/webhooks/linear`. Flags: `--skip-github-app`, `--skip-linear`, `--validate`, `--domain`, `--proxy {caddy|cloudflared}`, `--output-dir`, `--port`. All functions accept optional `deps` (`BootstrapDeps`) for injectable `execFile` / `fetch` / `writeFile` / `log` / `openBrowser`.
+`ura bootstrap` — one-command self-hosted onboarding wizard. Flow: preflight (Docker, ports 3000/3001, tools — `jq` is NOT required) → optional GitHub App manifest flow → optional Linear webhook registration → generate `.env` + `docker-compose.dogfood.yml` + `Caddyfile` (or cloudflared command) → optional validate via synthetic webhook to `http://localhost:{port}/webhooks/linear`. Flags: `--skip-github-app`, `--skip-linear`, `--validate`, `--domain`, `--proxy {caddy|cloudflared}`, `--output-dir`, `--port`, `--headless` (paste-code OAuth flow for SSH/remote hosts; auto-detected when `DISPLAY` and `WAYLAND_DISPLAY` are both unset on Linux), `--oauth-timeout-ms` (default 300 000; also reads `BOOTSTRAP_OAUTH_TIMEOUT_MS` env var). All functions accept optional `deps` (`BootstrapDeps`) for injectable `execFile` / `fetch` / `writeFile` / `log` / `openBrowser` / `readLine`.
 
 ### Triage Quality Command (`packages/cli/src/commands/triage-quality.ts`, BEC-219)
 `ura triage-quality` — surfaces `pm.triage_quality_score` audit events as operator stats. Reads from the audit log and prints a summary of triage v2 file-prediction accuracy. Flags: `--days <n>` (time window, default 7), `--limit <n>` (max events in per-run table, default 20), `--format text|json` (default text). Text output includes: summary counts and averages (intersection ratio, miss rate, unexpected rate), top-10 missed files, top-10 unexpected files, and a per-run table. JSON output returns the raw event array. Reads `DATABASE_URL` env var; falls back to `./urateam.db` with a warning when unset.

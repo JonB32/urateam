@@ -5,7 +5,7 @@
  *   1. Pre-flight checks (Docker, ports, tools)
  *   2. GitHub App creation via manifest flow
  *   3. Linear webhook registration
- *   4. .env + docker-compose.dogfood.yml generation
+ *   4. .env + docker-compose.yml generation
  *   5. Reverse-proxy config (Caddyfile or cloudflared command)
  *   6. Optional first-run validation (POST synthetic webhook)
  *
@@ -13,7 +13,7 @@
  * mocked implementations of I/O, network, and child-process calls.
  */
 
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { createLogger } from "@urateam/core";
 import * as http from "node:http";
 import * as net from "node:net";
@@ -74,6 +74,8 @@ export interface BootstrapDeps {
   openBrowser?: (url: string) => void;
   /** Replaces the TCP port-free check (returns true when port is available). */
   isPortFree?: (port: number) => Promise<boolean>;
+  /** Reads a single line from stdin. Used in the headless GitHub App flow. */
+  readLine?: (prompt: string) => Promise<string>;
 }
 
 /**
@@ -110,8 +112,17 @@ export interface CreateGitHubAppOpts {
   org?: string;
   /** Pre-assigned callback port; defaults to a random available port. */
   callbackPort?: number;
-  /** Timeout (ms) to wait for the OAuth callback. Default: 30 000. */
+  /**
+   * Timeout (ms) to wait for the OAuth callback. Default: 300 000.
+   * Configurable via --oauth-timeout-ms CLI flag or BOOTSTRAP_OAUTH_TIMEOUT_MS env var.
+   */
   timeoutMs?: number;
+  /**
+   * When true, skip the local HTTP server + browser and prompt the operator
+   * to paste the OAuth code from the redirect URL on stdin instead.
+   * Auto-detected when DISPLAY and WAYLAND_DISPLAY are both unset on Linux.
+   */
+  headless?: boolean;
   deps?: BootstrapDeps;
 }
 
@@ -285,6 +296,108 @@ function openBrowserDefault(url: string): void {
   childProcess.execFile(cmd, args, () => {});
 }
 
+/**
+ * Returns true when the current environment has no graphical display,
+ * i.e. there is no `DISPLAY` (X11) or `WAYLAND_DISPLAY` env var set on Linux.
+ * On macOS and Windows we always assume a browser is available.
+ * @internal
+ */
+export function isHeadlessEnvironment(): boolean {
+  if (process.platform !== "linux") return false;
+  return !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
+}
+
+/**
+ * Core readline implementation — creates one interface, asks `fullQuestion`
+ * verbatim, resolves with the trimmed answer, then closes.
+ * @internal
+ */
+async function readLineCore(fullQuestion: string): Promise<string> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  return new Promise((resolve) => {
+    rl.question(fullQuestion, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
+/**
+ * Reads a single line from stdin using readline.
+ * Used as the default `deps.readLine` implementation in headless mode.
+ * The caller is responsible for including any trailing ": " in `question`.
+ * @internal
+ */
+async function readLineDefault(question: string): Promise<string> {
+  return readLineCore(question);
+}
+
+/**
+ * Races `promise` against a timeout. Clears the timer if `promise` resolves
+ * or rejects first, so no dangling timers are left alive.
+ * @internal
+ */
+async function raceWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutError: Error,
+): Promise<T> {
+  let timerId: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timerId = setTimeout(() => reject(timeoutError), timeoutMs);
+  });
+  try {
+    const result = await Promise.race([promise, timeoutPromise]);
+    clearTimeout(timerId);
+    return result;
+  } catch (err) {
+    clearTimeout(timerId);
+    throw err;
+  }
+}
+
+/**
+ * Exchanges a GitHub App manifest OAuth code for full app credentials.
+ * Shared by both the browser and headless code paths.
+ * @internal
+ */
+async function exchangeGitHubManifestCode(
+  code: string,
+  fetchFn: typeof fetch,
+): Promise<GitHubAppCredentials> {
+  const exchangeResp = await fetchFn(
+    `https://api.github.com/app-manifests/${encodeURIComponent(code)}/conversions`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    },
+  );
+
+  if (!exchangeResp.ok) {
+    const body = await exchangeResp.text();
+    throw new Error(
+      `GitHub App manifest exchange failed (HTTP ${exchangeResp.status}): ${body}`,
+    );
+  }
+
+  const data = (await exchangeResp.json()) as unknown as GitHubAppManifestResponse;
+  return {
+    appId: data.id,
+    appName: data.name ?? "urateam",
+    privateKey: data.pem,
+    webhookSecret: data.webhook_secret ?? "",
+    clientId: data.client_id,
+    clientSecret: data.client_secret,
+    htmlUrl: data.html_url ?? "",
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Step 1: Pre-flight checks
 // ---------------------------------------------------------------------------
@@ -293,7 +406,7 @@ function openBrowserDefault(url: string): void {
  * Verifies that the local environment is ready for a bootstrap run:
  *   - Docker daemon is reachable (`docker info`)
  *   - Ports 3000 and 3001 are free
- *   - Required CLI tools are present: curl, openssl, jq
+ *   - Required CLI tools are present: curl, openssl
  *
  * Throws a descriptive `Error` on the first failure. The bootstrap action
  * calls `process.exit(1)` after logging the error.
@@ -326,10 +439,10 @@ export async function preflightChecks(deps?: BootstrapDeps): Promise<void> {
   }
 
   // --- Tools -----------------------------------------------------------------
+  // jq is intentionally excluded: this CLI handles all JSON natively via JSON.parse/stringify.
   const tools: Array<{ name: string; checkArgs: string[] }> = [
     { name: "curl", checkArgs: ["--version"] },
     { name: "openssl", checkArgs: ["version"] },
-    { name: "jq", checkArgs: ["--version"] },
   ];
 
   const toolResults = await Promise.allSettled(
@@ -396,36 +509,46 @@ export async function createGitHubApp(
 ): Promise<GitHubAppCredentials> {
   const {
     org,
-    timeoutMs = 30_000,
+    timeoutMs = 300_000,
+    headless: headlessOpt,
     deps,
   } = opts;
 
   const fetchFn = getFetch(deps);
-  const openFn = deps?.openBrowser ?? openBrowserDefault;
-  const portCheck = deps?.isPortFree ?? isPortFree;
+  const log = deps?.log ?? ((msg: string) => process.stdout.write(msg + "\n"));
 
-  // Find a free port for the callback server.
+  // Auto-detect headless when the caller didn't specify.
+  const useHeadless = headlessOpt ?? isHeadlessEnvironment();
+
+  // Find a free port for the callback server (browser path only, but we also
+  // embed it in the manifest redirect_url so GitHub knows where to send the code).
   let callbackPort = opts.callbackPort;
   if (!callbackPort) {
-    // Try ports in the callback range until one is free.
-    for (let p = CALLBACK_PORT_RANGE.min; p <= CALLBACK_PORT_RANGE.max; p++) {
-      if (await portCheck(p)) {
-        callbackPort = p;
-        break;
+    if (!useHeadless) {
+      // Browser path: we actually start a server, so we need a free port.
+      const portCheck = deps?.isPortFree ?? isPortFree;
+      for (let p = CALLBACK_PORT_RANGE.min; p <= CALLBACK_PORT_RANGE.max; p++) {
+        if (await portCheck(p)) {
+          callbackPort = p;
+          break;
+        }
       }
-    }
-    if (!callbackPort) {
-      throw new Error(
-        `Could not find a free port for the GitHub App callback server ` +
-          `(tried ${CALLBACK_PORT_RANGE.min}-${CALLBACK_PORT_RANGE.max}).`,
-      );
+      if (!callbackPort) {
+        throw new Error(
+          `Could not find a free port for the GitHub App callback server ` +
+            `(tried ${CALLBACK_PORT_RANGE.min}-${CALLBACK_PORT_RANGE.max}).`,
+        );
+      }
+    } else {
+      // Headless path: we don't start a server, but GitHub still needs a redirect_url.
+      callbackPort = CALLBACK_PORT_RANGE.min;
     }
   }
 
   const state = crypto.randomBytes(16).toString("hex");
   const callbackUrl = `http://localhost:${callbackPort}/callback`;
 
-  // Build the GitHub App manifest.
+  // Build the GitHub App manifest (same for both paths).
   const manifest = {
     name: "urateam",
     url: "https://github.com/JonB32/urateam",
@@ -465,6 +588,41 @@ export async function createGitHubApp(
   const unlinkFn = deps?.unlink ?? fs.unlink;
   const tmpFile = path.join(os.tmpdir(), `urateam-gh-manifest-${state.slice(0, 8)}.html`);
   await writeFn(tmpFile, htmlContent, "utf8");
+
+  // ── Headless path ───────────────────────────────────────────────────────────
+  if (useHeadless) {
+    // GET-encoded fallback: a remote browser can't POST our local form. GitHub
+    // won't auto-populate the manifest from GET (that's the #422 bug), but the
+    // operator can still create the app manually from the form GitHub shows.
+    const githubUrl = `${actionUrl}&manifest=${encodeURIComponent(manifestJson)}`;
+    const readLineFn = deps?.readLine ?? readLineDefault;
+    log("");
+    log("Open this URL in any browser (on any machine):");
+    log(`  ${githubUrl}`);
+    log("");
+    log(`After GitHub creates the app and redirects to ${callbackUrl}?code=XYZ`);
+    log("the browser will show a connection error (expected on a remote host).");
+    log("Copy the value of the 'code' query parameter from the URL bar and paste it here.");
+    log("");
+
+    // Race the readline prompt against the timeout (timer is always cleared).
+    const code = await raceWithTimeout(
+      readLineFn("Paste the code from the redirect URL: "),
+      timeoutMs,
+      new Error(
+        `Timed out waiting for GitHub App OAuth code after ${timeoutMs}ms.\n` +
+          "Re-run bootstrap and complete the GitHub App creation within the time limit.",
+      ),
+    );
+    if (!code) {
+      throw new Error("No code entered. Please re-run bootstrap and paste the code from the redirect URL.");
+    }
+
+    return exchangeGitHubManifestCode(code, fetchFn);
+  }
+
+  // ── Browser path (original) ─────────────────────────────────────────────────
+  const openFn = deps?.openBrowser ?? openBrowserDefault;
 
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -525,37 +683,7 @@ export async function createGitHubApp(
 
       // Exchange code for credentials.
       try {
-        const exchangeResp = await fetchFn(
-          `https://api.github.com/app-manifests/${code}/conversions`,
-          {
-            method: "POST",
-            headers: {
-              Accept: "application/vnd.github+json",
-              "X-GitHub-Api-Version": "2022-11-28",
-            },
-          },
-        );
-
-        if (!exchangeResp.ok) {
-          const body = await exchangeResp.text();
-          reject(
-            new Error(
-              `GitHub App manifest exchange failed (HTTP ${exchangeResp.status}): ${body}`,
-            ),
-          );
-          return;
-        }
-
-        const data = (await exchangeResp.json()) as unknown as GitHubAppManifestResponse;
-        resolve({
-          appId: data.id,
-          appName: data.name ?? "urateam",
-          privateKey: data.pem,
-          webhookSecret: data.webhook_secret ?? "",
-          clientId: data.client_id,
-          clientSecret: data.client_secret,
-          htmlUrl: data.html_url ?? "",
-        });
+        resolve(await exchangeGitHubManifestCode(code, fetchFn));
       } catch (err) {
         reject(err);
       }
@@ -727,7 +855,54 @@ export async function generateEnvFile(
 // ---------------------------------------------------------------------------
 
 /**
- * Generates a `docker-compose.dogfood.yml` in `outputDir` with two services:
+ * Returns the canonical docker-compose filename for bootstrap output.
+ * Consumer mode (default): `docker-compose.yml`.
+ * Dogfood mode (urateam contributors): `docker-compose.dogfood.yml`.
+ * @internal
+ */
+export function composeFilename(dogfood = false): string {
+  return dogfood ? "docker-compose.dogfood.yml" : "docker-compose.yml";
+}
+
+/**
+ * Maps a legacy dogfood filename to its consumer replacement name.
+ * @internal
+ */
+export const LEGACY_ARTIFACT_MIGRATIONS: Record<string, string> = {
+  "docker-compose.dogfood.yml": "docker-compose.yml",
+  ".env.dogfood": ".env",
+};
+
+/**
+ * Checks `outputDir` for legacy "dogfood"-named artifacts written by older
+ * bootstrap versions (or manually created alongside the internal soak harness).
+ * Returns the filenames of any found legacy files so the caller can print a
+ * migration hint.
+ *
+ * Detected candidates: `docker-compose.dogfood.yml`, `.env.dogfood`.
+ *
+ * @param outputDir - Directory to inspect. Defaults to `process.cwd()`.
+ */
+export async function detectLegacyArtifacts(outputDir?: string): Promise<string[]> {
+  const dir = getOutputDir(outputDir);
+  const candidates = Object.keys(LEGACY_ARTIFACT_MIGRATIONS);
+  const found: string[] = [];
+  await Promise.all(
+    candidates.map(async (f) => {
+      try {
+        await fs.access(path.join(dir, f));
+        found.push(f);
+      } catch {
+        // file absent — no legacy artifact
+      }
+    }),
+  );
+  return found;
+}
+
+/**
+ * Generates a `docker-compose.yml` (consumer mode) or `docker-compose.dogfood.yml`
+ * (dogfood mode) in `outputDir` with two services:
  *   - `app`       — webhook server on port 3000
  *   - `dashboard` — ops dashboard on port 3001
  *
@@ -736,19 +911,25 @@ export async function generateEnvFile(
  * @param ctx       - Bootstrap context (used for documentation/comments only).
  * @param outputDir - Directory to write the compose file. Defaults to `process.cwd()`.
  * @param deps      - Optional injectable dependencies (for testing).
+ * @param dogfood   - When true, writes `docker-compose.dogfood.yml` (urateam internal use).
  */
 export async function generateDockerCompose(
   ctx: BootstrapContext,
   outputDir?: string,
   deps?: BootstrapDeps,
+  dogfood = false,
 ): Promise<void> {
   const writeFn = getWriteFile(deps);
   const dir = getOutputDir(outputDir);
+  const filename = composeFilename(dogfood);
+  const usageCmd = dogfood
+    ? `docker compose -f ${filename} up -d`
+    : "docker compose up -d";
 
   const composeContent = [
     "# urateam docker-compose — generated by `ura bootstrap`",
     `# Generated: ${new Date().toISOString()}`,
-    "# Usage: docker compose -f docker-compose.dogfood.yml up -d",
+    `# Usage: ${usageCmd}`,
     "",
     "services:",
     "  app:",
@@ -781,7 +962,7 @@ export async function generateDockerCompose(
     "",
   ].join("\n");
 
-  await writeFn(path.join(dir, "docker-compose.dogfood.yml"), composeContent, "utf8");
+  await writeFn(path.join(dir, filename), composeContent, "utf8");
 }
 
 // ---------------------------------------------------------------------------
@@ -897,24 +1078,17 @@ export async function validateSetup(
 // ---------------------------------------------------------------------------
 
 /**
- * Creates a readline interface and asks a single question.
- * Returns the trimmed answer. Closes the interface after.
+ * Asks an interactive question via readline and returns the trimmed answer.
+ * When `defaultValue` is provided it is shown in brackets and used as fallback.
+ * Delegates I/O to {@link readLineCore} so there is only one readline setup site.
  * @internal
  */
 async function prompt(question: string, defaultValue?: string): Promise<string> {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-  return new Promise((resolve) => {
-    const displayQuestion = defaultValue
-      ? `${question} [${defaultValue}]: `
-      : `${question}: `;
-    rl.question(displayQuestion, (answer) => {
-      rl.close();
-      resolve(answer.trim() || defaultValue || "");
-    });
-  });
+  const displayQuestion = defaultValue
+    ? `${question} [${defaultValue}]: `
+    : `${question}: `;
+  const answer = await readLineCore(displayQuestion);
+  return answer || defaultValue || "";
 }
 
 // ---------------------------------------------------------------------------
@@ -929,7 +1103,7 @@ async function prompt(question: string, defaultValue?: string): Promise<string> 
 export const bootstrapCommand = new Command("bootstrap")
   .description(
     "One-command self-hosted onboarding: creates a GitHub App, registers a " +
-      "Linear webhook, generates .env + docker-compose.dogfood.yml, and " +
+      "Linear webhook, generates .env + docker-compose.yml, and " +
       "optionally validates the running stack.",
   )
   .option("--skip-github-app", "Skip GitHub App creation (use APP_ID/PRIVATE_KEY from env)", false)
@@ -939,6 +1113,23 @@ export const bootstrapCommand = new Command("bootstrap")
   .option("--proxy <type>", "Reverse-proxy type: caddy or cloudflared", "caddy")
   .option("--output-dir <dir>", "Directory for generated files (default: cwd)")
   .option("--port <port>", "Webhook server port for validation", "3000")
+  .addOption(
+    new Option(
+      "--dogfood",
+      "Emit dogfood-named artifacts (urateam contributors only; not for consumer installs)",
+    ).hideHelp(),
+  )
+  .option(
+    "--headless",
+    "Skip local browser + callback server; print the GitHub App URL and prompt for the OAuth code on stdin instead. " +
+      "Auto-detected when DISPLAY and WAYLAND_DISPLAY are both unset on Linux.",
+    false,
+  )
+  .option(
+    "--oauth-timeout-ms <ms>",
+    "Milliseconds to wait for the GitHub App OAuth callback (default: 300000). " +
+      "Also reads BOOTSTRAP_OAUTH_TIMEOUT_MS env var.",
+  )
   .action(async (opts: {
     skipGithubApp?: boolean;
     skipLinear?: boolean;
@@ -947,16 +1138,36 @@ export const bootstrapCommand = new Command("bootstrap")
     proxy?: string;
     outputDir?: string;
     port?: string;
+    dogfood?: boolean;
+    headless?: boolean;
+    oauthTimeoutMs?: string;
   }) => {
     const logger = createLogger({ component: "bootstrap" });
 
     /** Logs an error via the structured logger then exits with code 1. */
     function exitWithError(message: string, err: unknown): never {
-      logger.error({ err: (err as Error).message }, message);
+      logger.error({ err: err instanceof Error ? err.message : String(err) }, message);
       process.exit(1);
     }
 
     logger.info("urateam — Self-Hosted Bootstrap Wizard starting");
+
+    // ── Legacy artifact detection ──────────────────────────────────────────
+    if (!opts.dogfood) {
+      const legacy = await detectLegacyArtifacts(opts.outputDir);
+      if (legacy.length > 0) {
+        const migrations = legacy
+          .map((f) => `  cp ${f} ${LEGACY_ARTIFACT_MIGRATIONS[f] ?? f}`)
+          .join("\n");
+        logger.warn(
+          { files: legacy },
+          "Legacy dogfood-named artifact(s) found in the output directory.\n" +
+            "Bootstrap now generates consumer-named files (docker-compose.yml / .env).\n" +
+            "To migrate your existing deployment, run:\n" +
+            migrations,
+        );
+      }
+    }
 
     // ── Step 1: Pre-flight checks ──────────────────────────────────────────
     logger.info("[1/7] Running pre-flight checks...");
@@ -1022,9 +1233,24 @@ export const bootstrapCommand = new Command("bootstrap")
         htmlUrl: "",
       };
     } else {
-      logger.info("[3/7] Creating GitHub App via manifest flow — a browser window will open.");
+      const parsedTimeout = parseInt(
+        opts.oauthTimeoutMs ?? process.env.BOOTSTRAP_OAUTH_TIMEOUT_MS ?? "",
+        10,
+      );
+      const oauthTimeoutMs = parsedTimeout > 0 ? parsedTimeout : 300_000;
+      const useHeadless = opts.headless || isHeadlessEnvironment();
+
+      if (useHeadless) {
+        logger.info("[3/7] Creating GitHub App via headless flow — you will be prompted to paste the OAuth code.");
+      } else {
+        logger.info("[3/7] Creating GitHub App via manifest flow — a browser window will open.");
+      }
       try {
-        appCredentials = await createGitHubApp({ org: org || undefined });
+        appCredentials = await createGitHubApp({
+          org: org || undefined,
+          headless: useHeadless,
+          timeoutMs: oauthTimeoutMs,
+        });
         logger.info({ appId: appCredentials.appId, appName: appCredentials.appName }, "[3/7] GitHub App created.");
       } catch (err) {
         exitWithError("GitHub App creation failed", err);
@@ -1077,13 +1303,14 @@ export const bootstrapCommand = new Command("bootstrap")
     }
 
     // ── Step 6: docker-compose ─────────────────────────────────────────────
-    logger.info("[6/7] Generating docker-compose.dogfood.yml...");
+    const cfName = composeFilename(opts.dogfood);
+    logger.info(`[6/7] Generating ${cfName}...`);
     try {
-      await generateDockerCompose(ctx, opts.outputDir);
-      const composePath = path.join(getOutputDir(opts.outputDir), "docker-compose.dogfood.yml");
-      logger.info({ path: composePath }, "[6/7] docker-compose.dogfood.yml written.");
+      await generateDockerCompose(ctx, opts.outputDir, undefined, opts.dogfood);
+      const composePath = path.join(getOutputDir(opts.outputDir), cfName);
+      logger.info({ path: composePath }, `[6/7] ${cfName} written.`);
     } catch (err) {
-      exitWithError("Failed to write docker-compose.dogfood.yml", err);
+      exitWithError(`Failed to write ${cfName}`, err);
     }
 
     // Reverse-proxy config.
@@ -1093,7 +1320,7 @@ export const bootstrapCommand = new Command("bootstrap")
         await generateReverseProxyConfig(domain, proxyType, opts.outputDir);
       } catch (err) {
         // Non-fatal — user can set up proxy manually.
-        logger.warn({ err: (err as Error).message }, "Failed to generate proxy config (non-fatal).");
+        logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to generate proxy config (non-fatal).");
       }
     }
 
@@ -1106,20 +1333,23 @@ export const bootstrapCommand = new Command("bootstrap")
         logger.info("[7/7] Validation passed — the webhook server is healthy.");
       } catch (err) {
         // Non-fatal — stack may just need a moment.
-        logger.warn({ err: (err as Error).message }, "[7/7] Validation failed (non-fatal).");
+        logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[7/7] Validation failed (non-fatal).");
       }
     } else {
       logger.info("[7/7] Skipping validation (pass --validate to enable).");
     }
 
     // ── Success ────────────────────────────────────────────────────────────
+    const finalComposeName = composeFilename(opts.dogfood);
+    const startCmd = opts.dogfood
+      ? `docker compose -f ${finalComposeName} up -d`
+      : "docker compose up -d";
     logger.info(
       {
         envPath: path.join(getOutputDir(opts.outputDir), ".env"),
-        composePath: path.join(getOutputDir(opts.outputDir), "docker-compose.dogfood.yml"),
+        composePath: path.join(getOutputDir(opts.outputDir), finalComposeName),
         webhookUrl,
       },
-      "Bootstrap complete! Next: add ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN to .env, " +
-        "then run: docker compose -f docker-compose.dogfood.yml up -d",
+      `Bootstrap complete! Next: add ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN to .env, then run: ${startCmd}`,
     );
   });
