@@ -28,6 +28,9 @@ import {
   generateReverseProxyConfig,
   validateSetup,
   bootstrapCommand,
+  composeFilename,
+  detectLegacyArtifacts,
+  LEGACY_ARTIFACT_MIGRATIONS,
   isHeadlessEnvironment,
   type BootstrapContext,
   type ExecFileFn,
@@ -328,11 +331,93 @@ describe("generateEnvFile()", () => {
 });
 
 // ---------------------------------------------------------------------------
+// composeFilename
+// ---------------------------------------------------------------------------
+
+describe("composeFilename()", () => {
+  it("returns docker-compose.yml by default (consumer mode)", () => {
+    expect(composeFilename()).toBe("docker-compose.yml");
+    expect(composeFilename(false)).toBe("docker-compose.yml");
+  });
+
+  it("returns docker-compose.dogfood.yml in dogfood mode", () => {
+    expect(composeFilename(true)).toBe("docker-compose.dogfood.yml");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detectLegacyArtifacts
+// ---------------------------------------------------------------------------
+
+describe("detectLegacyArtifacts()", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "ura-bootstrap-legacy-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns empty array when no legacy files exist", async () => {
+    const found = await detectLegacyArtifacts(tmpDir);
+    expect(found).toEqual([]);
+  });
+
+  it("detects docker-compose.dogfood.yml when present", async () => {
+    await fs.writeFile(path.join(tmpDir, "docker-compose.dogfood.yml"), "# legacy");
+    const found = await detectLegacyArtifacts(tmpDir);
+    expect(found).toContain("docker-compose.dogfood.yml");
+  });
+
+  it("detects .env.dogfood when present", async () => {
+    await fs.writeFile(path.join(tmpDir, ".env.dogfood"), "LINEAR_API_KEY=test");
+    const found = await detectLegacyArtifacts(tmpDir);
+    expect(found).toContain(".env.dogfood");
+  });
+
+  it("detects both legacy files when both are present", async () => {
+    await fs.writeFile(path.join(tmpDir, "docker-compose.dogfood.yml"), "# legacy compose");
+    await fs.writeFile(path.join(tmpDir, ".env.dogfood"), "LINEAR_API_KEY=test");
+    const found = await detectLegacyArtifacts(tmpDir);
+    expect(found).toContain("docker-compose.dogfood.yml");
+    expect(found).toContain(".env.dogfood");
+    expect(found).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LEGACY_ARTIFACT_MIGRATIONS
+// ---------------------------------------------------------------------------
+
+describe("LEGACY_ARTIFACT_MIGRATIONS", () => {
+  it("maps docker-compose.dogfood.yml to docker-compose.yml", () => {
+    expect(LEGACY_ARTIFACT_MIGRATIONS["docker-compose.dogfood.yml"]).toBe("docker-compose.yml");
+  });
+
+  it("maps .env.dogfood to .env", () => {
+    expect(LEGACY_ARTIFACT_MIGRATIONS[".env.dogfood"]).toBe(".env");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // generateDockerCompose
 // ---------------------------------------------------------------------------
 
 describe("generateDockerCompose()", () => {
-  it("writes docker-compose.dogfood.yml with correct content", async () => {
+  function makeCtx(): BootstrapContext {
+    return {
+      appId: 12345,
+      privateKey: "pem",
+      githubWebhookSecret: "ghsecret",
+      linearApiKey: "lin_api_test",
+      linearWebhookSecret: "linearsecret",
+      webhookUrl: "https://hooks.example.com",
+    };
+  }
+
+  it("writes docker-compose.yml with correct content (consumer mode)", async () => {
     const writtenFiles: Record<string, string> = {};
     const mockWriteFile = vi.fn(async (filePath: PathLike | fs.FileHandle, data: unknown) => {
       writtenFiles[filePath.toString()] = data as string;
@@ -358,7 +443,7 @@ describe("generateDockerCompose()", () => {
     expect(content).toContain("env_file: .env");
   });
 
-  it("writes to docker-compose.dogfood.yml filename", async () => {
+  it("writes to docker-compose.yml filename by default (consumer mode)", async () => {
     const writtenPaths: string[] = [];
     const mockWriteFile = vi.fn(async (filePath: PathLike | fs.FileHandle, _data: unknown) => {
       writtenPaths.push(filePath.toString());
@@ -368,7 +453,39 @@ describe("generateDockerCompose()", () => {
       writeFile: mockWriteFile as typeof fs.writeFile,
     });
 
+    expect(writtenPaths[0]).toMatch(/docker-compose\.yml$/);
+    expect(writtenPaths[0]).not.toMatch(/docker-compose\.dogfood\.yml$/);
+  });
+
+  it("writes to docker-compose.dogfood.yml when dogfood=true", async () => {
+    const writtenPaths: string[] = [];
+    const mockWriteFile = vi.fn(async (filePath: PathLike | fs.FileHandle, _data: unknown) => {
+      writtenPaths.push(filePath.toString());
+    });
+
+    await generateDockerCompose(
+      makeCtx(),
+      "/tmp/test-dir",
+      { writeFile: mockWriteFile as typeof fs.writeFile },
+      true,
+    );
+
     expect(writtenPaths[0]).toMatch(/docker-compose\.dogfood\.yml$/);
+  });
+
+  it("includes consumer usage command in content by default", async () => {
+    const writtenFiles: Record<string, string> = {};
+    const mockWriteFile = vi.fn(async (filePath: PathLike | fs.FileHandle, data: unknown) => {
+      writtenFiles[filePath.toString()] = data as string;
+    });
+
+    await generateDockerCompose(makeCtx(), "/tmp/test-dir", {
+      writeFile: mockWriteFile as typeof fs.writeFile,
+    });
+
+    const content = Object.values(writtenFiles)[0]!;
+    expect(content).toContain("docker compose up -d");
+    expect(content).not.toContain("docker-compose.dogfood.yml");
   });
 });
 
@@ -822,6 +939,14 @@ describe("bootstrapCommand", () => {
     const portOpt = opts.find((o) => o.long === "--port");
     expect(portOpt).toBeDefined();
     expect(portOpt?.defaultValue).toBe("3000");
+  });
+
+  it("has --dogfood option (hidden, for urateam contributors)", () => {
+    const opts = bootstrapCommand.options;
+    const dogfoodOpt = opts.find((o) => o.long === "--dogfood");
+    expect(dogfoodOpt).toBeDefined();
+    // Hidden options still appear in the options array but not in help output.
+    expect(dogfoodOpt?.hidden).toBe(true);
   });
 
   it("has --headless option", () => {

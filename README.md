@@ -14,7 +14,7 @@ Or if you have `ura` installed:
 ura bootstrap
 ```
 
-This runs interactive pre-flight checks, creates a GitHub App, registers a Linear webhook, and generates a `docker-compose.dogfood.yml` ready to `docker compose up`.
+This runs interactive pre-flight checks, creates a GitHub App, registers a Linear webhook, and generates a `docker-compose.yml` ready to `docker compose up`.
 
 **Prerequisites:** Docker, curl, openssl, a GitHub account, a Linear workspace.
 
