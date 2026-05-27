@@ -31,7 +31,7 @@ import {
 } from "../audit/events.js";
 import { collectState } from "./state.js";
 import { decide } from "./decide.js";
-import { bumpFromConfigAndCommits } from "./versioning.js";
+import { bumpFromConfigAndCommits, isPrereleaseTag } from "./versioning.js";
 import { createTagAndRelease, parseRepoFromUrl } from "./github.js";
 import type { ReleaseManagerConfig } from "./types.js";
 import { RELEASE_APPROVE_ACTION_ID, RELEASE_SKIP_ACTION_ID } from "./types.js";
@@ -298,6 +298,11 @@ function approvalTtlMs(config: ReleaseManagerConfig): number {
   return 24 * 3600 * 1000;
 }
 
+/** Generate a unique release-decision row ID. */
+function generateDecisionId(): string {
+  return `rd_${randomUUID()}`;
+}
+
 /**
  * Execute a single release-manager decision cycle.
  *
@@ -384,6 +389,9 @@ export async function tick(ctx: TickContext): Promise<void> {
     hasFreshApproval: state.hasFreshApproval,
   });
 
+  // Parse once — reused by qaCheck, skip/trigger, and fire paths.
+  const { owner, repo } = parseRepoFromUrl(repoUrl);
+
   // 1. Manual-tag detection — re-baseline counters.
   if (state.manualTagDetected) {
     const id = generateReleaseDecisionId();
@@ -401,7 +409,6 @@ export async function tick(ctx: TickContext): Promise<void> {
   // 2. BEC-136: Compute QA state when qaCheck is configured.
   let qaState: { workflowFileExists: boolean; runConclusion: string | null } | undefined;
   if (config.triggers.qaCheck) {
-    const { owner, repo } = parseRepoFromUrl(repoUrl);
     let wfExists = false;
     try {
       wfExists = await workflowFileExists({
@@ -463,10 +470,12 @@ export async function tick(ctx: TickContext): Promise<void> {
 
   // 3. Decision.
   const result = decide(state, config.triggers, undefined, qaState);
+  const prereleaseChannel = config.prereleaseChannel ?? "none";
   const proposedVersion = bumpFromConfigAndCommits(
     state.lastTag,
     state.commitsSinceLastTag,
     config.versionBump,
+    prereleaseChannel,
   );
 
   if (result.kind === "skip") {
@@ -636,12 +645,14 @@ export async function tick(ctx: TickContext): Promise<void> {
   }
 
   // Fire — create tag + release.
-  const id = `rd_${randomUUID()}`;
+  const id = generateDecisionId();
   const githubResult = await createTagAndRelease({
     octokit,
-    ...parseRepoFromUrl(repoUrl),
+    owner,
+    repo,
     tag: proposedVersion,
     sha: state.headSha,
+    isPrerelease: isPrereleaseTag(proposedVersion),
   });
 
   if (githubResult.kind === "tag_exists") {

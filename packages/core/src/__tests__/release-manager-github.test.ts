@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { createTagAndRelease, parseRepoFromUrl } from "../release-manager/github.js";
+import { RELEASE_TAG_RE } from "../release-manager/state.js";
 
 describe("parseRepoFromUrl", () => {
   it("parses https github URL", () => {
@@ -50,8 +51,38 @@ describe("createTagAndRelease", () => {
       tag_name: "v1.2.4",
       target_commitish: "abc123",
       generate_release_notes: true,
+      prerelease: false,
     });
     expect(r.kind === "ok" && r.releaseUrl).toMatch(/v1\.2\.4/);
+  });
+
+  it("passes prerelease: true when isPrerelease=true", async () => {
+    const octokit = makeMockOctokit();
+    await createTagAndRelease({
+      octokit,
+      owner: "org",
+      repo: "repo",
+      tag: "v1.2.4-beta.1",
+      sha: "abc123",
+      isPrerelease: true,
+    });
+    expect(octokit.repos.createRelease).toHaveBeenCalledWith(
+      expect.objectContaining({ prerelease: true }),
+    );
+  });
+
+  it("passes prerelease: false when isPrerelease is omitted", async () => {
+    const octokit = makeMockOctokit();
+    await createTagAndRelease({
+      octokit,
+      owner: "org",
+      repo: "repo",
+      tag: "v1.2.4",
+      sha: "abc123",
+    });
+    expect(octokit.repos.createRelease).toHaveBeenCalledWith(
+      expect.objectContaining({ prerelease: false }),
+    );
   });
 
   it("classifies 422 'already exists' as tag_exists", async () => {
@@ -84,5 +115,29 @@ describe("createTagAndRelease", () => {
     });
     const r = await createTagAndRelease({ octokit, owner: "org", repo: "repo", tag: "v1.2.4", sha: "abc" });
     expect(r.kind).toBe("other_error");
+  });
+});
+
+describe("RELEASE_TAG_RE", () => {
+  it("matches plain semver tags", () => {
+    expect(RELEASE_TAG_RE.test("v1.2.3")).toBe(true);
+    expect(RELEASE_TAG_RE.test("1.2.3")).toBe(true);
+    expect(RELEASE_TAG_RE.test("v0.0.1")).toBe(true);
+    expect(RELEASE_TAG_RE.test("v10.20.30")).toBe(true);
+  });
+
+  it("matches prerelease semver tags", () => {
+    expect(RELEASE_TAG_RE.test("v1.2.3-beta.1")).toBe(true);
+    expect(RELEASE_TAG_RE.test("v1.2.3-rc.2")).toBe(true);
+    expect(RELEASE_TAG_RE.test("v1.2.3-alpha.10")).toBe(true);
+    expect(RELEASE_TAG_RE.test("1.2.3-beta.1")).toBe(true);
+  });
+
+  it("rejects non-semver tags", () => {
+    expect(RELEASE_TAG_RE.test("latest")).toBe(false);
+    expect(RELEASE_TAG_RE.test("v1.2")).toBe(false);
+    expect(RELEASE_TAG_RE.test("v1.2.3.4")).toBe(false);
+    expect(RELEASE_TAG_RE.test("v1.2.3-beta")).toBe(false);   // missing .N
+    expect(RELEASE_TAG_RE.test("v1.2.3-BETA.1")).toBe(false); // uppercase not matched
   });
 });

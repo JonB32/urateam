@@ -64,4 +64,35 @@ describe("ReleaseManagerConfigSchema", () => {
       })
     ).toThrow();
   });
+
+  describe("prereleaseChannel", () => {
+    it("defaults to 'none' when omitted", () => {
+      const cfg = ReleaseManagerConfigSchema.parse({
+        enabled: true,
+        triggers: { mergedPRsSince: 5 },
+      });
+      expect(cfg.prereleaseChannel).toBe("none");
+    });
+
+    it("accepts all valid channel values", () => {
+      for (const channel of ["beta", "rc", "alpha", "none"] as const) {
+        const cfg = ReleaseManagerConfigSchema.parse({
+          enabled: true,
+          triggers: { mergedPRsSince: 5 },
+          prereleaseChannel: channel,
+        });
+        expect(cfg.prereleaseChannel).toBe(channel);
+      }
+    });
+
+    it("rejects unknown channel values", () => {
+      expect(() =>
+        ReleaseManagerConfigSchema.parse({
+          enabled: true,
+          triggers: { mergedPRsSince: 5 },
+          prereleaseChannel: "stable",
+        })
+      ).toThrow();
+    });
+  });
 });

@@ -6,6 +6,8 @@ export interface CreateTagAndReleaseInput {
   repo: string;
   tag: string;   // e.g. "v1.2.4"
   sha: string;   // commit SHA to tag
+  /** Set to true for prerelease tags (e.g. v1.2.3-beta.1) so GitHub marks the release accordingly. */
+  isPrerelease?: boolean;
 }
 
 export type CreateTagAndReleaseResult =
@@ -73,6 +75,7 @@ export async function createTagAndRelease(
       tag_name: tag,
       target_commitish: sha,
       generate_release_notes: true,
+      prerelease: input.isPrerelease ?? false,
     });
     const releaseUrl =
       (res as any)?.data?.html_url ?? `https://github.com/${owner}/${repo}/releases/tag/${tag}`;

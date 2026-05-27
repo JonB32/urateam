@@ -8,8 +8,8 @@ import type { CollectedState } from "./types.js";
 
 const log = createLogger({ component: "ReleaseManager:state" });
 
-/** Matches semantic version tags with an optional leading "v" (e.g. "v1.2.3" or "1.2.3"). */
-const VERSION_TAG_PATTERN = /^v?\d+\.\d+\.\d+$/;
+/** Matches both plain (v1.2.3) and prerelease (v1.2.3-beta.1) semver tags. */
+export const RELEASE_TAG_RE = /^v?\d+\.\d+\.\d+(-[a-z]+\.\d+)?$/;
 
 const CI_STATUS = {
   GREEN: "green" as const,
@@ -71,7 +71,7 @@ export async function collectState(input: CollectStateInput): Promise<CollectedS
   let lastTagAt: Date | null = null;
   try {
     const tagsData = tagsResOrNull ? ((tagsResOrNull as any).data ?? []) : [];
-    const candidate = tagsData.find((t: any) => VERSION_TAG_PATTERN.test(t.name));
+    const candidate = tagsData.find((t: any) => RELEASE_TAG_RE.test(t.name));
     if (candidate) {
       lastTag = candidate.name.startsWith("v") ? candidate.name : `v${candidate.name}`;
       lastTagSha = candidate.commit.sha;
