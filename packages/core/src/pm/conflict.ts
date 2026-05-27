@@ -23,7 +23,7 @@ export interface GetActiveFileMapsInput {
   activeRuns: ActiveRun[];
   defaultBranch: string;
   repoDir: string;
-  execGit: (args: string[], cwd: string) => Promise<string>;
+  execGit: (args: string[], cwd: string, timeoutMs?: number, expectFailure?: boolean) => Promise<string>;
   /** Injected for testability; defaults to `fs.existsSync`. */
   pathExists?: (p: string) => boolean;
 }
@@ -47,7 +47,7 @@ export async function getActiveFileMaps(
     // This avoids conflating "branch not yet pushed" with genuine git failures.
     let branchOnOrigin = false;
     try {
-      await execGit(["rev-parse", "--verify", "--quiet", `origin/${run.branch}`], repoDir);
+      await execGit(["rev-parse", "--verify", "--quiet", `origin/${run.branch}`], repoDir, undefined, true);
       branchOnOrigin = true;
     } catch {
       // Branch not on origin yet — expected for in-flight runs that haven't pushed.
