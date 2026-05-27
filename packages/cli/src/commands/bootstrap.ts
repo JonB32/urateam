@@ -22,6 +22,7 @@ import * as childProcess from "node:child_process";
 import * as readline from "node:readline";
 import * as crypto from "node:crypto";
 import * as path from "node:path";
+import * as os from "node:os";
 
 // ---------------------------------------------------------------------------
 // Module-level constants
@@ -63,6 +64,8 @@ export interface BootstrapDeps {
   fetch?: typeof fetch;
   /** Replaces fs.writeFile. */
   writeFile?: typeof fs.writeFile;
+  /** Replaces fs.unlink. */
+  unlink?: typeof fs.unlink;
   /** Replaces fs.mkdir. */
   mkdir?: typeof fs.mkdir;
   /** Replaces process.stdout.write (for console output). */
@@ -461,6 +464,34 @@ export async function preflightChecks(deps?: BootstrapDeps): Promise<void> {
 // Step 2: GitHub App manifest flow
 // ---------------------------------------------------------------------------
 
+/** Escapes a string for safe embedding in an HTML double-quoted attribute value. */
+const htmlEscapeAttr = (s: string): string =>
+  s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/**
+ * Builds a self-submitting HTML page that POSTs the GitHub App manifest to
+ * GitHub. GitHub's manifest flow requires the manifest via POST hidden field,
+ * not as a GET query parameter.
+ *
+ * @param actionUrl - GitHub URL with `?state=...` appended (no manifest param).
+ * @param manifestJson - Raw (unencoded) manifest JSON string.
+ */
+export function buildManifestPostHtml(actionUrl: string, manifestJson: string): string {
+  return (
+    `<!DOCTYPE html>\n` +
+    `<html lang="en">\n` +
+    `<head><meta charset="utf-8"><title>Creating GitHub App…</title></head>\n` +
+    `<body>\n` +
+    `<p>Submitting GitHub App manifest…</p>\n` +
+    `<form id="f" method="post" action="${htmlEscapeAttr(actionUrl)}">\n` +
+    `  <input type="hidden" name="manifest" value="${htmlEscapeAttr(manifestJson)}">\n` +
+    `</form>\n` +
+    `<script>document.getElementById("f").submit();</script>\n` +
+    `</body>\n` +
+    `</html>`
+  );
+}
+
 /**
  * Creates a GitHub App via the manifest flow:
  *   1. Starts a temporary HTTP server on a local port to capture the OAuth code.
@@ -543,14 +574,27 @@ export async function createGitHubApp(
     ],
   };
 
-  const manifestJson = encodeURIComponent(JSON.stringify(manifest));
+  const manifestJson = JSON.stringify(manifest);
   const baseUrl = org
     ? `https://github.com/organizations/${encodeURIComponent(org)}/settings/apps/new`
     : "https://github.com/settings/apps/new";
-  const githubUrl = `${baseUrl}?state=${state}&manifest=${manifestJson}`;
+  const actionUrl = `${baseUrl}?state=${state}`;
+  const htmlContent = buildManifestPostHtml(actionUrl, manifestJson);
+
+  // Write the self-submitting POST form to a temp file; open it in the browser.
+  // The browser submits the form to GitHub with the manifest as a hidden field,
+  // which is the only mechanism GitHub supports for manifest pre-population.
+  const writeFn = deps?.writeFile ?? fs.writeFile;
+  const unlinkFn = deps?.unlink ?? fs.unlink;
+  const tmpFile = path.join(os.tmpdir(), `urateam-gh-manifest-${state.slice(0, 8)}.html`);
+  await writeFn(tmpFile, htmlContent, "utf8");
 
   // ── Headless path ───────────────────────────────────────────────────────────
   if (useHeadless) {
+    // GET-encoded fallback: a remote browser can't POST our local form. GitHub
+    // won't auto-populate the manifest from GET (that's the #422 bug), but the
+    // operator can still create the app manually from the form GitHub shows.
+    const githubUrl = `${actionUrl}&manifest=${encodeURIComponent(manifestJson)}`;
     const readLineFn = deps?.readLine ?? readLineDefault;
     log("");
     log("Open this URL in any browser (on any machine):");
@@ -583,15 +627,19 @@ export async function createGitHubApp(
   return new Promise((resolve, reject) => {
     let settled = false;
 
+    const cleanup = (): void => {
+      unlinkFn(tmpFile).catch(() => {});
+    };
+
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
+      cleanup();
       server.close();
       reject(
         new Error(
           `Timed out waiting for GitHub App OAuth callback after ${timeoutMs}ms.\n` +
-            "If the browser did not open, visit:\n" +
-            `  ${githubUrl}`,
+            "If the browser did not open automatically, re-run the command.",
         ),
       );
     }, timeoutMs);
@@ -630,6 +678,7 @@ export async function createGitHubApp(
 
       settled = true;
       clearTimeout(timeout);
+      cleanup();
       server.close();
 
       // Exchange code for credentials.
@@ -641,13 +690,14 @@ export async function createGitHubApp(
     });
 
     server.listen(callbackPort, "127.0.0.1", () => {
-      openFn(githubUrl);
+      openFn(tmpFile);
     });
 
     server.on("error", (err) => {
       if (!settled) {
         settled = true;
         clearTimeout(timeout);
+        cleanup();
         reject(new Error(`Callback server failed to start: ${err.message}`));
       }
     });
