@@ -76,12 +76,12 @@ describe("Bootstrap e2e — file generation", () => {
     expect(content).toContain("\\n");
   });
 
-  it("generateDockerCompose writes a valid docker-compose.dogfood.yml with default ports", async () => {
+  it("generateDockerCompose writes a valid docker-compose.yml in consumer mode (default)", async () => {
     const ctx = makeCtx();
     await generateDockerCompose(ctx, tmpDir);
 
     const content = await fs.readFile(
-      path.join(tmpDir, "docker-compose.dogfood.yml"),
+      path.join(tmpDir, "docker-compose.yml"),
       "utf8",
     );
 
@@ -95,6 +95,21 @@ describe("Bootstrap e2e — file generation", () => {
     expect(content).toContain("env_file: .env");
     expect(content).toContain("urateam_data:");
     expect(content).toContain("depends_on:");
+    // Consumer mode uses plain docker compose up -d, no -f flag needed.
+    expect(content).toContain("docker compose up -d");
+  });
+
+  it("generateDockerCompose writes docker-compose.dogfood.yml in dogfood mode", async () => {
+    const ctx = makeCtx();
+    await generateDockerCompose(ctx, tmpDir, undefined, true);
+
+    const content = await fs.readFile(
+      path.join(tmpDir, "docker-compose.dogfood.yml"),
+      "utf8",
+    );
+
+    expect(content).toContain("services:");
+    expect(content).toContain("docker-compose.dogfood.yml");
   });
 
   it("generateDockerCompose uses custom ports from ctx", async () => {
@@ -159,7 +174,7 @@ describe("Bootstrap e2e — file generation", () => {
     expect(allLogs).not.toContain("localhost:3000");
   });
 
-  it("all three output files coexist in the same output directory", async () => {
+  it("all three output files coexist in the same output directory (consumer mode)", async () => {
     const ctx = makeCtx();
     const logs: string[] = [];
 
@@ -171,7 +186,8 @@ describe("Bootstrap e2e — file generation", () => {
 
     const files = await fs.readdir(tmpDir);
     expect(files).toContain(".env");
-    expect(files).toContain("docker-compose.dogfood.yml");
+    expect(files).toContain("docker-compose.yml");
+    expect(files).not.toContain("docker-compose.dogfood.yml");
     expect(files).toContain("Caddyfile");
   });
 });

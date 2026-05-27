@@ -17,6 +17,11 @@ notes call out when a change affects only a single package.
 
 ## [Unreleased]
 
+### Changed
+- **BEC-267: `ura bootstrap` now emits consumer-named artifacts** — `docker-compose.yml` and `.env` (no "dogfood" in filenames). Previously the wizard wrote `docker-compose.dogfood.yml`, which confused self-hosted operators who aren't running urateam's internal QA soak.
+  - **Migration:** existing deployments are unaffected (the Docker stack keeps running). If you re-run `ura bootstrap`, it will detect the legacy `docker-compose.dogfood.yml` and print a one-line `cp` migration command. To migrate manually: `cp docker-compose.dogfood.yml docker-compose.yml && docker compose up -d`.
+  - **urateam contributors:** `ura bootstrap --dogfood` (hidden flag, not in `--help`) still emits the dogfood-named files for the internal soak harness.
+
 ### Added (OSS+)
 - **BEC-203: Sentry + CloudWatch webhook integrations** — two new observability webhook integrations that bridge external alerting systems to the urateam autonomous pipeline:
   - **Sentry integration** (`packages/core/src/integrations/sentry.ts`): `POST /webhooks/sentry` handler verifies `X-Sentry-Hook-Signature` HMAC-SHA256, parses Sentry issue alert payloads (stack trace, breadcrumbs, affected files, triggered rule), maps Sentry level (`critical/error/warning/info`) to Linear priority (`1/2/3/4`), and creates a Linear ticket in Triage state with `bug` + `auto-implement` labels. Idempotent: queries Linear for existing `[Sentry#<id>]`-prefixed ticket within a configurable window (default 24h).
