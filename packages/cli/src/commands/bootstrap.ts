@@ -305,21 +305,55 @@ export function isHeadlessEnvironment(): boolean {
 }
 
 /**
- * Reads a single line from stdin using readline.
- * Used as the default `deps.readLine` implementation in headless mode.
+ * Core readline implementation — creates one interface, asks `fullQuestion`
+ * verbatim, resolves with the trimmed answer, then closes.
  * @internal
  */
-async function readLineDefault(question: string): Promise<string> {
+async function readLineCore(fullQuestion: string): Promise<string> {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
   });
   return new Promise((resolve) => {
-    rl.question(question, (answer) => {
+    rl.question(fullQuestion, (answer) => {
       rl.close();
       resolve(answer.trim());
     });
   });
+}
+
+/**
+ * Reads a single line from stdin using readline.
+ * Used as the default `deps.readLine` implementation in headless mode.
+ * The caller is responsible for including any trailing ": " in `question`.
+ * @internal
+ */
+async function readLineDefault(question: string): Promise<string> {
+  return readLineCore(question);
+}
+
+/**
+ * Races `promise` against a timeout. Clears the timer if `promise` resolves
+ * or rejects first, so no dangling timers are left alive.
+ * @internal
+ */
+async function raceWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutError: Error,
+): Promise<T> {
+  let timerId: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timerId = setTimeout(() => reject(timeoutError), timeoutMs);
+  });
+  try {
+    const result = await Promise.race([promise, timeoutPromise]);
+    clearTimeout(timerId);
+    return result;
+  } catch (err) {
+    clearTimeout(timerId);
+    throw err;
+  }
 }
 
 /**
@@ -369,7 +403,7 @@ async function exchangeGitHubManifestCode(
  * Verifies that the local environment is ready for a bootstrap run:
  *   - Docker daemon is reachable (`docker info`)
  *   - Ports 3000 and 3001 are free
- *   - Required CLI tools are present: curl, openssl, jq
+ *   - Required CLI tools are present: curl, openssl
  *
  * Throws a descriptive `Error` on the first failure. The bootstrap action
  * calls `process.exit(1)` after logging the error.
@@ -527,22 +561,15 @@ export async function createGitHubApp(
     log("Copy the value of the 'code' query parameter from the URL bar and paste it here.");
     log("");
 
-    // Race the readline prompt against the timeout.
-    const codePromise = readLineFn("Paste the code from the redirect URL: ");
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(
-        () =>
-          reject(
-            new Error(
-              `Timed out waiting for GitHub App OAuth code after ${timeoutMs}ms.\n` +
-                "Re-run bootstrap and complete the GitHub App creation within the time limit.",
-            ),
-          ),
-        timeoutMs,
+    // Race the readline prompt against the timeout (timer is always cleared).
+    const code = await raceWithTimeout(
+      readLineFn("Paste the code from the redirect URL: "),
+      timeoutMs,
+      new Error(
+        `Timed out waiting for GitHub App OAuth code after ${timeoutMs}ms.\n` +
+          "Re-run bootstrap and complete the GitHub App creation within the time limit.",
       ),
     );
-
-    const code = await Promise.race([codePromise, timeoutPromise]);
     if (!code) {
       throw new Error("No code entered. Please re-run bootstrap and paste the code from the redirect URL.");
     }
@@ -948,24 +975,17 @@ export async function validateSetup(
 // ---------------------------------------------------------------------------
 
 /**
- * Creates a readline interface and asks a single question.
- * Returns the trimmed answer. Closes the interface after.
+ * Asks an interactive question via readline and returns the trimmed answer.
+ * When `defaultValue` is provided it is shown in brackets and used as fallback.
+ * Delegates I/O to {@link readLineCore} so there is only one readline setup site.
  * @internal
  */
 async function prompt(question: string, defaultValue?: string): Promise<string> {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-  return new Promise((resolve) => {
-    const displayQuestion = defaultValue
-      ? `${question} [${defaultValue}]: `
-      : `${question}: `;
-    rl.question(displayQuestion, (answer) => {
-      rl.close();
-      resolve(answer.trim() || defaultValue || "");
-    });
-  });
+  const displayQuestion = defaultValue
+    ? `${question} [${defaultValue}]: `
+    : `${question}: `;
+  const answer = await readLineCore(displayQuestion);
+  return answer || defaultValue || "";
 }
 
 // ---------------------------------------------------------------------------
@@ -1016,7 +1036,7 @@ export const bootstrapCommand = new Command("bootstrap")
 
     /** Logs an error via the structured logger then exits with code 1. */
     function exitWithError(message: string, err: unknown): never {
-      logger.error({ err: (err as Error).message }, message);
+      logger.error({ err: err instanceof Error ? err.message : String(err) }, message);
       process.exit(1);
     }
 
@@ -1086,9 +1106,11 @@ export const bootstrapCommand = new Command("bootstrap")
         htmlUrl: "",
       };
     } else {
-      const oauthTimeoutMs =
-        parseInt(opts.oauthTimeoutMs ?? process.env.BOOTSTRAP_OAUTH_TIMEOUT_MS ?? "", 10) ||
-        300_000;
+      const parsedTimeout = parseInt(
+        opts.oauthTimeoutMs ?? process.env.BOOTSTRAP_OAUTH_TIMEOUT_MS ?? "",
+        10,
+      );
+      const oauthTimeoutMs = parsedTimeout > 0 ? parsedTimeout : 300_000;
       const useHeadless = opts.headless || isHeadlessEnvironment();
 
       if (useHeadless) {
@@ -1170,7 +1192,7 @@ export const bootstrapCommand = new Command("bootstrap")
         await generateReverseProxyConfig(domain, proxyType, opts.outputDir);
       } catch (err) {
         // Non-fatal — user can set up proxy manually.
-        logger.warn({ err: (err as Error).message }, "Failed to generate proxy config (non-fatal).");
+        logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to generate proxy config (non-fatal).");
       }
     }
 
@@ -1183,7 +1205,7 @@ export const bootstrapCommand = new Command("bootstrap")
         logger.info("[7/7] Validation passed — the webhook server is healthy.");
       } catch (err) {
         // Non-fatal — stack may just need a moment.
-        logger.warn({ err: (err as Error).message }, "[7/7] Validation failed (non-fatal).");
+        logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[7/7] Validation failed (non-fatal).");
       }
     } else {
       logger.info("[7/7] Skipping validation (pass --validate to enable).");

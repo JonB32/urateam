@@ -48,6 +48,22 @@ function makeExecFile(failing?: string[]): ExecFileFn {
   };
 }
 
+/**
+ * Shared BootstrapContext factory used by generateEnvFile and generateDockerCompose tests.
+ * Accepts optional overrides to keep individual tests focused on the field they test.
+ */
+function makeCtx(overrides?: Partial<BootstrapContext>): BootstrapContext {
+  return {
+    appId: 12345,
+    privateKey: "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----",
+    githubWebhookSecret: "ghsecret",
+    linearApiKey: "lin_api_test123",
+    linearWebhookSecret: "linearsecret",
+    webhookUrl: "https://hooks.example.com",
+    ...overrides,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // preflightChecks
 // ---------------------------------------------------------------------------
@@ -247,18 +263,6 @@ describe("generateEnvFile()", () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  function makeCtx(overrides?: Partial<BootstrapContext>): BootstrapContext {
-    return {
-      appId: 12345,
-      privateKey: "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----",
-      githubWebhookSecret: "ghsecret",
-      linearApiKey: "lin_api_test123",
-      linearWebhookSecret: "linearsecret",
-      webhookUrl: "https://hooks.example.com",
-      ...overrides,
-    };
-  }
-
   it("writes a .env file with all required keys", async () => {
     const ctx = makeCtx();
     // Use a mock writeFile that writes to tmpDir.
@@ -328,17 +332,6 @@ describe("generateEnvFile()", () => {
 // ---------------------------------------------------------------------------
 
 describe("generateDockerCompose()", () => {
-  function makeCtx(): BootstrapContext {
-    return {
-      appId: 12345,
-      privateKey: "pem",
-      githubWebhookSecret: "ghsecret",
-      linearApiKey: "lin_api_test",
-      linearWebhookSecret: "linearsecret",
-      webhookUrl: "https://hooks.example.com",
-    };
-  }
-
   it("writes docker-compose.dogfood.yml with correct content", async () => {
     const writtenFiles: Record<string, string> = {};
     const mockWriteFile = vi.fn(async (filePath: PathLike | fs.FileHandle, data: unknown) => {
