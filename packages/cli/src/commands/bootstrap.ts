@@ -571,6 +571,10 @@ export async function createGitHubApp(
       pull_requests: "write",
       contents: "write",
       metadata: "read",
+      // Required by GitHub when default_events includes check_suite / check_run.
+      checks: "read",
+      // Required by GitHub when default_events includes status.
+      statuses: "read",
     },
     default_events: [
       "push",
