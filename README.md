@@ -16,7 +16,29 @@ ura bootstrap
 
 This runs interactive pre-flight checks, creates a GitHub App, registers a Linear webhook, and generates a `docker-compose.yml` ready to `docker compose up`.
 
-**Prerequisites:** Docker, curl, openssl, jq, a GitHub account, a Linear workspace.
+**Prerequisites:** Docker, curl, openssl, a GitHub account, a Linear workspace.
+
+### Headless / SSH-only hosts
+
+On a server with no graphical display the wizard auto-detects the environment
+(no `DISPLAY` / `WAYLAND_DISPLAY`) and switches to a headless flow: it prints
+the GitHub App creation URL, you open it in a browser on any machine, complete
+the app creation, then paste the `code` query parameter from the redirect URL
+back into the terminal.
+
+You can also force headless mode explicitly:
+
+```bash
+ura bootstrap --headless
+```
+
+The OAuth callback timeout is configurable (default 5 minutes):
+
+```bash
+ura bootstrap --headless --oauth-timeout-ms 600000
+# or via env var:
+BOOTSTRAP_OAUTH_TIMEOUT_MS=600000 ura bootstrap
+```
 
 ## Development Quickstart
 
