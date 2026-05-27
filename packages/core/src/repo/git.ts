@@ -558,11 +558,19 @@ async function findTrackedPaths(
 }
 
 /**
+ * Split newline-delimited git output (e.g. diff --name-only, log --format=%s)
+ * into a trimmed, non-empty string array.
+ */
+export function parseGitLines(output: string): string[] {
+  return output.split("\n").map((l) => l.trim()).filter(Boolean);
+}
+
+/**
  * Parse `git status --porcelain` output into worktree-relative paths.
  * Handles renames (`R old -> new`), additions, modifications, deletions,
  * and untracked files.
  */
-function parseStatusPaths(status: string): string[] {
+export function parseStatusPaths(status: string): string[] {
   const paths: string[] = [];
   for (const line of status.split("\n")) {
     if (!line.trim()) continue;
@@ -691,15 +699,13 @@ export async function getAgentCommits(
   baseBranch: string,
 ): Promise<string[]> {
   const log = getLog();
-  const parseLogOutput = (output: string) =>
-    output.split("\n").map((l) => l.trim()).filter(Boolean);
   try {
     // Try using origin first (normal case in production)
     const output = await gitExec(
       ["log", "--format=%s", "--reverse", `origin/${baseBranch}..HEAD`],
       worktreePath,
     );
-    return parseLogOutput(output);
+    return parseGitLines(output);
   } catch (originErr) {
     // Fall back to local branch (for testing or local-only repos)
     try {
@@ -707,7 +713,7 @@ export async function getAgentCommits(
         ["log", "--format=%s", "--reverse", `${baseBranch}..HEAD`],
         worktreePath,
       );
-      return parseLogOutput(output);
+      return parseGitLines(output);
     } catch {
       log.warn({ baseBranch }, "getAgentCommits failed on both origin and local branch — commit messages will be omitted from PR");
       return [];
