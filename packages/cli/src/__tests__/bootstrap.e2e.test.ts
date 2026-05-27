@@ -116,8 +116,9 @@ describe("Bootstrap e2e — file generation", () => {
     const ctx = { ...makeCtx(), appPort: 3010, dashboardPort: 3011 };
     await generateDockerCompose(ctx, tmpDir);
 
+    // Default (consumer mode) writes docker-compose.yml (BEC-267 split).
     const content = await fs.readFile(
-      path.join(tmpDir, "docker-compose.dogfood.yml"),
+      path.join(tmpDir, "docker-compose.yml"),
       "utf8",
     );
 
