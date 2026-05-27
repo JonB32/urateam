@@ -257,7 +257,7 @@ budget check → **recover retriable runs** → recover stuck In Progress → **
 - Postgres SQL helpers: `sqlDateGroup(db, col)` ('YYYY-MM-DD'), `sqlDaysAgoFilter(db, col, days)`. Both driver-aware — no `isPostgres()` branching in app code.
 
 ### Git Operations
-- `gitExec()` — throwing, with structured logging + timeout
+- `gitExec()` — throwing, with structured logging + timeout. Optional 4th param `expectFailure?: boolean`: when `true`, a non-zero exit is logged at `debug` instead of `error` (promise still rejects). Use at call sites that intentionally catch and ignore the rejection (e.g. branch-existence probes, `remote get-url` pre-clone checks). Default `false` preserves ERROR-level logging for all other callers.
 - `gitExecSafe()` — non-throwing, returns "" on failure
 - `gitExecRaw()` — preserves leading whitespace (porcelain output)
 - `checkDuplicateBranch()` — server-side filtered ls-remote
