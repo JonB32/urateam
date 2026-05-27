@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import type {
@@ -11,7 +12,7 @@ import type {
   AgentProfile,
 } from "../types.js";
 import type { AnyDb } from "../db/client.js";
-import { stageRuns, agentLogs } from "../db/schema.js";
+import { stageRuns, agentLogs, pipelineRuns } from "../db/schema.js";
 import { getAgentProfiles } from "./profiles.js";
 import { assemblePrompt } from "./prompt/assembler.js";
 import { extractHandoff } from "./extract-handoff.js";
@@ -25,6 +26,8 @@ import { isClaudeAuthValid, resolveClaudeAuth } from "./auth-check.js";
 import { detectStageHang, HANG_DETECTION_INTERVAL_MS } from "./hang-detection.js";
 import { resolveSessionOpts } from "./session-resolver.js";
 import { persistDecisionArtifact } from "../db/decisions-store.js";
+import { agentSessionCollisionRecoveredEvent } from "../audit/policy-release-events.js";
+import { logAuditEvent } from "../audit/writer.js";
 
 /**
  * BEC-183: wall-clock stage timeouts. Independent of the in-stream watchdog
@@ -247,6 +250,8 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
   let capturedStderr = "";
   let claudeAuthMethod = "unknown";
   let sessionType: "fresh" | "resumed" | "none" = "none";
+  // BEC-268: declared outside try so the catch block can check it for collision recovery.
+  const agentSessionId = context.agentSessionId ?? null;
 
   try {
     // Resolve auth method before any SDK call (BEC-207). Logs which path is
@@ -293,7 +298,6 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
     // BEC-249 — raced against stageTimeoutPromise so a hung countLines call
     // (unresponsive Docker volume) is cut by the wall-clock guard.
     const resolvedModel = context.stageModels?.[stage] ?? effectiveProfile.model;
-    const agentSessionId = context.agentSessionId ?? null;
     const sessionOpts = await Promise.race([
       resolveSessionOpts({
         stage,
@@ -523,6 +527,38 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
 
     const durationMs = Date.now() - stageStartMs;
 
+    // BEC-268: detect SDK session-ID collision ("Session ID X is already in
+    // use"). The SDK registers the ID before writing any JSONL, so on-disk
+    // truth (transcriptExists) still returns false and every retry re-sends
+    // { sessionId: X } — hitting the same wall. Fix: mint a fresh UUID,
+    // persist it so the recovery loop picks it up, and mark the error
+    // transient so the run is retried with the new ID.
+    const isSessionCollision =
+      agentSessionId !== null &&
+      /session id .* is already in use/i.test(capturedStderr);
+
+    if (isSessionCollision) {
+      const newSessionId = randomUUID();
+      log.warn(
+        { oldSessionId: agentSessionId, newSessionId, stage },
+        "session ID collision detected — minting fresh session ID and marking retriable",
+      );
+      await db
+        .update(pipelineRuns)
+        .set({ agentSessionId: newSessionId })
+        .where(eq(pipelineRuns.id, runId));
+      void logAuditEvent(
+        db,
+        agentSessionCollisionRecoveredEvent({
+          runId,
+          issueId,
+          stage,
+          oldSessionId: agentSessionId!,
+          newSessionId,
+        }),
+      );
+    }
+
     const enrichedContext: Record<string, unknown> = {
       message: errorMessage,
       exitCode,
@@ -539,7 +575,10 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
 
     // pipeline_runs.error_message (via stage_runs.errorMessage and StageResult):
     // a compact one-liner with key fields inline so it reads at a glance.
+    // BEC-268: prepend the collision sentinel so isTransientError() recognises
+    // this as a retriable failure and the recovery loop retries with the new ID.
     const summaryParts = [
+      ...(isSessionCollision ? ["session-id-collision-recovered"] : []),
       `exitCode=${exitCode ?? "?"}`,
       `auth=${claudeAuthMethod}`,
       `session=${sessionType}`,

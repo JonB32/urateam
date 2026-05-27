@@ -584,3 +584,31 @@ export function pipelineSkippedExistingBranchEvent(args: {
     },
   });
 }
+
+/**
+ * BEC-268 — emitted when the executor catches "Session ID X is already in use"
+ * from the SDK's stderr on a fresh-session attempt. A new UUID was minted and
+ * persisted so the recovery loop can retry without hitting the same collision.
+ */
+export function agentSessionCollisionRecoveredEvent(args: {
+  runId: string;
+  issueId: string;
+  stage: string;
+  oldSessionId: string;
+  newSessionId: string;
+}): AuditEvent {
+  return base({
+    eventType: "pipeline.agent_session_collision_recovered",
+    actor: "system",
+    actorType: "system",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      runId: args.runId,
+      issueId: args.issueId,
+      stage: args.stage,
+      oldSessionId: args.oldSessionId,
+      newSessionId: args.newSessionId,
+    },
+  });
+}
