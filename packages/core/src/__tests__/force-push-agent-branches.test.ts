@@ -119,6 +119,7 @@ vi.mock("../repo/git.js", () => ({
   gitExecSafe: vi.fn().mockResolvedValue(""),
   gitExecRaw: vi.fn().mockResolvedValue(""),
   gitExec: vi.fn().mockResolvedValue(""),
+  getAgentCommits: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("../repo/tech-stack.js", () => ({

@@ -125,6 +125,18 @@ export interface CreateGitHubAppOpts {
    * Auto-detected when DISPLAY and WAYLAND_DISPLAY are both unset on Linux.
    */
   headless?: boolean;
+  /**
+   * Public domain for production webhook deliveries (e.g. `hooks.example.com`).
+   * When set, `hook_attributes.url` is `https://<domain>/webhooks/github` so GitHub
+   * stores the real webhook URL at app-creation time. When unset, a placeholder is
+   * used and the operator must edit the webhook URL in the GitHub App settings later.
+   *
+   * NOTE: `redirect_url` and `callback_urls` continue to point at the local callback
+   * server (`http://localhost:<callbackPort>/callback`) because that's where the
+   * bootstrap manifest exchange captures the OAuth code. They're only used during
+   * the one-time bootstrap exchange, not in production.
+   */
+  domain?: string;
   deps?: BootstrapDeps;
 }
 
@@ -566,6 +578,7 @@ export async function createGitHubApp(
     org,
     timeoutMs = 300_000,
     headless: headlessOpt,
+    domain,
     deps,
   } = opts;
 
@@ -603,11 +616,19 @@ export async function createGitHubApp(
   const state = crypto.randomBytes(16).toString("hex");
   const callbackUrl = `http://localhost:${callbackPort}/callback`;
 
-  // Build the GitHub App manifest (same for both paths).
+  // Build the GitHub App manifest (same for both paths). The webhook URL is
+  // GitHub's permanent destination for event deliveries; we point it at the
+  // operator's public domain when supplied so they don't have to fix it up by
+  // hand after the manifest exchange. `redirect_url` / `callback_urls` continue
+  // to point at the local callback server — that's only used during the
+  // one-shot bootstrap manifest code exchange.
+  const webhookUrlForManifest = domain
+    ? `https://${domain}/webhooks/github`
+    : "https://placeholder.invalid/webhooks/github";
   const manifest = {
     name: "urateam",
     url: "https://github.com/JonB32/urateam",
-    hook_attributes: { url: "https://placeholder.invalid/webhooks/github" },
+    hook_attributes: { url: webhookUrlForManifest },
     redirect_url: callbackUrl,
     callback_urls: [callbackUrl],
     public: false,
@@ -1335,6 +1356,7 @@ export const bootstrapCommand = new Command("bootstrap")
           org: org || undefined,
           headless: useHeadless,
           timeoutMs: oauthTimeoutMs,
+          domain,
         });
         logger.info({ appId: appCredentials.appId, appName: appCredentials.appName }, "[3/7] GitHub App created.");
       } catch (err) {
