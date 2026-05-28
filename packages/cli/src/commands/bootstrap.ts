@@ -479,6 +479,51 @@ const htmlEscapeAttr = (s: string): string =>
   s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 /**
+ * Builds a `key=value&events[]=…` query string from a GitHub App manifest for
+ * the GET "URL parameters" flow used in headless mode. GitHub does NOT
+ * auto-populate the form from a `?manifest=<JSON>` GET parameter — that path
+ * only works via POST form submission (`buildManifestPostHtml`). The
+ * URL-parameters approach is documented here:
+ * https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-using-url-parameters
+ *
+ * @param manifest - The same manifest object used for the POST flow.
+ * @returns A query string (no leading `?` or `&`).
+ */
+export function buildManifestUrlParams(manifest: {
+  name: string;
+  url?: string;
+  description?: string;
+  hook_attributes?: { url: string };
+  redirect_url?: string;
+  callback_urls?: string[];
+  public?: boolean;
+  default_permissions?: Record<string, string>;
+  default_events?: string[];
+}): string {
+  const params = new URLSearchParams();
+  params.set("name", manifest.name);
+  if (manifest.url) params.set("url", manifest.url);
+  if (manifest.description) params.set("description", manifest.description);
+  if (manifest.hook_attributes?.url) {
+    params.set("webhook_url", manifest.hook_attributes.url);
+    params.set("webhook_active", "true");
+  }
+  if (manifest.redirect_url) params.set("redirect_url", manifest.redirect_url);
+  for (const cb of manifest.callback_urls ?? []) {
+    params.append("callback_urls[]", cb);
+  }
+  if (manifest.public !== undefined) params.set("public", String(manifest.public));
+  for (const [perm, value] of Object.entries(manifest.default_permissions ?? {})) {
+    // GitHub uses the permission name directly as the param key (e.g. `issues=read`).
+    params.set(perm, String(value));
+  }
+  for (const ev of manifest.default_events ?? []) {
+    params.append("events[]", ev);
+  }
+  return params.toString();
+}
+
+/**
  * Builds a self-submitting HTML page that POSTs the GitHub App manifest to
  * GitHub. GitHub's manifest flow requires the manifest via POST hidden field,
  * not as a GET query parameter.
@@ -605,10 +650,12 @@ export async function createGitHubApp(
 
   // ── Headless path ───────────────────────────────────────────────────────────
   if (useHeadless) {
-    // GET-encoded fallback: a remote browser can't POST our local form. GitHub
-    // won't auto-populate the manifest from GET (that's the #422 bug), but the
-    // operator can still create the app manually from the form GitHub shows.
-    const githubUrl = `${actionUrl}&manifest=${encodeURIComponent(manifestJson)}`;
+    // GET URL-parameters flow: a remote browser can't POST our local form,
+    // so we use GitHub's documented URL-parameters API to pre-populate the form
+    // fields (https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-using-url-parameters).
+    // The form is filled in for the operator; clicking "Create GitHub App"
+    // submits it.
+    const githubUrl = `${actionUrl}&${buildManifestUrlParams(manifest)}`;
     const readLineFn = deps?.readLine ?? readLineDefault;
     log("");
     log("Open this URL in any browser (on any machine):");
