@@ -1,6 +1,6 @@
 {
   "name": "@urateam/cli",
-  "version": "0.1.77",
+  "version": "0.1.78",
   "license": "BUSL-1.1",
   "type": "module",
   "main": "dist/index.js",
