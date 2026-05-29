@@ -8,6 +8,7 @@ const log = createLogger({ component: "AgentStream" });
 
 export interface StreamMessage {
   type?: string;
+  /** Top-level usage — populated on the final `result` message. */
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
@@ -15,8 +16,21 @@ export interface StreamMessage {
     cache_read_input_tokens?: number;
   };
   content?: Array<{ type: string; text?: string }> | string;
-  /** Agent SDK wraps assistant text in `message` for some message shapes */
-  message?: { content?: Array<{ type: string; text?: string }> | string } | string;
+  /** Agent SDK wraps assistant text in `message` for some message shapes. For
+   *  `type: "assistant"` messages, per-turn `usage` is nested HERE (not at
+   *  top-level) — without reading it, max-turns failures record 0 tokens
+   *  because the SDK throws before the final `result` message emits. */
+  message?:
+    | {
+        content?: Array<{ type: string; text?: string }> | string;
+        usage?: {
+          input_tokens?: number;
+          output_tokens?: number;
+          cache_creation_input_tokens?: number;
+          cache_read_input_tokens?: number;
+        };
+      }
+    | string;
 }
 
 export interface ConsumeResult {
@@ -241,11 +255,20 @@ export async function consumeAgentStream(
     }
 
     const prevOutputTokens = outputTokens;
-    if (message.usage) {
-      inputTokens += message.usage.input_tokens ?? 0;
-      outputTokens += message.usage.output_tokens ?? 0;
-      cacheCreationInputTokens += message.usage.cache_creation_input_tokens ?? 0;
-      cacheReadInputTokens += message.usage.cache_read_input_tokens ?? 0;
+    // Token usage can land in either of two places depending on message type:
+    //  - `message.usage`           — top-level on the final `result` message.
+    //  - `message.message.usage`   — nested on every per-turn `assistant`
+    //    message (the SDK wraps the underlying Anthropic API response there).
+    // Read both. Without the nested path, max-turns failures record 0 tokens
+    // because the SDK throws before the `result` message is ever emitted.
+    const nestedUsage =
+      typeof message.message === "object" ? message.message?.usage : undefined;
+    const usage = message.usage ?? nestedUsage;
+    if (usage) {
+      inputTokens += usage.input_tokens ?? 0;
+      outputTokens += usage.output_tokens ?? 0;
+      cacheCreationInputTokens += usage.cache_creation_input_tokens ?? 0;
+      cacheReadInputTokens += usage.cache_read_input_tokens ?? 0;
     }
 
     if (

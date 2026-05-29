@@ -36,6 +36,55 @@ describe("consumeAgentStream — basic behavior", () => {
     expect(result.outputTokens).toBe(80);
   });
 
+  it("accumulates token usage from nested message.message.usage (assistant shape)", async () => {
+    // The Agent SDK wraps per-turn usage inside `message.message.usage` on
+    // assistant messages — only the final `result` message carries top-level
+    // `usage`. Max-turns failures throw before that result message, so without
+    // reading the nested path tokens record as 0.
+    const result = await consumeAgentStream(
+      fromArray([
+        {
+          type: "assistant",
+          message: {
+            content: [{ type: "text", text: "turn 1" }],
+            usage: { input_tokens: 200, output_tokens: 75, cache_read_input_tokens: 1000 },
+          },
+        },
+        {
+          type: "assistant",
+          message: {
+            content: [{ type: "text", text: "turn 2" }],
+            usage: { input_tokens: 50, output_tokens: 25 },
+          },
+        },
+      ]),
+    );
+    expect(result.inputTokens).toBe(250);
+    expect(result.outputTokens).toBe(100);
+    expect(result.cacheReadInputTokens).toBe(1000);
+    expect(result.turns).toBe(2);
+  });
+
+  it("prefers top-level usage when present, falls back to nested", async () => {
+    const result = await consumeAgentStream(
+      fromArray([
+        // top-level wins
+        {
+          type: "result",
+          usage: { input_tokens: 1, output_tokens: 1 },
+          message: { usage: { input_tokens: 999, output_tokens: 999 } },
+        },
+        // top-level absent → nested is used
+        {
+          type: "assistant",
+          message: { content: "x", usage: { input_tokens: 10, output_tokens: 5 } },
+        },
+      ]),
+    );
+    expect(result.inputTokens).toBe(11);
+    expect(result.outputTokens).toBe(6);
+  });
+
   it("counts assistant messages as turns and extracts last text", async () => {
     const result = await consumeAgentStream(
       fromArray([
