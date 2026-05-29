@@ -78,6 +78,8 @@ export interface BootstrapDeps {
   isPortFree?: (port: number) => Promise<boolean>;
   /** Reads a single line from stdin. Used in the headless GitHub App flow. */
   readLine?: (prompt: string) => Promise<string>;
+  /** Reads a file from disk. Used in the headless GitHub App flow to load the downloaded PEM. */
+  readFile?: (filePath: string) => Promise<string>;
 }
 
 /**
@@ -671,36 +673,82 @@ export async function createGitHubApp(
 
   // ── Headless path ───────────────────────────────────────────────────────────
   if (useHeadless) {
-    // GET URL-parameters flow: a remote browser can't POST our local form,
-    // so we use GitHub's documented URL-parameters API to pre-populate the form
-    // fields (https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-using-url-parameters).
-    // The form is filled in for the operator; clicking "Create GitHub App"
-    // submits it.
+    // URL-parameters flow: pre-populate GitHub's "New GitHub App" form via GET
+    // query params. GitHub creates a normal App and lands the operator on the
+    // App settings page — no manifest code is issued and no redirect_url is
+    // honoured. Credentials must be captured manually via stdin.
     const githubUrl = `${actionUrl}&${buildManifestUrlParams(manifest)}`;
     const readLineFn = deps?.readLine ?? readLineDefault;
+    const readFileFn = deps?.readFile ?? ((filePath: string) => fs.readFile(filePath, "utf8"));
+
+    // Clean up the temp POST-form HTML — it is only used in the browser path.
+    unlinkFn(tmpFile).catch(() => {});
+
+    // Generate a webhook secret for the operator to copy into GitHub settings.
+    const generatedWebhookSecret = crypto.randomBytes(32).toString("hex");
+
     log("");
-    log("Open this URL in any browser (on any machine):");
+    log("Open this URL in any browser (on any machine) to create the GitHub App:");
     log(`  ${githubUrl}`);
     log("");
-    log(`After GitHub creates the app and redirects to ${callbackUrl}?code=XYZ`);
-    log("the browser will show a connection error (expected on a remote host).");
-    log("Copy the value of the 'code' query parameter from the URL bar and paste it here.");
+    log("After GitHub creates the App you will land on its settings page.");
+    log("Complete these steps before continuing:");
+    log("");
+    log("  1. Copy the App ID shown near the top of the settings page.");
+    log("");
+    log("  2. Set the Webhook secret — scroll to the Webhook section and");
+    log("     paste this value into the 'Webhook secret' field, then click");
+    log("     'Save changes':");
+    log(`       ${generatedWebhookSecret}`);
+    log("");
+    log("  3. Generate a private key — click 'Generate a private key'.");
+    log("     A .pem file will be downloaded to your machine.");
     log("");
 
-    // Race the readline prompt against the timeout (timer is always cleared).
-    const code = await raceWithTimeout(
-      readLineFn("Paste the code from the redirect URL: "),
-      timeoutMs,
-      new Error(
-        `Timed out waiting for GitHub App OAuth code after ${timeoutMs}ms.\n` +
-          "Re-run bootstrap and complete the GitHub App creation within the time limit.",
-      ),
-    );
-    if (!code) {
-      throw new Error("No code entered. Please re-run bootstrap and paste the code from the redirect URL.");
+    // Prompt for App ID.
+    const appIdStr = await readLineFn("App ID (from the settings page): ");
+    const appId = parseInt(appIdStr.trim(), 10);
+    if (!appIdStr.trim() || isNaN(appId) || appId <= 0) {
+      throw new Error(
+        `Invalid App ID: "${appIdStr.trim()}". Expected a positive integer shown on the GitHub App settings page.`,
+      );
     }
 
-    return exchangeGitHubManifestCode(code, fetchFn);
+    // Prompt for private key — accept a .pem file path or inline paste.
+    let privateKey: string;
+    const pemPath = await readLineFn(
+      "Path to the downloaded .pem file (leave blank to paste the PEM instead): ",
+    );
+    if (pemPath.trim()) {
+      const content = await readFileFn(pemPath.trim());
+      privateKey = content;
+    } else {
+      const pastedPem = await readLineFn(
+        "Paste the PEM private key (use \\n for newlines if pasting as a single line): ",
+      );
+      if (!pastedPem.trim()) {
+        throw new Error(
+          "No private key provided. Re-run bootstrap and supply a .pem file path or paste the PEM.",
+        );
+      }
+      privateKey = pastedPem.trim().replace(/\\n/g, "\n");
+    }
+
+    if (!privateKey.includes("PRIVATE KEY")) {
+      throw new Error(
+        "The provided key does not look like a valid PEM (expected content containing 'PRIVATE KEY').",
+      );
+    }
+
+    return {
+      appId,
+      appName: "urateam",
+      privateKey: privateKey.trim(),
+      webhookSecret: generatedWebhookSecret,
+      clientId: "",
+      clientSecret: "",
+      htmlUrl: "",
+    };
   }
 
   // ── Browser path (original) ─────────────────────────────────────────────────
