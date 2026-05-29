@@ -356,6 +356,27 @@ export function pmSkippedAlreadyShippedEvent(args: {
   });
 }
 
+/** BEC-271 — PM tick cancelled a pipeline run that was paused at await-approval
+ *  for longer than the configured expiry threshold. */
+export function pmPausedRunExpiredEvent(args: {
+  runId: string;
+  issueId: string;
+  ageHours: number;
+  thresholdHours: number;
+}): AuditEvent {
+  return base({
+    eventType: "pm.paused_run_expired",
+    actor: "pm-agent",
+    actorType: "pm-agent",
+    runId: args.runId,
+    issueId: args.issueId,
+    payload: {
+      ageHours: args.ageHours,
+      thresholdHours: args.thresholdHours,
+    },
+  });
+}
+
 /** BEC-253 — `ura tick` CLI command invoked. */
 export function pmManualTickInvokedEvent(args: {
   actor: string;
