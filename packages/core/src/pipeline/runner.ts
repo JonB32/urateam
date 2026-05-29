@@ -905,10 +905,37 @@ export class PipelineRunner {
     // we start this second invocation with `hasInitiatedSession = true` —
     // every resumable stage uses the `resume:` shape, never re-creates the
     // session.
-    const runAgentSessionId = resumeOptions
+    // BEC-268 follow-up — `let` (not `const`) because the executor's
+    // collision-recovery path mints a fresh session ID and returns it in
+    // `StageResult.newSessionId`. Every executeStage call site below
+    // delegates to `applyCollisionRecovery(result)` to keep this in sync
+    // with `pipeline_runs.agent_session_id` between retries.
+    let runAgentSessionId = resumeOptions
       ? resumeOptions.agentSessionId
       : agentSessionId;
     let hasInitiatedSession = !!resumeOptions;
+
+    /**
+     * BEC-268 follow-up — when the executor minted a fresh session ID after
+     * an SDK collision, point the runner's local cache at the new ID and
+     * reset the "first resumable stage" flag so the next attempt creates
+     * (not resumes) with the fresh ID. Without this, the runner's
+     * `fix-and-retry` loop re-sends the original session ID on every retry
+     * and the SDK keeps refusing with "already in use" — see the BEC-270
+     * soak run on dogfood (`FNFokcgj5g2tQe9oe6_lw`).
+     */
+    const applyCollisionRecovery = (result: { newSessionId?: string }): void => {
+      if (result.newSessionId && result.newSessionId !== runAgentSessionId) {
+        runLog.warn(
+          { oldSessionId: runAgentSessionId, newSessionId: result.newSessionId },
+          "BEC-268: refreshing runAgentSessionId from collision-recovered StageResult",
+        );
+        runAgentSessionId = result.newSessionId;
+        // Fresh session — next resumable stage call must `create` (sessionId)
+        // not `resume`, because the new ID has never been seen by the SDK.
+        hasInitiatedSession = false;
+      }
+    };
 
     /**
      * Returns `true` for the first non-fresh stage in this run, flips the
@@ -1196,6 +1223,7 @@ export class PipelineRunner {
           agentSessionId: runAgentSessionId,
           isFirstResumableStage: isFirstResumableStageForMain,
         });
+        applyCollisionRecovery(result);
 
         // Operator stop check (cancel path) — the AbortController inside the
         // executor surfaces as result.status === "cancelled". Don't try to use
@@ -1325,6 +1353,7 @@ export class PipelineRunner {
               // that produced them.
               iteration,
             });
+            applyCollisionRecovery(result);
 
             // Accumulate each RALPH iteration's tokens
             run.totalInputTokens += result.inputTokens;
@@ -1384,6 +1413,7 @@ export class PipelineRunner {
                 agentSessionId: runAgentSessionId,
                 isFirstResumableStage: isFirstResumableStageForRetry,
               });
+              applyCollisionRecovery(result);
               if (result.status === "completed") break;
             } else if (config.retry.strategy === "escalate") {
               break;
@@ -1503,6 +1533,7 @@ export class PipelineRunner {
                   agentSessionId: runAgentSessionId,
                   isFirstResumableStage: isFirstResumableStageForValRetry,
                 });
+                applyCollisionRecovery(result);
                 if (result.status === "completed" && result.handoffArtifact) {
                   // BEC-227 — `isFirstResumableStageForValRetry` reflects the
                   // retry execution that just produced `result`. Same formula
@@ -1717,6 +1748,7 @@ export class PipelineRunner {
               promptOverride: surgicalPrompt,
               suppressHandoff: surgicalSuppressHandoff,
             });
+            applyCollisionRecovery(fixResult);
 
             // BEC-134: track latest review stage_run id for fanout persistence.
             if (fixStage === "review") {
@@ -2092,6 +2124,7 @@ export class PipelineRunner {
             agentSessionId: runAgentSessionId,
             isFirstResumableStage: isFirstResumableStageForDrImpl,
           });
+          applyCollisionRecovery(drImplementResult);
 
           run.totalInputTokens += drImplementResult.inputTokens;
           run.totalOutputTokens += drImplementResult.outputTokens;
@@ -2137,6 +2170,7 @@ export class PipelineRunner {
             agentSessionId: runAgentSessionId,
             isFirstResumableStage: isFirstResumableStageForDrReview,
           });
+          applyCollisionRecovery(drReviewResult);
 
           // BEC-134: refresh latest review stage_run id for any subsequent
           // fanout persistence inside this loop.
@@ -2602,6 +2636,7 @@ export class PipelineRunner {
               agentSessionId: runAgentSessionId,
               isFirstResumableStage: isFirstResumableStageForResolve,
             });
+            applyCollisionRecovery(resolveResult);
 
             run.totalInputTokens += resolveResult.inputTokens;
             run.totalOutputTokens += resolveResult.outputTokens;
