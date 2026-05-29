@@ -408,6 +408,15 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
           // BEC-209: update progress timestamp for hang detection, then
           // write to DB (fire-and-forget, rate-limited by progressIntervalMs).
           lastProgressAt = new Date();
+          // BEC-268 follow-up: capture cumulative tokens into outer scope so
+          // the catch block has a non-zero snapshot when the SDK throws mid-
+          // stream (e.g., "Reached maximum number of turns"). Without this,
+          // a 5-minute / 20-turn run that errors out records 0/0 in stage_runs.
+          // Accuracy is bounded by progressIntervalMs (worst case: tokens from
+          // the last progress tick).
+          inputTokens = stats.inputTokens;
+          outputTokens = stats.outputTokens;
+          turns = stats.turns;
           db.update(stageRuns)
             .set({ lastProgressAt })
             .where(eq(stageRuns.id, stageRunId))
@@ -537,15 +546,16 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       agentSessionId !== null &&
       /session id .* is already in use/i.test(capturedStderr);
 
+    let mintedSessionId: string | undefined;
     if (isSessionCollision) {
-      const newSessionId = randomUUID();
+      mintedSessionId = randomUUID();
       log.warn(
-        { oldSessionId: agentSessionId, newSessionId, stage },
+        { oldSessionId: agentSessionId, newSessionId: mintedSessionId, stage },
         "session ID collision detected — minting fresh session ID and marking retriable",
       );
       await db
         .update(pipelineRuns)
-        .set({ agentSessionId: newSessionId })
+        .set({ agentSessionId: mintedSessionId })
         .where(eq(pipelineRuns.id, runId));
       void logAuditEvent(
         db,
@@ -554,7 +564,7 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
           issueId,
           stage,
           oldSessionId: agentSessionId!,
-          newSessionId,
+          newSessionId: mintedSessionId,
         }),
       );
     }
@@ -614,6 +624,7 @@ Do NOT run build, test, or lint commands directly on the host — always use \`d
       turns,
       errorMessage: enrichedMessage,
       stageRunId,
+      ...(mintedSessionId ? { newSessionId: mintedSessionId } : {}),
     };
   } finally {
     // Always cancel the wall-clock timer regardless of exit path (BEC-249).

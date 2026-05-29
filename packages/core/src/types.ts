@@ -426,6 +426,12 @@ export interface StageResult {
    *  need to associate per-stage artifacts (e.g. `review_model_runs`) with the
    *  same row the executor inserted. Always populated by `executeStage`. */
   stageRunId: string;
+  /** BEC-268 follow-up — set when the executor's collision-recovery path minted
+   *  a fresh `agent_session_id` (and persisted it to `pipeline_runs`). Callers
+   *  that hold a local cache of the run's session id (e.g. runner.ts's
+   *  `runAgentSessionId`) MUST refresh from this value before the next retry,
+   *  otherwise the new attempt re-sends the original ID and collides again. */
+  newSessionId?: string;
 }
 
 // --- Pipeline Run ---
