@@ -122,8 +122,9 @@ export interface CreateGitHubAppOpts {
    */
   timeoutMs?: number;
   /**
-   * When true, skip the local HTTP server + browser and prompt the operator
-   * to paste the OAuth code from the redirect URL on stdin instead.
+   * When true, skip the local HTTP server + browser and guide the operator
+   * through manually capturing App ID, webhook secret, and private key from
+   * the GitHub App settings page via stdin prompts.
    * Auto-detected when DISPLAY and WAYLAND_DISPLAY are both unset on Linux.
    */
   headless?: boolean;
@@ -1395,9 +1396,9 @@ export const bootstrapCommand = new Command("bootstrap")
       const useHeadless = opts.headless || isHeadlessEnvironment();
 
       if (useHeadless) {
-        logger.info("[3/7] Creating GitHub App via headless flow — you will be prompted to paste the OAuth code.");
+        logger.info("[3/7] Creating GitHub App via URL-parameters flow — you will be prompted for App ID, webhook secret, and private key.");
       } else {
-        logger.info("[3/7] Creating GitHub App via manifest flow — a browser window will open.");
+        logger.info("[3/7] Creating GitHub App via browser OAuth flow — a browser window will open.");
       }
       try {
         appCredentials = await createGitHubApp({
