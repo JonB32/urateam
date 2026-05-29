@@ -5,6 +5,7 @@ import { createLogger } from "../../logger.js";
 import { removeActiveWork } from "../coordination.js";
 import { cleanupWorktrees } from "../../repo/git.js";
 import { logAuditEventUnchecked, pmPausedRunExpiredEvent } from "../../audit/index.js";
+import { parsePosIntOr } from "../../util/env.js";
 import type { LinearClient } from "@linear/sdk";
 
 const log = createLogger({ component: "PmAgent:sweep-paused-runs" });
@@ -24,8 +25,10 @@ export interface SweepExpiredPausedRunsResult {
  * For each expired run:
  *  1. Marks it cancelled with error_message='await-approval timeout after Nh'
  *  2. Removes its active_work entry
- *  3. Adds the 'needs-design' label to the Linear issue and posts a comment
- *  4. Emits a pm.paused_run_expired audit event
+ *  3. Emits a pm.paused_run_expired audit event
+ *
+ * After all DB changes complete, parallelizes best-effort Linear updates:
+ *  - Adds the 'needs-design' label and posts a comment per issue
  *
  * After all runs are processed, calls cleanupWorktrees(agentRunDir, thresholdHours) to
  * prune expired on-disk worktree directories.
@@ -92,7 +95,10 @@ export async function sweepExpiredPausedRuns(
   }
 
   const now = new Date();
-  const cancelledIssueIds: string[] = [];
+
+  // Phase 1: DB phase — sequential, critical. Collect successfully-cancelled runs.
+  type CancelledRun = { runId: string; issueId: string; ageHours: number };
+  const successfulRuns: CancelledRun[] = [];
 
   for (const run of expiredRuns) {
     const startedAt = run.startedAt ? new Date(run.startedAt as string | number) : null;
@@ -101,22 +107,19 @@ export async function sweepExpiredPausedRuns(
     const errorMessage = `await-approval timeout after ${ageHours}h`;
 
     try {
-      // 1. Mark the pipeline run cancelled in DB.
       await db
         .update(pipelineRuns)
         .set({ status: "cancelled", completedAt: now, errorMessage })
         .where(eq(pipelineRuns.id, run.id));
 
-      // 2. Remove active_work entry (removeActiveWork is already fail-open).
       await removeActiveWork(db, run.id);
 
-      // 3. Emit audit event (fire-and-forget via logAuditEventUnchecked).
       void logAuditEventUnchecked(
         db,
         pmPausedRunExpiredEvent({ runId: run.id, issueId: run.issueId, ageHours, thresholdHours }),
       );
 
-      cancelledIssueIds.push(run.issueId);
+      successfulRuns.push({ runId: run.id, issueId: run.issueId, ageHours });
       log.info(
         { runId: run.id, issueId: run.issueId, ageHours },
         "BEC-271: cancelled expired paused run",
@@ -126,43 +129,47 @@ export async function sweepExpiredPausedRuns(
         { err, runId: run.id, issueId: run.issueId },
         "BEC-271: failed to cancel expired paused run — skipping",
       );
-      continue;
-    }
-
-    // 4. Update the Linear issue (best-effort — DB change is already committed above).
-    try {
-      const searchResult = await linearClient.searchIssues(run.issueId, { first: 1 });
-      const issue = (searchResult.nodes as Array<{ id: string; labelIds: string[] }>)[0];
-
-      if (!issue) {
-        log.warn({ issueId: run.issueId }, "BEC-271: issue not found in Linear — skipping label update");
-        continue;
-      }
-
-      if (needsDesignLabelId) {
-        const merged = [...new Set([...issue.labelIds, needsDesignLabelId])];
-        await linearClient.updateIssue(issue.id, { labelIds: merged });
-      }
-
-      await linearClient.createComment({
-        issueId: issue.id,
-        body:
-          `🕐 **PM Agent — await-approval timeout**\n\n` +
-          `This run was waiting for human approval for **${ageHours}h** ` +
-          `(threshold: ${thresholdHours}h) and has been automatically cancelled.\n\n` +
-          `Please review the original triage, address any concerns, and re-open ` +
-          `the ticket when ready to retry.`,
-      });
-    } catch (err) {
-      log.warn(
-        { err, issueId: run.issueId },
-        "BEC-271: failed to update Linear issue — DB run is already cancelled",
-      );
     }
   }
 
-  // 5. Prune expired worktree directories (fail-open).
-  if (opts.agentRunDir && cancelledIssueIds.length > 0) {
+  // Phase 2: Linear phase — best-effort, parallelized across all cancelled runs.
+  await Promise.allSettled(
+    successfulRuns.map(async ({ issueId, ageHours }) => {
+      try {
+        const searchResult = await linearClient.searchIssues(issueId, { first: 1 });
+        const nodes = (searchResult.nodes ?? []) as Array<{ id: string; labelIds: string[] }>;
+        const issue = nodes[0];
+
+        if (!issue) {
+          log.warn({ issueId }, "BEC-271: issue not found in Linear — skipping label update");
+          return;
+        }
+
+        if (needsDesignLabelId) {
+          const merged = [...new Set([...issue.labelIds, needsDesignLabelId])];
+          await linearClient.updateIssue(issue.id, { labelIds: merged });
+        }
+
+        await linearClient.createComment({
+          issueId: issue.id,
+          body:
+            `🕐 **PM Agent — await-approval timeout**\n\n` +
+            `This run was waiting for human approval for **${ageHours}h** ` +
+            `(threshold: ${thresholdHours}h) and has been automatically cancelled.\n\n` +
+            `Please review the original triage, address any concerns, and re-open ` +
+            `the ticket when ready to retry.`,
+        });
+      } catch (err) {
+        log.warn(
+          { err, issueId },
+          "BEC-271: failed to update Linear issue — DB run is already cancelled",
+        );
+      }
+    }),
+  );
+
+  // Phase 3: Prune expired worktree directories (fail-open).
+  if (opts.agentRunDir && successfulRuns.length > 0) {
     try {
       const pruned = await cleanupWorktrees(opts.agentRunDir, thresholdHours);
       if (pruned.length > 0) {
@@ -176,14 +183,14 @@ export async function sweepExpiredPausedRuns(
     }
   }
 
+  const cancelledIssueIds = successfulRuns.map((r) => r.issueId);
   return { cancelled: cancelledIssueIds.length, issueIds: cancelledIssueIds };
 }
 
 /**
  * Parse PM_AGENT_AWAIT_APPROVAL_MAX_AGE_MIN env var.
- * Default: 4320 minutes (72 hours). Clamps to ≥1 minute.
+ * Default: 4320 minutes (72 hours). Returns fallback for missing/zero/negative/non-integer values.
  */
 export function parsePausedRunMaxAgeMinutes(envValue: string | undefined): number {
-  const parsed = parseInt(envValue ?? "", 10);
-  return isNaN(parsed) ? DEFAULT_MAX_AGE_MINUTES : Math.max(1, parsed);
+  return parsePosIntOr(envValue, DEFAULT_MAX_AGE_MINUTES);
 }

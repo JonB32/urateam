@@ -29,6 +29,7 @@ import { makeCallClaude } from "./call-claude.js";
 import { sanitize } from "../executor/prompt/sanitizer.js";
 import { resolveWorkflowStates, createLazyLinearClient } from "./linear-helpers.js";
 import { sql, inArray } from "drizzle-orm";
+import { parsePosIntOr } from "../util/env.js";
 import { createLogger } from "../logger.js";
 import { logAuditEventUnchecked, budgetRefusedEvent, pruneAuditLog, claudeAuthExpiredEvent } from "../audit/index.js";
 import { pruneExpiredSessions } from "../auth/index.js";
@@ -58,8 +59,7 @@ function captureTickError(tick: TickResult, key: string, err: unknown, msg: stri
  * mis-configured deployments.
  */
 export function parseStuckRunAgeMinutes(envValue: string | undefined): number {
-  const parsed = parseInt(envValue ?? "", 10);
-  return isNaN(parsed) ? 120 : Math.max(1, parsed);
+  return parsePosIntOr(envValue, 120);
 }
 
 export interface PmSchedulerDeps {

@@ -45,11 +45,11 @@ describe("BEC-271 Part 1: sweepExpiredPausedRuns now exists (fix verified)", () 
     expect(parsePausedRunMaxAgeMinutes("not-a-number")).toBe(4320);
   });
 
-  it("parsePausedRunMaxAgeMinutes honours valid override and clamps to >=1", async () => {
+  it("parsePausedRunMaxAgeMinutes honours valid override; zero/negative fall back to default", async () => {
     const { parsePausedRunMaxAgeMinutes } = await import("../pm/actions/sweep-paused-runs.js");
     expect(parsePausedRunMaxAgeMinutes("60")).toBe(60);
-    expect(parsePausedRunMaxAgeMinutes("0")).toBe(1); // clamp
-    expect(parsePausedRunMaxAgeMinutes("-5")).toBe(1); // clamp
+    expect(parsePausedRunMaxAgeMinutes("0")).toBe(4320); // invalid → default
+    expect(parsePausedRunMaxAgeMinutes("-5")).toBe(4320); // invalid → default
   });
 
   it("PM_AGENT_AWAIT_APPROVAL_MAX_AGE_MIN is consumed by parsePausedRunMaxAgeMinutes", async () => {
