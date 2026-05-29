@@ -816,74 +816,114 @@ describe("createGitHubApp() — browser path", () => {
 // createGitHubApp — headless path
 // ---------------------------------------------------------------------------
 
+const FAKE_PEM =
+  "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0Z3VS5JJcds3xHn/ygWep4\n-----END RSA PRIVATE KEY-----";
+
 describe("createGitHubApp() — headless path", () => {
-  it("prints the manifest URL and prompts for code via readLine", async () => {
+  it("prints the URL-parameters URL (not the manifest exchange URL)", async () => {
     const logs: string[] = [];
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        id: 42,
-        name: "urateam",
-        pem: "-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----",
-        webhook_secret: "wh_secret",
-        client_id: "Iv1.abc",
-        client_secret: "cs_secret",
-        html_url: "https://github.com/apps/urateam",
-      }),
-      text: async () => "",
-    });
+    let readLineCallCount = 0;
 
     const creds = await createGitHubApp({
       headless: true,
-      timeoutMs: 5_000,
       deps: {
         log: (msg) => logs.push(msg),
-        readLine: async (_prompt) => "test_oauth_code_123",
-        fetch: mockFetch,
-        isPortFree: async () => true,
+        // Call 1: App ID, Call 2: pem path (blank → paste), Call 3: paste PEM
+        readLine: async (_prompt) => {
+          readLineCallCount++;
+          if (readLineCallCount === 1) return "42";
+          if (readLineCallCount === 2) return ""; // blank → paste mode
+          return FAKE_PEM;
+        },
+        unlink: async () => {},
+        writeFile: vi.fn().mockResolvedValue(undefined),
       },
     });
 
-    // Should have logged the GitHub URL.
     const allLogs = logs.join("\n");
+    // Must print the URL-parameters GitHub URL.
     expect(allLogs).toContain("https://github.com/settings/apps/new");
-    expect(allLogs).toContain("localhost:");
+    // Must include URL-params style (name= query param) not manifest= form field.
+    expect(allLogs).toContain("name=");
+    // Must show the generated webhook secret for the operator to copy.
+    expect(allLogs).toMatch(/webhook secret/i);
 
-    // Should have called the manifest exchange endpoint.
-    expect(mockFetch).toHaveBeenCalledOnce();
-    const [url] = mockFetch.mock.calls[0] as [string];
-    expect(url).toContain("test_oauth_code_123");
-
-    // Should return valid credentials.
+    // Must return valid credentials built from operator input.
     expect(creds.appId).toBe(42);
     expect(creds.appName).toBe("urateam");
     expect(creds.privateKey).toContain("RSA PRIVATE KEY");
+    expect(creds.webhookSecret).toBeTruthy();
+    expect(creds.webhookSecret).toHaveLength(64); // 32 random bytes → 64 hex chars
+    // clientId and clientSecret are empty (not needed for App-auth).
+    expect(creds.clientId).toBe("");
+    expect(creds.clientSecret).toBe("");
   });
 
-  it("constructs an org URL in headless mode", async () => {
-    const logs: string[] = [];
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        id: 99,
-        name: "urateam",
-        pem: "pem",
-        webhook_secret: "s",
-        client_id: "c",
-        client_secret: "cs",
-        html_url: "https://github.com/apps/urateam",
-      }),
-      text: async () => "",
+  it("loads the private key from a .pem file when a path is provided", async () => {
+    let readLineCallCount = 0;
+    const pemContent = FAKE_PEM;
+
+    const creds = await createGitHubApp({
+      headless: true,
+      deps: {
+        log: () => {},
+        readLine: async (_prompt) => {
+          readLineCallCount++;
+          if (readLineCallCount === 1) return "99"; // App ID
+          return "/tmp/test-app.pem"; // pem file path
+        },
+        readFile: async (_path) => pemContent,
+        unlink: async () => {},
+        writeFile: vi.fn().mockResolvedValue(undefined),
+      },
     });
+
+    expect(creds.appId).toBe(99);
+    expect(creds.privateKey).toContain("RSA PRIVATE KEY");
+  });
+
+  it("accepts pasted PEM with literal \\n escapes and normalises them", async () => {
+    let readLineCallCount = 0;
+    const oneLinerPem =
+      "-----BEGIN RSA PRIVATE KEY-----\\nMIIEpAI\\n-----END RSA PRIVATE KEY-----";
+
+    const creds = await createGitHubApp({
+      headless: true,
+      deps: {
+        log: () => {},
+        readLine: async (_prompt) => {
+          readLineCallCount++;
+          if (readLineCallCount === 1) return "7"; // App ID
+          if (readLineCallCount === 2) return ""; // blank path → paste mode
+          return oneLinerPem;
+        },
+        unlink: async () => {},
+        writeFile: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    // \\n in pasted input must be expanded to real newlines.
+    expect(creds.privateKey).toContain("\n");
+    expect(creds.privateKey).not.toContain("\\n");
+  });
+
+  it("constructs an org-scoped URL when org is provided", async () => {
+    const logs: string[] = [];
+    let callCount = 0;
 
     await createGitHubApp({
       headless: true,
       org: "acme-corp",
-      timeoutMs: 5_000,
       deps: {
         log: (msg) => logs.push(msg),
-        readLine: async () => "code_for_org",
-        fetch: mockFetch,
+        readLine: async () => {
+          callCount++;
+          if (callCount === 1) return "55";
+          if (callCount === 2) return "";
+          return FAKE_PEM;
+        },
+        unlink: async () => {},
+        writeFile: vi.fn().mockResolvedValue(undefined),
       },
     });
 
@@ -891,78 +931,118 @@ describe("createGitHubApp() — headless path", () => {
     expect(allLogs).toContain("organizations/acme-corp");
   });
 
-  it("throws when no code is pasted (empty input)", async () => {
+  it("throws when App ID is empty", async () => {
     await expect(
       createGitHubApp({
         headless: true,
-        timeoutMs: 5_000,
         deps: {
           log: () => {},
-          readLine: async () => "", // user pressed Enter without pasting
-          fetch: vi.fn(),
+          readLine: async (_prompt) => "", // empty App ID
+          unlink: async () => {},
+          writeFile: vi.fn().mockResolvedValue(undefined),
         },
       }),
-    ).rejects.toThrow(/no code entered/i);
+    ).rejects.toThrow(/invalid app id/i);
   });
 
-  it("throws on timeout when readLine never resolves within timeoutMs", async () => {
+  it("throws when App ID is not a valid integer", async () => {
     await expect(
       createGitHubApp({
         headless: true,
-        timeoutMs: 50, // Very short
         deps: {
           log: () => {},
-          // readLine blocks forever
-          readLine: () => new Promise(() => {}),
-          fetch: vi.fn(),
+          readLine: async (_prompt) => "not-a-number",
+          unlink: async () => {},
+          writeFile: vi.fn().mockResolvedValue(undefined),
         },
       }),
-    ).rejects.toThrow(/timed out/i);
-  }, 5_000);
+    ).rejects.toThrow(/invalid app id/i);
+  });
 
-  it("throws when the manifest exchange returns a non-ok HTTP status", async () => {
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 422,
-      text: async () => "Unprocessable Entity",
-    });
-
+  it("throws when no private key is provided (blank path and blank paste)", async () => {
+    let callCount = 0;
     await expect(
       createGitHubApp({
         headless: true,
-        timeoutMs: 5_000,
         deps: {
           log: () => {},
-          readLine: async () => "some_code",
-          fetch: mockFetch,
+          readLine: async () => {
+            callCount++;
+            if (callCount === 1) return "12"; // valid App ID
+            return ""; // blank path and blank paste
+          },
+          unlink: async () => {},
+          writeFile: vi.fn().mockResolvedValue(undefined),
         },
       }),
-    ).rejects.toThrow(/422/);
+    ).rejects.toThrow(/no private key/i);
+  });
+
+  it("throws when the pasted text is not a valid PEM", async () => {
+    let callCount = 0;
+    await expect(
+      createGitHubApp({
+        headless: true,
+        deps: {
+          log: () => {},
+          readLine: async () => {
+            callCount++;
+            if (callCount === 1) return "12";
+            if (callCount === 2) return ""; // blank path → paste mode
+            return "this-is-not-a-pem";
+          },
+          unlink: async () => {},
+          writeFile: vi.fn().mockResolvedValue(undefined),
+        },
+      }),
+    ).rejects.toThrow(/private key/i);
   });
 
   it("does not call openBrowser in headless mode", async () => {
     const openBrowserSpy = vi.fn();
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        id: 1, name: "u", pem: "p", webhook_secret: "w",
-        client_id: "c", client_secret: "cs", html_url: "h",
-      }),
-      text: async () => "",
-    });
+    let callCount = 0;
 
     await createGitHubApp({
       headless: true,
-      timeoutMs: 5_000,
       deps: {
         log: () => {},
-        readLine: async () => "code_abc",
+        readLine: async () => {
+          callCount++;
+          if (callCount === 1) return "1";
+          if (callCount === 2) return "";
+          return FAKE_PEM;
+        },
         openBrowser: openBrowserSpy,
-        fetch: mockFetch,
+        unlink: async () => {},
+        writeFile: vi.fn().mockResolvedValue(undefined),
       },
     });
 
     expect(openBrowserSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not call the GitHub API (no fetch needed)", async () => {
+    const fetchSpy = vi.fn();
+    let callCount = 0;
+
+    await createGitHubApp({
+      headless: true,
+      deps: {
+        log: () => {},
+        readLine: async () => {
+          callCount++;
+          if (callCount === 1) return "1";
+          if (callCount === 2) return "";
+          return FAKE_PEM;
+        },
+        fetch: fetchSpy,
+        unlink: async () => {},
+        writeFile: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    // The new headless path never calls the GitHub API.
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 
