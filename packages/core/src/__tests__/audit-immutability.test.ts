@@ -72,6 +72,9 @@ describe("audit_events immutability", () => {
       // BEC-252: restart-interrupt recovery is a base-tier operational signal —
       // operators need to see it regardless of Enterprise audit-log dashboard.
       "packages/core/src/pm/actions/recover.ts",
+      // BEC-271: paused-run expiry is a base-tier operational signal — operators
+      // need to see expired awaits regardless of Enterprise audit-log license.
+      "packages/core/src/pm/actions/sweep-paused-runs.ts",
       "packages/core/src/pipeline/review-providers-runner.ts",
       "packages/core/src/release-manager/release-tick.ts",
       "packages/core/src/release-manager/release-helpers.ts",
@@ -93,6 +96,7 @@ describe("audit_events immutability", () => {
       "packages/core/src/qa/github.ts",
       "packages/core/src/qa/gap.ts",
       "packages/core/src/__tests__/audit-immutability.test.ts",
+      "packages/core/src/__tests__/bec-271-sweep-paused-runs.test.ts",
       // Tier 2: the convention-checklist text documents the
       // `audit-bypass-undocumented` category by name (`logAuditEventUnchecked`
       // appears as a literal in the prompt fragment, not as a call site).
