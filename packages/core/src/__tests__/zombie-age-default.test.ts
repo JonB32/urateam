@@ -18,9 +18,9 @@ describe("PM_AGENT_STUCK_RUN_AGE_MIN default (BEC-227 / BEC-184 tuning)", () => 
     expect(parseStuckRunAgeMinutes("90")).toBe(90);
   });
 
-  it("clamps zero/negative to 1 minute (mis-config guard)", () => {
-    expect(parseStuckRunAgeMinutes("0")).toBe(1);
-    expect(parseStuckRunAgeMinutes("-5")).toBe(1);
+  it("zero/negative fall back to default (mis-config guard)", () => {
+    expect(parseStuckRunAgeMinutes("0")).toBe(120);
+    expect(parseStuckRunAgeMinutes("-5")).toBe(120);
   });
 
   it("large values pass through", () => {

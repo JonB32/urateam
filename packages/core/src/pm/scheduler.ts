@@ -16,6 +16,7 @@ import { getCircuitBreakerProbeConfig } from "./actions/circuit-breaker-config.j
 import { selectProbeCandidates } from "./actions/select-probe-candidates.js";
 import { sweepRecoveredCircuitBreakers } from "./actions/sweep-recovered-circuit-breakers.js";
 import { sweepOrphanStageRuns } from "./actions/sweep-orphan-stage-runs.js";
+import { sweepExpiredPausedRuns, parsePausedRunMaxAgeMinutes } from "./actions/sweep-paused-runs.js";
 import { getActiveFileMaps, predictConflict, type ActiveRun } from "./conflict.js";
 import { fetchCircuitBrokenIssues, ACTIVE_STATUSES } from "./actions/db-queries.js";
 import { PmSlackNotifier } from "./slack.js";
@@ -28,6 +29,7 @@ import { makeCallClaude } from "./call-claude.js";
 import { sanitize } from "../executor/prompt/sanitizer.js";
 import { resolveWorkflowStates, createLazyLinearClient } from "./linear-helpers.js";
 import { sql, inArray } from "drizzle-orm";
+import { parsePosIntOr } from "../util/env.js";
 import { createLogger } from "../logger.js";
 import { logAuditEventUnchecked, budgetRefusedEvent, pruneAuditLog, claudeAuthExpiredEvent } from "../audit/index.js";
 import { pruneExpiredSessions } from "../auth/index.js";
@@ -57,8 +59,7 @@ function captureTickError(tick: TickResult, key: string, err: unknown, msg: stri
  * mis-configured deployments.
  */
 export function parseStuckRunAgeMinutes(envValue: string | undefined): number {
-  const parsed = parseInt(envValue ?? "", 10);
-  return isNaN(parsed) ? 120 : Math.max(1, parsed);
+  return parsePosIntOr(envValue, 120);
 }
 
 export interface PmSchedulerDeps {
@@ -349,6 +350,26 @@ export function createPmScheduler(deps: PmSchedulerDeps): PmScheduler {
             await sweepOrphanStageRuns(db);
           } catch (err) {
             log.warn({ err }, "orphan stage_runs sweep failed");
+          }
+        }
+
+        // BEC-271 — paused-run expiry sweep: cancel pipeline_runs that have been
+        // paused at await-approval beyond the configured threshold (default 72h).
+        // Guarded by !actions (same pattern as orphan sweep above).
+        if (!actions) {
+          try {
+            const linearClient = await getLinearClient();
+            if (linearClient) {
+              const thresholdMinutes = parsePausedRunMaxAgeMinutes(
+                process.env.PM_AGENT_AWAIT_APPROVAL_MAX_AGE_MIN,
+              );
+              await sweepExpiredPausedRuns(db, linearClient, {
+                thresholdMinutes,
+                agentRunDir: deps.agentRunDir,
+              });
+            }
+          } catch (err) {
+            log.warn({ err }, "paused-run expiry sweep failed");
           }
         }
 

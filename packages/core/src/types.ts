@@ -691,6 +691,12 @@ export const AuditEventTypeSchema = z.enum([
    *  the recovery loop retries with the new ID. Payload: `runId`, `issueId`,
    *  `stage`, `oldSessionId`, `newSessionId`. */
   "pipeline.agent_session_collision_recovered",
+  /** BEC-271 — PM tick swept a pipeline run that had been paused at the
+   *  await-approval stage for longer than PM_AGENT_AWAIT_APPROVAL_MAX_AGE_MIN
+   *  (default 72h). The run was cancelled, its active_work entry removed, the
+   *  Linear issue labelled needs-design, and a comment posted. Payload:
+   *  `runId`, `issueId`, `ageHours` (rounded), `thresholdHours`. */
+  "pm.paused_run_expired",
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 
