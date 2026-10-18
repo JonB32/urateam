@@ -25,7 +25,7 @@ importers:
     dependencies:
       '@hono/node-server':
         specifier: ^1.14.0
-        version: 1.19.13(hono@4.12.12)
+        version: 1.19.13(hono@4.13.7)
       '@linear/sdk':
         specifier: ^29.0.0
         version: 29.0.0
@@ -68,7 +68,7 @@ importers:
         version: 0.2.101(zod@4.3.6)
       '@hono/node-server':
         specifier: ^1.14.0
-        version: 1.19.13(hono@4.12.12)
+        version: 1.19.13(hono@4.13.7)
       '@linear/sdk':
         specifier: ^29.0.0
         version: 29.0.0
@@ -88,8 +88,8 @@ importers:
         specifier: ^0.38.0
         version: 0.38.4(@types/better-sqlite3@7.6.13)(better-sqlite3@11.10.0)(postgres@3.4.9)
       hono:
-        specifier: ^4.7.0
-        version: 4.12.12
+        specifier: ^4.13.7
+        version: 4.13.7
       nanoid:
         specifier: ^5.0.0
         version: 5.1.7
@@ -142,7 +142,7 @@ importers:
     dependencies:
       '@hono/node-server':
         specifier: ^1.14.0
-        version: 1.19.13(hono@4.12.12)
+        version: 1.19.13(hono@4.13.7)
       '@urateam/core':
         specifier: workspace:*
         version: link:../core
@@ -153,8 +153,8 @@ importers:
         specifier: ^0.38.0
         version: 0.38.4(@types/better-sqlite3@7.6.13)(better-sqlite3@11.10.0)(postgres@3.4.9)
       hono:
-        specifier: ^4.7.0
-        version: 4.12.12
+        specifier: ^4.13.7
+        version: 4.13.7
     devDependencies:
       typescript:
         specifier: ^5.7.0
@@ -214,11 +214,11 @@ packages:
 
   '@esbuild-kit/core-utils@3.3.2':
     resolution: {integrity: sha512-sPRAnw9CdSsRmEtnsl2WXWdyquogVpB3yZ3dgwJfe8zrOzTsV7cJvmwrKVa+0ma5BoiGJ+BoqkMvawbayKUsqQ==}
-    deprecated: 'Merged into tsx: https://tsx.is'
+    deprecated: 'Merged into tsx: https://tsx.hirok.io'
 
   '@esbuild-kit/esm-loader@2.6.5':
     resolution: {integrity: sha512-FxEMIkJKnodyA1OaCUoEvbYRkoZlLZ4d/eXFu9Fh8CbBBgP5EmZxrfTRyN0qpXZ4vOvqnE5YdRdcrmUUXuU+dA==}
-    deprecated: 'Merged into tsx: https://tsx.is'
+    deprecated: 'Merged into tsx: https://tsx.hirok.io'
 
   '@esbuild/aix-ppc64@0.19.12':
     resolution: {integrity: sha512-bmoCYyWdEL3wDQIVbcyzRyeKLgk2WtWLTWz1ZIAZF/EGbNOwSA6ew3PftJ1PqMiOOGu0OyFMzG53L0zqIpPeNA==}
@@ -1460,8 +1460,8 @@ packages:
     resolution: {integrity: sha512-0hJU9SCPvmMzIBdZFqNPXWa6dqh7WdH0cII9y+CyS8rG3nL48Bclra9HmKhVVUHyPWNH5Y7xDwAB7bfgSjkUMQ==}
     engines: {node: '>= 0.4'}
 
-  hono@4.12.12:
-    resolution: {integrity: sha512-p1JfQMKaceuCbpJKAPKVqyqviZdS0eUxH9v82oWo1kb9xjQ5wA6iP3FNVAPDFlz5/p7d45lO+BpSk1tuSZMF4Q==}
+  hono@4.13.7:
+    resolution: {integrity: sha512-c8/gF9ac8Y78/agExVocyLevgR+JlpNB444Py0FSX8pJoPdYUfUzRcXtYEYGwt6l19qIlVZPN5Mfsw9jFShmQQ==}
     engines: {node: '>=16.9.0'}
 
   http-errors@2.0.1:
@@ -2278,9 +2278,9 @@ snapshots:
     dependencies:
       graphql: 15.10.2
 
-  '@hono/node-server@1.19.13(hono@4.12.12)':
+  '@hono/node-server@1.19.13(hono@4.13.7)':
     dependencies:
-      hono: 4.12.12
+      hono: 4.13.7
 
   '@img/sharp-darwin-arm64@0.34.5':
     optionalDependencies:
@@ -2356,7 +2356,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.29.0(zod@4.3.6)':
     dependencies:
-      '@hono/node-server': 1.19.13(hono@4.12.12)
+      '@hono/node-server': 1.19.13(hono@4.13.7)
       ajv: 8.18.0
       ajv-formats: 3.0.1(ajv@8.18.0)
       content-type: 1.0.5
@@ -2366,7 +2366,7 @@ snapshots:
       eventsource-parser: 3.0.6
       express: 5.2.1
       express-rate-limit: 8.3.2(express@5.2.1)
-      hono: 4.12.12
+      hono: 4.13.7
       jose: 6.2.2
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
@@ -3043,7 +3043,7 @@ snapshots:
     dependencies:
       function-bind: 1.1.2
 
-  hono@4.12.12: {}
+  hono@4.13.7: {}
 
   http-errors@2.0.1:
     dependencies:

@@ -24,7 +24,7 @@
     "@urateam/core": "workspace:*",
     "@workos-inc/node": "^8.13.0",
     "drizzle-orm": "^0.38.0",
-    "hono": "^4.7.0"
+    "hono": "^4.13.7"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
